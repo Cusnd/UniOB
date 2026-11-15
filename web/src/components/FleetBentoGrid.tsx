@@ -4,10 +4,18 @@ import {
   MetricBar,
   ObservabilityChart,
   StatusDot,
-  formatBytesPerSec,
   type StatusDotTone,
 } from "./ui/Primitives";
-import type { DensityMode, HorizonNode, InspectorTab } from "../types";
+import type {
+  CardPrimaryMetric,
+  DensityMode,
+  HorizonNode,
+  InspectorTab,
+} from "../types";
+import {
+  resolvePrimaryMetricCard,
+  type BottomMetricSlot,
+} from "../utils/cardMetrics";
 import {
   formatBytes,
   getDiskUsagePct,
@@ -21,6 +29,7 @@ import {
 export interface FleetBentoGridProps {
   nodes: HorizonNode[];
   density?: DensityMode;
+  primaryMetric?: CardPrimaryMetric;
   onSelectNode: (node: HorizonNode, initialTab?: InspectorTab) => void;
   onMuteNode?: (nodeId: string, seconds: number | null) => void | Promise<void>;
 }
@@ -48,9 +57,90 @@ function getTrafficBarPct(node: HorizonNode): number {
   return Math.min(100, (node.traffic.counted_bytes / fiveTb) * 100);
 }
 
+function formatCompactRate(bps: number): string {
+  if (!Number.isFinite(bps) || bps <= 0) return "0";
+  const units = ["B", "K", "M", "G", "T"];
+  const idx = Math.min(
+    Math.floor(Math.log(bps) / Math.log(1024)),
+    units.length - 1,
+  );
+  const val = bps / Math.pow(1024, idx);
+  const num = idx === 0 || val >= 100 ? Math.round(val).toString() : val.toFixed(1);
+  return `${num}${units[idx]}`;
+}
+
+function getBottomMetricProps(
+  slot: BottomMetricSlot,
+  node: HorizonNode,
+): { label: string; valueLabel: string; valuePct: number } {
+  const online = node.online;
+  const m = node.metrics;
+  switch (slot) {
+    case "cpu": {
+      const cpuPct = online && m ? m.cpu.all : 0;
+      return {
+        label: "CPU",
+        valueLabel: online && m ? `${cpuPct.toFixed(0)}%` : "—",
+        valuePct: cpuPct,
+      };
+    }
+    case "mem": {
+      const memPct = online ? getMemUsagePct(node) : 0;
+      const memTotal = getMemTotalBytes(node);
+      return {
+        label: "内存",
+        valueLabel:
+          online && m && memTotal > 0
+            ? `${formatBytes(m.mem.used)} / ${formatBytes(memTotal)}`
+            : "—",
+        valuePct: memPct,
+      };
+    }
+    case "net": {
+      const rx = online && m ? m.net.rx_bps : 0;
+      const tx = online && m ? m.net.tx_bps : 0;
+      const total = rx + tx;
+      // Scale rate activity softly on a 100 MiB/s reference bar
+      const refBps = 100 * 1024 * 1024;
+      const activityPct =
+        online && m && total > 0 ? Math.min(100, Math.max(4, (total / refBps) * 100)) : 0;
+      return {
+        label: "实时网络",
+        valueLabel:
+          online && m
+            ? `↓${formatCompactRate(rx)} ↑${formatCompactRate(tx)}`
+            : "—",
+        valuePct: activityPct,
+      };
+    }
+    case "disk": {
+      const rootDisk = getRootDisk(m?.disks);
+      return {
+        label: "磁盘",
+        valueLabel: rootDisk
+          ? `${formatBytes(rootDisk.used)} / ${formatBytes(rootDisk.total)}`
+          : "—",
+        valuePct: getDiskUsagePct(rootDisk),
+      };
+    }
+    case "traffic": {
+      const hasLimit =
+        node.traffic.limit_bytes !== null && node.traffic.limit_bytes > 0;
+      return {
+        label: "流量",
+        valueLabel: hasLimit
+          ? `${formatBytes(node.traffic.counted_bytes)} / ${formatBytes(node.traffic.limit_bytes)}`
+          : formatBytes(node.traffic.counted_bytes),
+        valuePct: getTrafficBarPct(node),
+      };
+    }
+  }
+}
+
 export function FleetBentoGrid({
   nodes,
   density = "comfortable",
+  primaryMetric = "net",
   onSelectNode,
 }: FleetBentoGridProps): React.JSX.Element {
   return (
@@ -61,30 +151,10 @@ export function FleetBentoGrid({
     >
       {nodes.map((node) => {
         const statusTone = getNodeStatusTone(node);
-        const cpuPct = node.online && node.metrics ? node.metrics.cpu.all : 0;
-        const memPct = node.online ? getMemUsagePct(node) : 0;
-        const memTotal = getMemTotalBytes(node);
-        const rootDisk = getRootDisk(node.metrics?.disks);
-        const diskPct = getDiskUsagePct(rootDisk);
-        const trafficBarPct = getTrafficBarPct(node);
-        const hasLimit =
-          node.traffic.limit_bytes !== null && node.traffic.limit_bytes > 0;
         const muted = isNodeMuted(node);
         const regionText = node.group_name || node.region_code;
-
-        const rxData =
-          node.online && node.sparkline_rx.length > 0
-            ? node.sparkline_rx
-            : node.online && node.metrics
-              ? [node.metrics.net.rx_bps, node.metrics.net.rx_bps]
-              : [0, 0];
-
-        const txData =
-          node.online && node.sparkline_tx.length > 0
-            ? node.sparkline_tx
-            : node.online && node.metrics
-              ? [node.metrics.net.tx_bps, node.metrics.net.tx_bps]
-              : [0, 0];
+        const plot = resolvePrimaryMetricCard(node, primaryMetric);
+        const barTone = node.online ? undefined : "muted";
 
         return (
           <article
@@ -109,7 +179,12 @@ export function FleetBentoGrid({
             <div className="flex items-center justify-between gap-3">
               <div className="flex min-w-0 items-center gap-2">
                 <StatusDot tone={statusTone} />
-                <h3 className="truncate text-[14.5px] font-semibold tracking-[-0.01em]">
+                <h3
+                  style={
+                    node.online ? undefined : { color: "var(--text-secondary)" }
+                  }
+                  className="truncate text-[14.5px] font-semibold tracking-[-0.01em]"
+                >
                   {node.name}
                 </h3>
                 {muted && <Badge tone="subtle">静音</Badge>}
@@ -126,7 +201,7 @@ export function FleetBentoGrid({
               </span>
             </div>
 
-            {/* Live Network RX/TX Observability Chart */}
+            {/* Primary Metric Observability Chart or Calm Offline Baseline */}
             <div
               style={{
                 backgroundColor: "var(--bg-card)",
@@ -137,89 +212,93 @@ export function FleetBentoGrid({
             >
               <div className="mb-1.5 flex items-baseline justify-between gap-2">
                 <span
-                  style={{ color: "var(--text-tertiary)" }}
+                  style={{
+                    color: node.online
+                      ? "var(--text-tertiary)"
+                      : "var(--text-muted)",
+                  }}
                   className="text-[11.5px]"
                 >
-                  实时网络
+                  {plot.heroLabel}
                 </span>
-                {node.online && node.metrics ? (
-                  <div className="font-mono-num flex items-center gap-2.5 text-[12px] font-medium">
-                    <span style={{ color: "var(--accent-ink)" }}>
-                      ↓ {formatBytesPerSec(node.metrics.net.rx_bps)}
+                {plot.hasLiveChart ? (
+                  plot.netRatePair ? (
+                    <div className="font-mono-num flex items-center gap-2.5 text-[12px] font-medium">
+                      <span style={{ color: "var(--accent-ink)" }}>
+                        ↓ {plot.netRatePair.rx}
+                      </span>
+                      <span style={{ color: "var(--status-ok-ink)" }}>
+                        ↑ {plot.netRatePair.tx}
+                      </span>
+                    </div>
+                  ) : (
+                    <span
+                      style={{ color: "var(--text-primary)" }}
+                      className="font-mono-num text-[12px] font-medium"
+                    >
+                      {plot.primaryValueText}
                     </span>
-                    <span style={{ color: "var(--status-ok-ink)" }}>
-                      ↑ {formatBytesPerSec(node.metrics.net.tx_bps)}
-                    </span>
-                  </div>
+                  )
                 ) : (
                   <span
                     style={{ color: "var(--text-muted)" }}
                     className="font-mono-num text-[12px]"
                   >
-                    —
+                    {plot.primaryValueText}
                   </span>
                 )}
               </div>
 
-              <ObservabilityChart
-                height={82}
-                isRateBps
-                ariaLabel={`${node.name} 实时网络吞吐`}
-                series={[
-                  {
-                    label: "↓",
-                    color: "var(--accent)",
-                    data: rxData,
-                  },
-                  {
-                    label: "↑",
-                    color: "var(--status-ok)",
-                    data: txData,
-                  },
-                ]}
-              />
+              {plot.hasLiveChart ? (
+                <ObservabilityChart
+                  height={82}
+                  isRateBps={plot.unitKind === "bps"}
+                  yMax={plot.yMax}
+                  yUnit={plot.yUnit}
+                  ariaLabel={`${node.name} ${plot.heroLabel}`}
+                  series={plot.series}
+                />
+              ) : (
+                <div
+                  style={{ height: 82 }}
+                  className="relative flex items-center justify-center"
+                  aria-label={`${node.name} ${plot.placeholderText}`}
+                >
+                  <div
+                    style={{ borderTop: "1px dashed var(--border-subtle)" }}
+                    className="pointer-events-none absolute inset-x-0 top-1/2"
+                  />
+                  <span
+                    style={{
+                      backgroundColor: "var(--bg-card)",
+                      color: "var(--text-muted)",
+                    }}
+                    className="relative px-2.5 text-[11.5px]"
+                  >
+                    {plot.placeholderText}
+                  </span>
+                </div>
+              )}
             </div>
 
-            {/* 4 Clean Visual Bars: CPU / 内存 / 磁盘 / 流量 */}
-            <div className="grid grid-cols-2 gap-x-4 gap-y-3">
-              <MetricBar
-                label="CPU"
-                valueLabel={
-                  node.online && node.metrics ? `${cpuPct.toFixed(0)}%` : "—"
-                }
-                valuePct={cpuPct}
-                thickness={3}
-              />
-              <MetricBar
-                label="内存"
-                valueLabel={
-                  node.online && node.metrics && memTotal > 0
-                    ? `${formatBytes(node.metrics.mem.used)} / ${formatBytes(memTotal)}`
-                    : "—"
-                }
-                valuePct={memPct}
-                thickness={3}
-              />
-              <MetricBar
-                label="磁盘"
-                valueLabel={
-                  rootDisk
-                    ? `${formatBytes(rootDisk.used)} / ${formatBytes(rootDisk.total)}`
-                    : "—"
-                }
-                valuePct={diskPct}
-                thickness={3}
-              />
-              <MetricBar
-                label="流量"
-                valueLabel={
-                  hasLimit
-                    ? `${formatBytes(node.traffic.counted_bytes)} / ${formatBytes(node.traffic.limit_bytes)}`
-                    : formatBytes(node.traffic.counted_bytes)
-                }
-                valuePct={trafficBarPct}
-                thickness={3}
-              />
+            {/* 4 Clean Visual Bars (primary metric dynamically swapped so it's never duplicated) */}
+            <div
+              style={node.online ? undefined : { opacity: 0.72 }}
+              className="grid grid-cols-2 gap-x-4 gap-y-3"
+            >
+              {plot.bottomSlots.map((slot) => {
+                const bar = getBottomMetricProps(slot, node);
+                return (
+                  <MetricBar
+                    key={slot}
+                    label={bar.label}
+                    valueLabel={bar.valueLabel}
+                    valuePct={bar.valuePct}
+                    toneOverride={barTone}
+                    thickness={3}
+                  />
+                );
+              })}
             </div>
           </article>
         );

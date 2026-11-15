@@ -1,4 +1,7 @@
 import type {
+  AgentUpdateCheckResponse,
+  AgentUpdateConfig,
+  AgentUpdateConfigResponse,
   AlertIncident,
   AlertRule,
   AuthStatus,
@@ -18,6 +21,8 @@ import type {
   RotateTokenResponse,
   SmartMigratePayload,
   SmartMigrateResponse,
+  TriggerAgentUpdatePayload,
+  TriggerAgentUpdateResponse,
   UpdateNodePayload,
   WatchdogConfig,
 } from "../types";
@@ -380,5 +385,35 @@ export const api = {
       body: JSON.stringify(payload),
     });
     return normalizeWatchdogConfig(raw);
+  },
+
+  getAgentUpdateConfig(signal?: AbortSignal): Promise<AgentUpdateConfigResponse> {
+    return request<AgentUpdateConfigResponse>("/api/agent-update/config", {
+      signal,
+    });
+  },
+
+  updateAgentUpdateConfig(
+    cfg: Partial<AgentUpdateConfig>,
+  ): Promise<AgentUpdateConfigResponse> {
+    return request<AgentUpdateConfigResponse>("/api/agent-update/config", {
+      method: "PUT",
+      body: JSON.stringify(cfg),
+    });
+  },
+
+  checkAgentUpdates(): Promise<AgentUpdateCheckResponse> {
+    return request<AgentUpdateCheckResponse>("/api/agent-update/check", {
+      method: "POST",
+    });
+  },
+
+  triggerAgentUpdate(
+    payload: TriggerAgentUpdatePayload = {},
+  ): Promise<TriggerAgentUpdateResponse> {
+    return request<TriggerAgentUpdateResponse>("/api/agent-update/trigger", {
+      method: "POST",
+      body: JSON.stringify(payload),
+    });
   },
 };

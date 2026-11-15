@@ -80,6 +80,9 @@ export interface NodeSummary {
   mem_total: number | null;
   swap_total: number | null;
   agent_version: string | null;
+  caps?: string[];
+  auto_update_override?: boolean | null;
+  update_status?: AgentUpdateStatus | null;
   proc_enabled: boolean;
   mute_until: number | null;
   online: boolean;
@@ -88,6 +91,79 @@ export interface NodeSummary {
   updated_at: number;
   traffic: NodeTrafficSummary;
   metrics: NodeMetricsSnapshot | null;
+}
+
+export type AgentUpdateState =
+  | "idle"
+  | "downloading"
+  | "staged"
+  | "applying"
+  | "error";
+
+export interface AgentUpdateStatus {
+  state: AgentUpdateState;
+  target_version?: string;
+  error?: string;
+  updated_at?: number;
+}
+
+export type AgentUpdateChannel = "stable" | "github";
+
+export interface AgentUpdateConfig {
+  auto_update_enabled: boolean;
+  channel: AgentUpdateChannel;
+  check_interval_sec: number;
+  custom_base_url: string | null;
+}
+
+export interface AgentReleaseAsset {
+  arch: string;
+  asset_name?: string;
+  url: string;
+  fallback_url?: string;
+  sha256: string;
+}
+
+export interface AgentLatestRelease {
+  version: string;
+  tag?: string;
+  source: "assets" | "local" | "github" | "custom";
+  checked_at?: number;
+  published_at?: string | null;
+  notes_url?: string | null;
+  assets: {
+    amd64?: AgentReleaseAsset;
+    arm64?: AgentReleaseAsset;
+    [arch: string]: AgentReleaseAsset | undefined;
+  };
+}
+
+export interface AgentUpdateConfigResponse {
+  ok?: true;
+  config: AgentUpdateConfig;
+  latest_release: AgentLatestRelease | null;
+  bundled_version: string;
+}
+
+export interface AgentUpdateCheckResponse {
+  ok: true;
+  latest_release: AgentLatestRelease | null;
+  checked_at: number;
+  bundled_version?: string;
+  error?: string | null;
+}
+
+export interface TriggerAgentUpdatePayload {
+  node_ids?: string[];
+  force?: boolean;
+}
+
+export interface TriggerAgentUpdateResponse {
+  ok: true;
+  version: string | null;
+  targeted: number;
+  dispatched: number;
+  skipped?: number;
 }
 
 export interface CreateNodePayload {
@@ -109,6 +185,7 @@ export interface UpdateNodePayload {
   traffic_reset_day?: number;
   traffic_count_mode?: TrafficCountMode;
   mute_until?: number | null;
+  auto_update_override?: boolean | null;
 }
 
 export interface CreateNodeResponse {
@@ -227,6 +304,7 @@ export interface HardwarePatch {
   swap_total?: number | null;
   agent_version?: string | null;
   agent_ver?: string | null;
+  caps?: string[];
   proc_enabled?: boolean;
 }
 
@@ -246,6 +324,9 @@ export interface FleetTickData {
   traffic: NodeTrafficSummary;
   metrics: NodeMetricsSnapshot | null;
   hardware?: HardwarePatch;
+  caps?: string[];
+  auto_update_override?: boolean | null;
+  update_status?: AgentUpdateStatus | null;
 }
 
 export type WsInboundMessage =
@@ -380,6 +461,7 @@ export interface SmartMigrateResponse {
 
 export type AppRoute = "dashboard" | "nodes" | "migration" | "alerts";
 export type FleetViewMode = "bento" | "table" | "matrix";
+export type CardPrimaryMetric = "net" | "cpu" | "latency" | "mem";
 export type ViewMode = "grid" | "table";
 export type ThemeMode = "light" | "dark" | "system";
 export type AccentPreset = "cobalt" | "vermilion" | "jade";
@@ -403,6 +485,8 @@ export interface HorizonNode extends NodeSummary {
   sparkline_cpu: number[];
   sparkline_rx: number[];
   sparkline_tx: number[];
+  sparkline_mem: number[];
+  sparkline_latency: number[];
 }
 
 export type PrototypeNode = HorizonNode;

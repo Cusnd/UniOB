@@ -156,23 +156,45 @@ export function FleetMatrixView({
                       )}
                     </div>
 
-                    <ObservabilityChart
-                      height={56}
-                      isRateBps
-                      ariaLabel={`${node.name} 实时网速`}
-                      series={[
-                        {
-                          label: "↓",
-                          color: "var(--accent)",
-                          data: rxData,
-                        },
-                        {
-                          label: "↑",
-                          color: "var(--status-ok)",
-                          data: txData,
-                        },
-                      ]}
-                    />
+                    {node.online ? (
+                      <ObservabilityChart
+                        height={56}
+                        isRateBps
+                        ariaLabel={`${node.name} 实时网速`}
+                        series={[
+                          {
+                            label: "↓",
+                            color: "var(--accent)",
+                            data: rxData,
+                          },
+                          {
+                            label: "↑",
+                            color: "var(--status-ok)",
+                            data: txData,
+                          },
+                        ]}
+                      />
+                    ) : (
+                      <div
+                        style={{ height: 56 }}
+                        className="relative flex items-center justify-center"
+                        aria-label={`${node.name} 离线`}
+                      >
+                        <div
+                          style={{ borderTop: "1px dashed var(--border-subtle)" }}
+                          className="pointer-events-none absolute inset-x-0 top-1/2"
+                        />
+                        <span
+                          style={{
+                            backgroundColor: "var(--bg-card)",
+                            color: "var(--text-muted)",
+                          }}
+                          className="relative px-2 text-[11px]"
+                        >
+                          离线
+                        </span>
+                      </div>
+                    )}
                   </div>
 
                   <div className="grid grid-cols-2 gap-2.5">

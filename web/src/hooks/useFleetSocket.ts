@@ -55,6 +55,7 @@ function mergeHardware(node: NodeSummary, hw?: HardwarePatch): NodeSummary {
     mem_total: hw.mem_total ?? node.mem_total,
     swap_total: hw.swap_total ?? node.swap_total,
     agent_version: hw.agent_version ?? hw.agent_ver ?? node.agent_version,
+    caps: Array.isArray(hw.caps) ? hw.caps : node.caps,
     proc_enabled:
       typeof hw.proc_enabled === "boolean" ? hw.proc_enabled : node.proc_enabled,
   };
@@ -78,6 +79,15 @@ function applyFleetTicks(
         hardware: tick.hardware
           ? { ...existing.hardware, ...tick.hardware }
           : existing.hardware,
+        caps: tick.caps ?? existing.caps,
+        auto_update_override:
+          tick.auto_update_override !== undefined
+            ? tick.auto_update_override
+            : existing.auto_update_override,
+        update_status:
+          tick.update_status !== undefined
+            ? tick.update_status
+            : existing.update_status,
         traffic: tick.traffic ?? existing.traffic,
         metrics: mergeMetricsNetworkState(existing.metrics, tick.metrics),
       });
@@ -95,6 +105,15 @@ function applyFleetTicks(
       ...patched,
       online: tick.online,
       last_seen_ts: tick.last_seen_ts,
+      caps: Array.isArray(tick.caps) ? tick.caps : patched.caps,
+      auto_update_override:
+        tick.auto_update_override !== undefined
+          ? tick.auto_update_override
+          : patched.auto_update_override,
+      update_status:
+        tick.update_status !== undefined
+          ? tick.update_status
+          : patched.update_status,
       traffic: tick.traffic ?? patched.traffic,
       metrics: mergeMetricsNetworkState(patched.metrics, tick.metrics),
     };

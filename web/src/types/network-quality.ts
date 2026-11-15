@@ -1,4 +1,4 @@
-export type NetworkTargetId = "ct" | "cu" | "cm";
+export type NetworkTargetId = string;
 export type NetworkQualityRange = "1h" | "24h" | "7d" | "30d";
 export type NetworkProbeResult = "ok" | "connect_timeout" | "connection_refused" | "dns_error" | "dns_timeout" | "network_error";
 
@@ -6,12 +6,16 @@ export interface NetworkTarget {
   id: NetworkTargetId;
   enabled: boolean;
   label: string;
-  region: string;
+  region?: string;
   host: string;
   port: number;
   address_family: "ipv4";
 }
-export interface NetworkQualityConfig { enabled: boolean; targets: NetworkTarget[] }
+export interface NetworkQualityConfig {
+  enabled: boolean;
+  interval_sec?: number;
+  targets: NetworkTarget[];
+}
 export interface NetworkNodeOverride { mode: "inherit" | "off" | "custom"; config?: NetworkQualityConfig }
 export interface NetworkQualityControl extends NetworkQualityConfig {
   schema_version: 1;

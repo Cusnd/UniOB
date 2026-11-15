@@ -1,6 +1,7 @@
 import { useMemo, useRef } from "react";
 import type { LiveMetricSample } from "../hooks/useFleetSocket";
-import type { HorizonNode, NodeSummary } from "../types";
+import type { HorizonNode, NodeMetricsSnapshot, NodeSummary } from "../types";
+import { getSnapshotLatencyMs, getSnapshotMemPct } from "./cardMetrics";
 
 const MAX_SPARKLINE_POINTS = 36;
 
@@ -280,6 +281,8 @@ interface SparklineSample {
   cpu: number;
   rx: number;
   tx: number;
+  memPct: number;
+  latencyMs: number | null;
 }
 
 interface SparklineBuffer {
@@ -287,6 +290,8 @@ interface SparklineBuffer {
   cpu: number[];
   rx: number[];
   tx: number[];
+  mem: number[];
+  latency: number[];
 }
 
 export function useHorizonNodes(
@@ -307,16 +312,28 @@ export function useHorizonNodes(
     return nodes.map((node) => {
       let entry = bufMap.get(node.id);
       if (!entry) {
-        entry = { samples: [], cpu: [], rx: [], tx: [] };
+        entry = { samples: [], cpu: [], rx: [], tx: [], mem: [], latency: [] };
         bufMap.set(node.id, entry);
       }
 
       let mutated = false;
-      const pushSample = (ts: number, cpu: number, rx: number, tx: number) => {
+      const pushSnapshot = (ts: number, metrics: NodeMetricsSnapshot) => {
         if (!Number.isFinite(ts)) return;
+        const cpu = metrics.cpu.all;
+        const rx = metrics.net.rx_bps;
+        const tx = metrics.net.tx_bps;
+        const memPct = getSnapshotMemPct(metrics, node.mem_total);
+        const latencyMs = getSnapshotLatencyMs(metrics);
         const existingIdx = entry!.samples.findIndex((s) => s.ts === ts);
-        if (existingIdx !== -1) return;
-        entry!.samples.push({ ts, cpu, rx, tx });
+        if (existingIdx !== -1) {
+          const cur = entry!.samples[existingIdx]!;
+          if (cur.latencyMs === null && latencyMs !== null) {
+            cur.latencyMs = latencyMs;
+            mutated = true;
+          }
+          return;
+        }
+        entry!.samples.push({ ts, cpu, rx, tx, memPct, latencyMs });
         mutated = true;
       };
 
@@ -325,19 +342,14 @@ export function useHorizonNodes(
         const recent = liveSeries.slice(-MAX_SPARKLINE_POINTS);
         for (const sample of recent) {
           if (sample?.metrics) {
-            pushSample(
-              sample.ts,
-              sample.metrics.cpu.all,
-              sample.metrics.net.rx_bps,
-              sample.metrics.net.tx_bps,
-            );
+            pushSnapshot(sample.ts, sample.metrics);
           }
         }
       }
 
       const m = node.metrics;
       if (m) {
-        pushSample(m.ts, m.cpu.all, m.net.rx_bps, m.net.tx_bps);
+        pushSnapshot(m.ts, m);
       }
 
       if (mutated) {
@@ -348,6 +360,10 @@ export function useHorizonNodes(
         entry.cpu = entry.samples.map((s) => s.cpu);
         entry.rx = entry.samples.map((s) => s.rx);
         entry.tx = entry.samples.map((s) => s.tx);
+        entry.mem = entry.samples.map((s) => s.memPct);
+        entry.latency = entry.samples
+          .map((s) => s.latencyMs)
+          .filter((v): v is number => v !== null && Number.isFinite(v));
       }
 
       const region = inferRegionMeta(node);
@@ -362,6 +378,8 @@ export function useHorizonNodes(
         sparkline_cpu: entry.cpu,
         sparkline_rx: entry.rx,
         sparkline_tx: entry.tx,
+        sparkline_mem: entry.mem,
+        sparkline_latency: entry.latency,
       };
     });
   }, [nodes, liveSeriesByNode]);
