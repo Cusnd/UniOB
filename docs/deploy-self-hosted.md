@@ -1,11 +1,5 @@
 # 自部署 `uniob-hub` 独立中枢教程：CF 看门狗与无感热迁移（人话版）
 
-## 可选的网络质量检测
-
-升级 Hub 与 Web 后，再升级远程 Agent。网络质量默认关闭，可在“服务器”设置全局三目标，或在节点编辑/详情中选择继承、自定义、关闭；`hub-local` 同样参与。开启后每 20 秒做公网 IPv4 TCP 建连探测，需要 DNS 与目标端口（默认 80）的出站访问。本机资源采集仍不绕公网 WSS，但启用的网络探测会访问外部目标。
-
-SQLite 启动时幂等增表，资源历史格式不变。关闭检测后保留已有网络历史，配置可随 Bundle 备份/迁移，历史不随 Bundle 搬迁。字段与存储规则见[协议契约](features/network-quality-contract.md)。
-
 > **一句话定位**：受够了传统自建监控动不动就要装 Docker、拉起 Postgres + Redis + Nginx 一套全家桶吃掉小半个 G 内存？`uniob-hub` 是一个 **只有约 4~5 MB 的纯静态单文件 Rust 程序**，不挑系统、免装 Docker、自带网页界面和 SQLite WAL 高速环形时序库，常驻内存只有 **十几 MB**，3 分钟就能在任何一台闲置 Linux 小鸡上跑起来！
 >
 > 💡 *如果你连一台常驻 VPS 都不想拿出来挂面板，可以先看姊妹篇 👉 [《Cloudflare Workers 边缘中枢从零部署教程（人话版）》](./deploy-cloudflare.md)。更妙的是：这两套模式用的是一模一样的界面和探针协议，随时可以点两下鼠标在两边来回搬家！*
@@ -14,21 +8,22 @@ SQLite 启动时幂等增表，资源历史格式不变。关闭检测后保留�
 
 ## 1. 先说人话：什么时候该上自部署 `uniob-hub`？
 
-Cloudflare Workers 可以免去维护专用中枢服务器；自建 `uniob-hub` 则把采集、计算和历史存储交给自己的主机。
+既然免费的 Cloudflare Workers 已经能带几十台机器了，为什么 UniOB 还要专门用 Rust 再写一个 100% 同构的自建中枢 `uniob-hub`？
 
 只要你符合下面任意一条，自建 `uniob-hub` 绝对让你爽到飞起：
 
 1. **你是「24 小时挂大屏狂魔」**：你喜欢在副屏、iPad 或者工作室电视上全天候开着监控墙，看着几十台小鸡的 CPU、网速曲线 **1 秒一跳** 丝滑滚动——在自己的小鸡上跑本地 SQLite WAL，每秒写几千次也不花一分钱，再也不用算计 Cloudflare 每天那 10 万次免费写入够不够造！
-2. **你有较多节点**，希望由自己的服务器承担历史数据与计算开销，按本机资源评估容量。
+2. **你手头机器巨多（100 ~ 500+ 台）**，且希望云端账单永远焊死在 **`$0.00/月`**。
 3. **你有数据主权洁癖**：所有历史曲线、按需抓取的进程快照、Telegram 密钥，统统只存在你自己硬盘上的一个 `uniob.db` 单文件里，拷走文件就等于拷走了整个监控中心。
 4. **装好顺手白送本机监控（`hub-local`）**：`uniob-hub` 内置了零网络开销的宿主机采集器（`self_probe`），服务一启动就自动直读本机 `/proc` 生成一个叫 **`Hub Local`（`hub-local`）** 的节点——连本机的 `uniob-agent` 都省得装了！
+5. **内置可选探测、大盘主指标与 `auto_update_v1` 分发池**：同套界面内置 **1~8 路自定义公网 IPv4 TCP 延迟探测**（[详见网络质量指南](./features/network-quality.md)）、**总览 Bento 卡片主指标切换**（`实时网络` / `CPU` / `TCP 延迟` / `内存`），以及通过本地 `/usr/local/share/uniob-hub/releases/`（`/releases/*`）或 GitHub Releases / 自定义镜像源驱动手下小鸡自动升级的能力。
 
 ### 🏆 老司机的终极黄金组合拳：「自建扛日常 + 免费 CF 当看门狗与逃生舱」
 
 纯自建监控自古以来都有一个致命死穴：**「如果装监控面板的这台机器自己拔网线、欠费停机或者母鸡炸了，谁来给你发告警？」** 它自己都断气了，当然发不出半个字！
 
 UniOB 给出的标准答案是双剑合璧：
-- **日常主力**：用自建 `uniob-hub` 接管节点，由本机承担实时采集、计算和历史存储；
+- **日常主力**：用自建 `uniob-hub` 接管所有小鸡，24 小时随便挂大屏盯秒级曲线，零云端成本；
 - **场外裁判（云端自建面板掉线提醒）**：留一个免费的 Cloudflare Worker 挂在云端。自建中枢活着的时候，每 **5 分钟** 给 CF 递一封带加密签名的「平安信」（每天总共才耗 576 次免费请求，连 CF 免费额度的 1% 都不到）；**哪天自建中枢突然断气失联，CF 等不到平安信，立刻替你往 Telegram 狂喊救命！**
 - **随时逃生**：万一自建这台机器一时半会儿修不好，在之前备份好的 CF 面板上随时能顶班救急！
 
@@ -300,7 +295,7 @@ timeout_sec = 900
 - 自建 `uniob-hub` 活着时，每 **5 分钟** 用 `HMAC-SHA256` 给当前时间戳和在线节点数签个名，POST 发给你的免费 Cloudflare Worker（`/api/watchdog/ping`）。
 - Cloudflare Worker 身上挂着免费的 `*/5 * * * *` 定时巡检任务，每 5 分钟查一次岗：一旦发现距离上次收到平安信已经超过了你设定的 **失联阈值**，CF Worker 立刻动用它那边的 Telegram / Webhook 渠道给你发最高级别告警：**「坏了！你的自建中枢失联超时了！」**
 - 等机房修好、自建中枢恢复上线发出第一封平安信，CF Worker 还会自动给你补一条 **「心跳已恢复」** 的报喜通知！
-- **用量**：默认每天 288 次心跳 + 288 次巡检，约 **576 次请求/天**；配置查询、状态和通知另计，并与账户其他业务共同核对配额。
+- **成本**：每天 288 次心跳 + 288 次巡检 = **576 次请求/天**（CF 免费额度是 100,000 次/天），**永久纯白嫖 `$0`**！
 
 ### 手把手三步接通自建面板掉线提醒
 
@@ -391,14 +386,17 @@ timeout_sec = 900
 
 ---
 
-### 🚀 2. 无损升级 `uniob-hub`
+### 🚀 2. 无损升级 `uniob-hub` 与手下 `uniob-agent` 探针
 
-发新版本了想升级？**不带任何参数**直接重跑一遍一键安装脚本就行！
-当脚本检测到 `/etc/uniob-hub/hub.toml` 已经存在且你没有传覆盖参数时，**它绝对不会动你的配置文件和 `/var/lib/uniob-hub/uniob.db` 数据库**，只会把二进制、前端网页和本地探针缓存更新到最新版并平滑重启：
-
-```bash
-curl -fsSL https://hub.example.com/install-hub.sh | sudo bash
-```
+- **升级 `uniob-hub` 自身**：发新版本了**不带任何参数**直接重跑一遍一键安装脚本就行！
+  当脚本检测到 `/etc/uniob-hub/hub.toml` 已经存在且你没有传覆盖参数时，**它绝对不会动你的配置文件和 `/var/lib/uniob-hub/uniob.db` 数据库**，只会把二进制、前端网页和 `/usr/local/share/uniob-hub/releases/` 本地探针缓存更新到最新版并平滑重启：
+  ```bash
+  curl -fsSL https://hub.example.com/install-hub.sh | sudo bash
+  ```
+- **一键/自动升级手下所有 `uniob-agent` 探针（`auto_update_v1`）**：
+  - 打开自建面板的 **「服务器」->「自动更新」**，即可选择 `stable`（优先读取自建中枢本地 `/usr/local/share/uniob-hub/releases/SHA256SUMS` 与 `VERSION`，缺省再兜底 GitHub Releases）、`github`（反过来以 GitHub 为主、本地文件当 `fallback_url`）或自定义镜像源 `custom_base_url`。
+  - 开启自动更新或手动点击触发后，中枢会向在线 `auto_update_v1` 探针推送用各节点 `token_sha256` 签名的 `ctrl.update` 指令；探针在非特权 `nobody` 下完成下载与 `\x7fELF`/SHA-256 校验，由 `uniob-agent-update.path` 触发 root 助手复核（`--verify-staged-update`）、备份 `.prev` 并原子切换，2 秒后若服务未恢复健康则自动回退旧版。
+  - *(若小鸡上是早期未带 `uniob-agent-update.path` 的旧版探针，先在小鸡重跑一次 `curl -fsSL https://hub.example.com/install.sh | sudo bash` 即可补齐更新单元，原有 `/etc/uniob/agent.toml` 与迁移状态全部保留。)*
 
 ---
 

@@ -14,12 +14,12 @@
 
 | 文档 | 内容说明 |
 | :--- | :--- |
-| **[☁️ Cloudflare Workers 边缘部署指南](./docs/deploy-cloudflare.md)** | SCCH 边缘部署、Zero Trust 接入与运行配额评估 |
+| **[☁️ Cloudflare Workers 边缘部署指南](./docs/deploy-cloudflare.md)** | 适合几台到几十台小鸡，零自备服务器跑通 `$0/月` SCCH + Zero Trust |
 | **[🖥️ 自部署 `uniob-hub` 与热迁移指南](./docs/deploy-self-hosted.md)** | 适合大机群 / 24x7 看盘，包含 CF Tunnel、Caddy/Nginx、云端看门狗与无感搬家 |
 | **[🏗️ 架构演进与实现细节](./docs/ARCHITECTURE.md)** | v1 成本瓶颈复盘、SCCH 6 大降本机制、智能迁移协议与工程避坑清单 |
 | **[🔌 HTTP / WebSocket API 文档](./docs/API.md)** | 全量 REST 接口、Watchdog HMAC 心跳签名与 Agent/Client WS 线协议参考 |
-| **[📐 技术规范与资源成本模型](./docs/SPEC.md)** | 数据结构、环形 TSDB 设计与运行成本口径 |
-| **[三网网络质量检测](./docs/features/network-quality.md)** | 默认关闭的 TCP / IPv4 探测、配置与历史查询 |
+| **[📐 技术规范与 7 维度计费精算](./docs/SPEC.md)** | 数据结构、环形 TSDB 设计、自动更新协议及 10 / 50 / 200 节点 7 维度成本核算 |
+| **[🌐 网络质量检测](./docs/features/network-quality.md)** | 可选 1~8 路公网 IPv4 TCP 探测、预设与节点自定义、历史分页与架构约束 |
 | **[🤝 贡献指南](./CONTRIBUTING.md) · [🔒 安全策略](./SECURITY.md) · [📝 更新日志](./CHANGELOG.md)** | 本地构建校验、只读安全边界与版本发布说明 |
 
 ---
@@ -28,42 +28,42 @@
 
 UniOB 提供 **「方向 B：Cloudflare SCCH 协同休眠边缘中枢」** 与 **「方向 A：独立 `uniob-hub` 自建中枢 + Cloudflare Watchdog 云端掉线提醒」** 两种对等运行模式：
 
-- **`agent/` (`uniob-agent`)**：Rust 编写的纯静态 `musl` 探针，直读 `/proc` 与 `statvfs`，严禁 `fork/exec` 子进程；静态二进制体积严格限制 `<= 2,621,440` 字节（`<= 2.5 MB`，CI 强制校验），常驻内存约 `3–6 MB`；出站 `WSS (443)` 上报，启用网络质量后另需 DNS 与到配置目标端口（默认 TCP 80）的出站连接，内置：
-  - **三网网络质量**：默认关闭；管理员可在服务器管理中设置全局配置，或在节点详情/编辑中继承、自定义、关闭。每 20 秒探测三个公网 IPv4 目标，提供 TCP 建连耗时、120 秒成功中位数与探测失败率，原始历史保留 24 小时、5 分钟聚合保留 30 天。Idle 仍随原有 5 分钟批次上报。
+- **`agent/` (`uniob-agent`)**：Rust 编写的纯静态 `musl` 探针，直读 `/proc` 与 `statvfs`，严禁 `fork/exec` 子进程；静态二进制体积严格限制 `<= 2,621,440` 字节（`<= 2.5 MB`，CI 强制校验），常驻内存约 `3–6 MB`；出站 `WSS (443)` 上报，启用网络质量或自动更新时按需出站 DNS / TCP 80（可配置端口）与 HTTPS/HTTP 下载连接，内置：
+  - **可选自定义 TCP 延迟探测（`network_quality_v1`）**：默认关闭；管理员可在 **「服务器」->「网络检测」** 配置全局规则，或在单节点编辑中继承、自定义或关闭。支持 **`1..=8` 个公网 IPv4 TCP 目标**、`10..=300` 秒可调间隔（默认 `20s`，`20s` 时省略该字段以保持 v1 `config_id` 哈希兼容）与 3 套预设，提供 TCP 建连耗时、120 秒成功中位数与失败率；原始历史保留 24 小时、5 分钟聚合保留 30 天，Idle 仍随原有 5 分钟批次上报（详见 [网络质量检测指南](./docs/features/network-quality.md)）。
+  - **签名节点自动更新（`auto_update_v1`, `agent/src/update.rs`）**：校验中枢 `ctrl.update` 携带的 `HMAC-SHA256(lowercase(token_sha256), "agent_update_v1:...")` 签名、`|now - issued_at| <= 900s` 时钟窗及持久化单调 `issued_at` 防重放；通过零依赖 `rustls` 下载并验证无降级重定向（`<= 5` 跳）、禁止 `gzip`、体积 `<= 16 MiB`、`\x7fELF` 魔数与 `SHA-256`，暂存至 `/var/lib/uniob/update/` 后由 `uniob-agent-update.path` 唤醒 root 助手（`--verify-staged-update`）备份 `.prev` 并原子切换，2 秒后若服务未恢复活跃则自动回滚。
   - **Protocol v2 批量与边缘即时告警**：Idle (`mode = 0`) 下维持 12 槽位 16 元紧凑数组（`CompactMetricTuple`），每 `5` 分钟按 UTC 整点 + `[0, 400)` ms 确定性抖动发送一次 `mb` 批帧；触发 `watermarks` 水位线（含 3% 滞回）、`|Δcpu| >= 35%` 或重启时立即冲刷，保持 `0s` 危急告警响应延迟。
   - **双阶段金丝雀热迁移（`agent/src/migrate.rs`）**：校验中心端下发的 HMAC-SHA256 `migrate` 指令、时间戳窗口与防重放单调 `epoch` 及 SSRF 私网防护；先建新连接等待 `10s` 内首帧 `ctrl` 确认后再原子切换，配置持久化在 `/var/lib/uniob/endpoint_override.toml`（systemd `StateDirectory=uniob`），新中枢连续失联（`>= 300s` 或 `>= 10` 次重试）自动回退 `fallback_url`。
   - **只读进程安全边界**：仅支持固定枚举采样挡位（`0`/`1`/`2`）、可配置无正则词法 `cmdline` 脱敏与 `90s` 租约自动降级。
 - **`worker/` (`uniob-worker`)**：基于 Hono、Cloudflare D1、SQLite Durable Objects 与 WebSocket Hibernation API 构建：
-  - **SCCH 同址单 DO (`FleetHubDO`)**：将 Agent WebSocket 与管理员 Browser WebSocket 同址收敛于全局单例 `FleetHubDO("global")`（**0 跨 DO RPC**、**1 × 128 MB** 实例计量），通过 `setWebSocketAutoResponse` 在边缘免费应答浏览器 `{"op":"ping"}`，以 `hub_meta.schema_version` 门控免冷唤醒 DDL，以本地 D1 镜像实现 **0 热路径 D1 查询**，并以零 `DELETE` 环形分块 TSDB（`metrics_chunk_10m` / `metrics_5m_chunk_1h` / `metrics_1h_chunk_1d`）+ Welford 在线聚合 + 事件驱动 `60s`/`15m` 闹钟，降低资源历史与状态的存储开销。（兼容性保留 `NodeDO` 导出以维持 `v1` migration。）
+  - **SCCH 同址单 DO (`FleetHubDO`)**：将 Agent WebSocket 与管理员 Browser WebSocket 同址收敛于全局单例 `FleetHubDO("global")`（**0 跨 DO RPC**、**1 × 128 MB** 实例计量），通过 `setWebSocketAutoResponse` 在边缘免费应答浏览器 `{"op":"ping"}`，以 `hub_meta.schema_version` 门控免冷唤醒 DDL，以本地 D1 镜像实现 **0 热路径 D1 查询**，并以零 `DELETE` 环形分块 TSDB（`metrics_chunk_10m` / `metrics_5m_chunk_1h` / `metrics_1h_chunk_1d`）+ Welford 在线聚合 + 事件驱动 `60s`/`15m` 闹钟，使 **Workers Free（`100k` 行写/日）可承载高达 ~112 台 Idle 或 ~75 台 2h/日运维节点**（开启 3 目标默认网络探测时 Idle 约 ~52 台）。（兼容性保留 `NodeDO` 导出以维持 `v1` migration。）
   - **Cloudflare Watchdog（`worker/src/watchdog.ts`）**：`*/5 * * * *` Cron 巡检与 HMAC-SHA256 签名心跳接口 `POST /api/watchdog/ping`（Free 仅占 `576` 次 Worker 请求/日）。
-  - **D1 (`uniob-meta`)**：存储节点注册表、通知渠道、告警规则、告警事件历史与系统配置（包含 `watchdog_config`/`watchdog_state`）。
+  - **D1 (`uniob-meta`)**：存储节点注册表（含 `auto_update_override`）、通知渠道、告警规则、告警事件历史与系统配置（包含 `watchdog_config`/`watchdog_state`、`network_quality_config` 与 `agent_update_config`）。
 - **`hub/` (`uniob-hub`)**：方向 A 独立自建 Rust 中枢二进制，使用本地 **SQLite WAL** 与零云端费用同构存储引擎：
   - 与 Worker 对等的 `/api/*`、`GET /api/agent/ws`、`GET /api/client/ws`、`/install.sh`、`/install-hub.sh` 及 `/releases/*`；托管静态前端 `web/dist`。
-  - 内置宿主机 `/proc` Loopback 零网络采集（`hub/src/self_probe.rs`，默认节点 ID `hub-local`）。
+  - 内置宿主机 `/proc` Loopback 零网络采集（`hub/src/self_probe.rs`，默认节点 ID `hub-local`）及与 Worker 对等的 `auto_update_v1` 发布检查/签发模块（`hub/src/agent_update.rs`）。
   - 支持 **Cloudflare Tunnel + Zero Trust Access（RS256 JWKS）** 与 **内置 PBKDF2 密码会话** 双模鉴权，以及定时向 CF Watchdog 发送签名存活心跳（`hub/src/watchdog.rs`）。
-- **`web/` (`uniob-web`)**：基于 React 19 + TypeScript + Vite + TailwindCSS v4 + uPlot；`useFleetSocket.ts` 接入 `document.visibilityState`、路由切换与 `IDLE_TIMEOUT_MS = 10 min` 自动发 `unsub_fleet` 节省配额；**「服务器管理」**（`NodesManage.tsx`）内置 **「面板迁移与运行模式」**（`HubMigrationPanel.tsx`），支持口令一键搬家、一键安装新面板并切换、实时迁移进度追踪、**「自建面板掉线提醒」**与**「备份与恢复」**。
-- **`scripts/` & `.github/workflows/`**：提供被控端 `install.sh.tmpl` 与自建中枢 `install-hub.sh.tmpl` 加固脚本，以及持续集成（`ci.yml`）、双架构静态发布（`release.yml`）与可选 Cloudflare 自动部署（`deploy-cloudflare.yml`）工作流。
+- **`web/` (`uniob-web`)**：基于 React 19 + TypeScript + Vite + TailwindCSS v4 构建 Atelier 浅色高密工作台，内置原生 SVG 实时图表（`ObservabilityChart` / `Sparkline`，`ui/Primitives.tsx`，无 `uPlot` 依赖）；`useFleetSocket.ts` 接入 `document.visibilityState`、路由切换与 `IDLE_TIMEOUT_MS = 10 min` 自动发 `unsub_fleet` 节省配额；支持大盘 Bento 卡片（`FleetBentoGrid.tsx` + `cardMetrics.ts`，顶栏可持久切换主图指标 `实时网络 / CPU / TCP 延迟 / 内存`，离线卡片呈现灰线占位与“离线”徽章）/ 矩阵 / 列表三视图；**「服务器」**（`NodesOpsView.tsx`）内置 **「网络检测」**（`NetworkQualitySettings.tsx`）与 **「自动更新」**（`AgentUpdateModal.tsx`，含单节点策略覆盖及详情页 `HardwareSecurityPanel.tsx` 版本状态展示）；**「服务与迁移」**（`HubMigrationStudio.tsx`）提供口令一键搬家、一键安装新面板并切换、实时迁移进度追踪、**「自建面板掉线提醒」**与**「备份与恢复」**。
+- **`scripts/` & `.github/workflows/`**：提供被控端 `install.sh.tmpl`（含 `StateDirectory=uniob` 与 root `uniob-agent-update.path` 自动更新切换单元）与自建中枢 `install-hub.sh.tmpl` 加固脚本，以及持续集成（`ci.yml`）、双架构静态发布（`release.yml`）与可选 Cloudflare 自动部署（`deploy-cloudflare.yml`）工作流。
 
 ### 目录结构
 
-三网检测会增加消息字节、SQLite 行读写和历史存储；运行成本需结合启用目标数、看盘时长和实际访问量评估。资源监控的 Idle 基线见[技术规范](./docs/SPEC.md)。
-
 ```text
 UniOB/
+├── shared/                 # Agent 与 Hub 共享 TCP 探测调度器、SSRF 策略与基准测试夹具
 ├── agent/                  # Rust Linux 极轻静态探针 (uniob-agent)
-│   └── src/                # collector/, crypto.rs, migrate.rs, protocol.rs, sanitize.rs, main.rs
+│   └── src/                # collector/, crypto.rs, migrate.rs, update.rs, protocol.rs, sanitize.rs, main.rs
 ├── hub/                    # Rust 独立自建中枢 (uniob-hub，方向 A)
-│   ├── src/                # config.rs, db.rs, auth.rs, routes.rs, hub_state.rs, self_probe.rs, watchdog.rs...
+│   ├── src/                # config.rs, db.rs, agent_update.rs, network_quality_store.rs, auth.rs, routes.rs, hub_state.rs, self_probe.rs, watchdog.rs...
 │   └── tests/e2e.rs        # 端到端集成测试
 ├── worker/                 # Cloudflare Workers + D1 + SCCH Durable Objects 中心端
-│   ├── migrations/         # D1 数据库迁移 (0001_init.sql)
+│   ├── migrations/         # D1 数据库迁移 (0001_init.sql, 0002_auto_update.sql)
 │   ├── wrangler.jsonc      # 脱敏 Worker / Assets / D1 / DO / Cron / Observability 配置模板
-│   ├── src/                # index.ts, auth.ts, migration.ts, watchdog.ts, do/{fleet-hub-do.ts,tsdb-slab.ts,node-do.ts}
+│   ├── src/                # index.ts, auth.ts, ssrf.ts, auto-update.ts, network-quality.ts, migration.ts, watchdog.ts, do/{fleet-hub-do.ts,tsdb-slab.ts,network-quality-store.ts,node-do.ts}
 │   └── test/               # Vitest 单元测试与 DO 集成测试
-├── web/                    # React 19 + TailwindCSS v4 + uPlot 前端面板
-│   └── src/                # hooks/useFleetSocket.ts, components/HubMigrationPanel.tsx...
+├── web/                    # React 19 + TailwindCSS v4 + Atelier 原生 SVG 前端面板
+│   └── src/                # hooks/{useFleetSocket,useHorizonPrefs}.ts, utils/{cardMetrics,autoUpdate,networkQuality}.ts, components/{FleetOverviewPage,FleetBentoGrid,NodesOpsView,AgentUpdateModal,HubMigrationStudio,NetworkQualityPanel}...
 ├── scripts/
-│   ├── install.sh.tmpl     # Linux 探针 systemd 一键安装/升级/卸载模板 (含 StateDirectory=uniob)
+│   ├── install.sh.tmpl     # Linux 探针 systemd 一键安装/升级/卸载模板 (含 StateDirectory=uniob 与 update path unit)
 │   └── install-hub.sh.tmpl # Linux 自建中枢 uniob-hub 一键安装/迁移/卸载模板
 ├── .github/
 │   ├── workflows/
@@ -73,11 +73,12 @@ UniOB/
 │   ├── ISSUE_TEMPLATE/
 │   └── pull_request_template.md
 ├── docs/
-│   ├── deploy-cloudflare.md   # Cloudflare Workers 边缘中枢从零部署完整教程（人话版）
-│   ├── deploy-self-hosted.md  # 自部署 uniob-hub + CF 看门狗与无感热迁移完整教程（人话版）
-│   ├── ARCHITECTURE.md        # Architecture v2 演进记录、智能迁移协议与工程避坑清单
-│   ├── API.md                 # HTTP REST 与 WebSocket 协议参考
-│   └── SPEC.md                # v2 完整技术规范与资源成本模型
+│   ├── deploy-cloudflare.md        # Cloudflare Workers 边缘中枢从零部署完整教程（人话版）
+│   ├── deploy-self-hosted.md       # 自部署 uniob-hub + CF 看门狗与无感热迁移完整教程（人话版）
+│   ├── features/network-quality.md # 可选 1~8 路 TCP 探测、Bento 主指标与存储配额规范
+│   ├── ARCHITECTURE.md             # Architecture v2 演进记录、智能迁移协议与工程避坑清单
+│   ├── API.md                      # HTTP REST 与 WebSocket 协议参考
+│   └── SPEC.md                     # v2 完整技术规范与 7 维度计费精算
 ├── CONTRIBUTING.md / SECURITY.md / CHANGELOG.md / LICENSE
 └── package.json               # 根目录快捷脚本（不使用 npm workspaces）
 ```
@@ -89,8 +90,9 @@ UniOB/
 > 📖 **新手手把手完整避坑指南（含 Zero Trust Access 5 条 Bypass 路径详解）**：请直接阅读 **[./docs/deploy-cloudflare.md](./docs/deploy-cloudflare.md)**。
 
 > **前置条件**：
-> - 可选择 **Workers Free** 或 **Workers Paid**；按节点数、三网检测与看盘负载核对账户的请求、计算、读写和存储配额。
-> - 持续高频看盘或较大机群也可使用[自建 `uniob-hub`](./docs/deploy-self-hosted.md)，由本机承担历史存储与计算。
+> - **Workers Free** 即可运行小中规模机群（默认关闭网络探测时，SCCH 实测 `100k` DO SQLite 写入/日上限可承载 **Idle ~112 台 / 2h 运维 ~75 台 / 24x7 墙板 ~16 台**，7 维度全面在免费额度内；开启 3 目标网络探测后 Idle 约可承载 **~52 台**）。
+> - 若机群超过上述阈值（如 200 台），开通 **Cloudflare Workers Paid**（`$5/月` 基础费）即可承载，200 台 24x7 墙板预估仅约 `$5.24/月`。
+> - 也可使用[自建 `uniob-hub`](./docs/deploy-self-hosted.md) 承载更大规模与全天候高频看盘（零云端存储/计算费用）。
 > - 本地依赖 Node.js（建议 `>= 20`）与 `npm`。
 
 ### 方式 1：本地 CLI 手动部署
@@ -300,8 +302,8 @@ cargo zigbuild --manifest-path hub/Cargo.toml --release --target aarch64-unknown
 - **自动发布（[.github/workflows/release.yml](.github/workflows/release.yml)）**：推送 `v*` 标签或手动运行时填写 tag，即构建并发布 GitHub Release 产物；手动运行未填写 tag 时仅生成构建产物：
 
 ```bash
-git tag v0.1.0
-git push origin v0.1.0
+git tag v0.2.0
+git push origin v0.2.0
 ```
 
 工作流自动运行 `agent` 与 `hub` 测试，构建前端产物 `uniob-web-dist.tar.gz`，交叉编译 `uniob-agent-{x86_64,aarch64}-unknown-linux-musl`（强制校验 `<= 2,621,440` 字节）与 `uniob-hub-{x86_64,aarch64}-unknown-linux-musl`，并生成 `SHA256SUMS` 一并发布。
@@ -328,7 +330,9 @@ curl -fsSL https://monitor.example.com/install.sh | sudo bash -s -- \
 curl -fsSL https://monitor.example.com/install.sh | sudo bash -s -- --uninstall
 ```
 
-被控探针支持的二进制运行参数：`-c`/`--config`（默认 `/etc/uniob/agent.toml`）、`--state-dir`（默认 `/var/lib/uniob`，存放热迁移状态 `endpoint_override.toml`）、`--allow-insecure-ws-for-test`、`--once`、`-V`/`--version`、`-h`/`--help`。
+被控探针支持的二进制运行参数：`-c`/`--config`（默认 `/etc/uniob/agent.toml`）、`--state-dir`（默认 `/var/lib/uniob`，存放热迁移状态 `endpoint_override.toml` 与更新暂存目录 `update/`）、`--verify-staged-update`（由 `uniob-agent-update.service` root 助手调用以二次验证暂存包与 HMAC 签名）、`--allow-insecure-ws-for-test`、`--once`、`-V`/`--version`、`-h`/`--help`。
+
+> 💡 安装一次后即可直接在网页 **「服务器」->「自动更新」** 中选择 `stable` / `github` / 自定义镜像源，对全部或指定节点下发 HMAC 签名的 `auto_update_v1` 自动更新指令（失败 `2s` 内自动回滚 `.prev`）。
 
 ---
 
