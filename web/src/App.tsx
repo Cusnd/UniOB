@@ -338,13 +338,18 @@ function AppContent() {
 
   const horizonNodes = useHorizonNodes(sortedNodes, liveSeriesByNode);
 
-  const groups = useMemo(() => {
+  const groupsKey = useMemo(() => {
     const set = new Set<string>();
-    for (const n of horizonNodes) {
+    for (const n of sortedNodes) {
       if (n.group_name) set.add(n.group_name);
     }
-    return Array.from(set);
-  }, [horizonNodes]);
+    return JSON.stringify(Array.from(set));
+  }, [sortedNodes]);
+
+  const groups = useMemo<string[]>(
+    () => JSON.parse(groupsKey) as string[],
+    [groupsKey],
+  );
 
   const inspectedNode = useMemo(() => {
     if (!inspectedNodeId) return null;

@@ -44,6 +44,7 @@ import {
   Button,
   Card,
   CopyButton,
+  GroupCombobox,
   IconCloseButton,
   MetricBar,
   NativeDialog,
@@ -95,7 +96,6 @@ export function NodesOpsView(props: NodesOpsViewProps): React.JSX.Element {
   const editTitleId = useId();
   const tokenTitleId = useId();
   const deleteTitleId = useId();
-  const groupDatalistId = useId();
   const networkTitleId = useId();
   const [networkSettingsOpen, setNetworkSettingsOpen] = useState(false);
   const [autoUpdateOpen, setAutoUpdateOpen] = useState(false);
@@ -1061,25 +1061,14 @@ export function NodesOpsView(props: NodesOpsViewProps): React.JSX.Element {
                     >
                       分组
                     </label>
-                    <input
+                    <GroupCombobox
                       id="edit-node-group"
-                      type="text"
-                      list={groupDatalistId}
+                      name="group_name"
                       value={editGroup}
-                      onChange={(e) => setEditGroup(e.target.value)}
+                      onChange={setEditGroup}
+                      existingGroups={groups}
                       placeholder="例如：亚太生产"
-                      style={{
-                        backgroundColor: "var(--bg-subtle)",
-                        color: "var(--text-primary)",
-                        border: "1px solid var(--border-subtle)",
-                      }}
-                      className="h-9 w-full rounded-[8px] px-3 text-[13px] outline-none"
                     />
-                    <datalist id={groupDatalistId}>
-                      {groups.map((grp) => (
-                        <option key={grp} value={grp} />
-                      ))}
-                    </datalist>
                   </div>
 
                   <div className="space-y-1">

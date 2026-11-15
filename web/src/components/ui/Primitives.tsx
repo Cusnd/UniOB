@@ -1,5 +1,12 @@
-import React, { useEffect, useId, useMemo, useRef, useState } from "react";
-import { Check, Copy, X } from "lucide-react";
+import React, {
+  useEffect,
+  useId,
+  useLayoutEffect,
+  useMemo,
+  useRef,
+  useState,
+} from "react";
+import { Check, ChevronDown, Copy, X } from "lucide-react";
 
 /* ============================================================================
  * Telemetry Rate & Unit Formatting Helpers
@@ -1594,5 +1601,445 @@ export function IconCloseButton({
     >
       <X className="h-4 w-4" strokeWidth={1.75} aria-hidden="true" />
     </button>
+  );
+}
+
+/* ============================================================================
+ * 13. GroupCombobox · Top-Layer Editable Group Selector
+ * Replaces native <datalist> to avoid empty-datalist dead arrows, prefilled
+ * value filtering traps, and <dialog> top-layer popup dismissal bugs.
+ * ============================================================================ */
+const PRESET_GROUP_SUGGESTIONS = [
+  "亚太节点",
+  "欧美节点",
+  "港澳台",
+  "国内节点",
+  "边缘节点",
+] as const;
+
+export interface GroupComboboxProps {
+  id: string;
+  name?: string;
+  value: string;
+  onChange: (next: string) => void;
+  existingGroups: string[];
+  placeholder?: string;
+}
+
+interface GroupOptionItem {
+  value: string;
+  label: string;
+  kind: "existing" | "preset" | "custom";
+}
+
+export function GroupCombobox({
+  id,
+  name = "group_name",
+  value,
+  onChange,
+  existingGroups,
+  placeholder = "例如：亚太节点",
+}: GroupComboboxProps): React.JSX.Element {
+  const listboxId = useId();
+  const anchorRef = useRef<HTMLDivElement | null>(null);
+  const inputRef = useRef<HTMLInputElement | null>(null);
+  const popoverRef = useRef<HTMLDivElement | null>(null);
+  const optionRefs = useRef<Array<HTMLDivElement | null>>([]);
+  const pointerInPopoverRef = useRef(false);
+
+  const [menuOpen, setMenuOpen] = useState(false);
+  const [filterByInput, setFilterByInput] = useState(false);
+  const [activeIndex, setActiveIndex] = useState(-1);
+
+  const supportsPopover =
+    typeof HTMLElement !== "undefined" &&
+    typeof HTMLElement.prototype.showPopover === "function";
+
+  const baseOptions = useMemo<GroupOptionItem[]>(() => {
+    const seen = new Set<string>();
+    const list: GroupOptionItem[] = [];
+    for (const raw of existingGroups) {
+      const trimmed = raw.trim();
+      if (!trimmed || seen.has(trimmed)) continue;
+      seen.add(trimmed);
+      list.push({ value: trimmed, label: trimmed, kind: "existing" });
+    }
+    for (const preset of PRESET_GROUP_SUGGESTIONS) {
+      if (seen.has(preset)) continue;
+      seen.add(preset);
+      list.push({ value: preset, label: preset, kind: "preset" });
+    }
+    return list;
+  }, [existingGroups]);
+
+  const items = useMemo<GroupOptionItem[]>(() => {
+    const trimmed = value.trim();
+    const q = trimmed.toLowerCase();
+    if (!filterByInput || !q) {
+      return baseOptions;
+    }
+    const matched = baseOptions.filter((opt) =>
+      opt.label.toLowerCase().includes(q),
+    );
+    const hasExact = baseOptions.some((opt) => opt.value.toLowerCase() === q);
+    if (!hasExact) {
+      return [{ value: trimmed, label: trimmed, kind: "custom" }, ...matched];
+    }
+    return matched;
+  }, [baseOptions, filterByInput, value]);
+
+  const showPopoverMenu = menuOpen && items.length > 0;
+
+  useLayoutEffect(() => {
+    const popoverEl = popoverRef.current;
+    const anchorEl = anchorRef.current;
+    if (!popoverEl || !anchorEl || !showPopoverMenu) return;
+
+    const reposition = () => {
+      if (supportsPopover && !popoverEl.matches(":popover-open")) {
+        try {
+          popoverEl.showPopover();
+        } catch {
+          // Ignore if element is not yet connected
+        }
+      }
+      if (!supportsPopover) return;
+
+      const rect = anchorEl.getBoundingClientRect();
+      if (rect.width <= 0 && rect.height <= 0) return;
+
+      popoverEl.style.width = `${rect.width}px`;
+      const clampedLeft = Math.max(
+        8,
+        Math.min(window.innerWidth - rect.width - 8, rect.left),
+      );
+      popoverEl.style.left = `${clampedLeft}px`;
+
+      const menuHeight = popoverEl.offsetHeight || 180;
+      const spaceBelow = window.innerHeight - rect.bottom - 12;
+      const spaceAbove = rect.top - 12;
+      if (spaceBelow < menuHeight && spaceAbove > spaceBelow) {
+        popoverEl.style.top = `${Math.max(8, rect.top - menuHeight - 4)}px`;
+      } else {
+        popoverEl.style.top = `${rect.bottom + 4}px`;
+      }
+    };
+
+    reposition();
+
+    const handleScroll = (event: Event) => {
+      if (
+        event.target instanceof Node &&
+        popoverEl.contains(event.target)
+      ) {
+        return;
+      }
+      reposition();
+    };
+
+    const parentDialog = anchorEl.closest("dialog");
+    const handleDialogClose = () => setMenuOpen(false);
+
+    window.addEventListener("resize", reposition);
+    document.addEventListener("scroll", handleScroll, true);
+    parentDialog?.addEventListener("transitionend", reposition);
+    parentDialog?.addEventListener("close", handleDialogClose);
+
+    return () => {
+      window.removeEventListener("resize", reposition);
+      document.removeEventListener("scroll", handleScroll, true);
+      parentDialog?.removeEventListener("transitionend", reposition);
+      parentDialog?.removeEventListener("close", handleDialogClose);
+      if (supportsPopover && popoverEl.matches(":popover-open")) {
+        try {
+          popoverEl.hidePopover();
+        } catch {
+          // Ignore if already closed
+        }
+      }
+    };
+  }, [showPopoverMenu, items.length, supportsPopover]);
+
+  useEffect(() => {
+    if (!menuOpen) return;
+    const handleOutsidePointerDown = (event: PointerEvent) => {
+      const target = event.target as Node | null;
+      if (!target) return;
+      if (
+        anchorRef.current?.contains(target) ||
+        popoverRef.current?.contains(target)
+      ) {
+        return;
+      }
+      setMenuOpen(false);
+      setActiveIndex(-1);
+    };
+    document.addEventListener("pointerdown", handleOutsidePointerDown, true);
+    return () => {
+      document.removeEventListener(
+        "pointerdown",
+        handleOutsidePointerDown,
+        true,
+      );
+    };
+  }, [menuOpen]);
+
+  useEffect(() => {
+    if (!showPopoverMenu || activeIndex < 0) return;
+    optionRefs.current[activeIndex]?.scrollIntoView({ block: "nearest" });
+  }, [activeIndex, showPopoverMenu]);
+
+  const selectOption = (nextVal: string) => {
+    onChange(nextVal);
+    setMenuOpen(false);
+    setFilterByInput(false);
+    setActiveIndex(-1);
+    inputRef.current?.focus();
+  };
+
+  const handleKeyDown = (e: React.KeyboardEvent<HTMLInputElement>) => {
+    if (e.key === "ArrowDown") {
+      e.preventDefault();
+      if (!menuOpen) {
+        setFilterByInput(false);
+        setMenuOpen(true);
+        setActiveIndex(0);
+      } else if (items.length > 0) {
+        setActiveIndex((prev) => (prev + 1) % items.length);
+      }
+      return;
+    }
+
+    if (e.key === "ArrowUp") {
+      e.preventDefault();
+      if (!menuOpen) {
+        setFilterByInput(false);
+        setMenuOpen(true);
+        setActiveIndex(Math.max(0, items.length - 1));
+      } else if (items.length > 0) {
+        setActiveIndex((prev) => (prev <= 0 ? items.length - 1 : prev - 1));
+      }
+      return;
+    }
+
+    if (e.key === "Enter" && !e.nativeEvent.isComposing) {
+      if (showPopoverMenu && activeIndex >= 0 && items[activeIndex]) {
+        e.preventDefault();
+        selectOption(items[activeIndex].value);
+      }
+      return;
+    }
+
+    if (e.key === "Escape" && menuOpen) {
+      e.preventDefault();
+      e.stopPropagation();
+      setMenuOpen(false);
+      setActiveIndex(-1);
+      return;
+    }
+
+    if (e.key === "Tab" && menuOpen) {
+      setMenuOpen(false);
+      setActiveIndex(-1);
+    }
+  };
+
+  const hasValue = value.length > 0;
+  const activeOptionId =
+    showPopoverMenu && activeIndex >= 0 && items[activeIndex]
+      ? `${listboxId}-opt-${activeIndex}`
+      : undefined;
+
+  return (
+    <div ref={anchorRef} className="relative">
+      <input
+        ref={inputRef}
+        id={id}
+        name={name}
+        type="text"
+        role="combobox"
+        aria-autocomplete="list"
+        aria-expanded={showPopoverMenu}
+        aria-controls={listboxId}
+        aria-activedescendant={activeOptionId}
+        autoComplete="off"
+        value={value}
+        placeholder={placeholder}
+        onClick={() => {
+          if (!menuOpen) {
+            setFilterByInput(false);
+            setActiveIndex(-1);
+            setMenuOpen(true);
+          }
+        }}
+        onChange={(e) => {
+          onChange(e.target.value);
+          setFilterByInput(true);
+          setActiveIndex(-1);
+          setMenuOpen(true);
+        }}
+        onKeyDown={handleKeyDown}
+        onBlur={(e) => {
+          if (pointerInPopoverRef.current) return;
+          const nextFocused = e.relatedTarget as Node | null;
+          if (
+            nextFocused &&
+            (anchorRef.current?.contains(nextFocused) ||
+              popoverRef.current?.contains(nextFocused))
+          ) {
+            return;
+          }
+          setMenuOpen(false);
+          setActiveIndex(-1);
+        }}
+        style={{
+          backgroundColor: "var(--bg-subtle)",
+          color: "var(--text-primary)",
+          border: "1px solid var(--border-subtle)",
+        }}
+        className={`h-9 w-full rounded-[8px] pl-3 text-[13px] outline-none ${
+          hasValue ? "pr-13" : "pr-8"
+        }`}
+      />
+
+      <div className="absolute inset-y-0 right-1 flex items-center gap-0.5">
+        {hasValue && (
+          <button
+            type="button"
+            tabIndex={-1}
+            aria-label="清空分组"
+            onMouseDown={(e) => e.preventDefault()}
+            onClick={() => {
+              onChange("");
+              setFilterByInput(false);
+              setActiveIndex(-1);
+              setMenuOpen(true);
+              inputRef.current?.focus();
+            }}
+            style={{ color: "var(--text-tertiary)" }}
+            className="inline-flex h-6 w-6 cursor-pointer items-center justify-center rounded-[5px] transition-colors hover:bg-[var(--bg-hover)] hover:text-[var(--text-primary)]"
+          >
+            <X className="h-3.5 w-3.5" aria-hidden="true" />
+          </button>
+        )}
+        <button
+          type="button"
+          tabIndex={-1}
+          aria-label={showPopoverMenu ? "收起分组列表" : "展开分组列表"}
+          aria-expanded={showPopoverMenu}
+          aria-controls={listboxId}
+          onMouseDown={(e) => e.preventDefault()}
+          onClick={() => {
+            if (menuOpen) {
+              setMenuOpen(false);
+              setActiveIndex(-1);
+            } else {
+              setFilterByInput(false);
+              setActiveIndex(-1);
+              setMenuOpen(true);
+            }
+            inputRef.current?.focus();
+          }}
+          style={{ color: "var(--text-tertiary)" }}
+          className="inline-flex h-6 w-6 cursor-pointer items-center justify-center rounded-[5px] transition-colors hover:bg-[var(--bg-hover)] hover:text-[var(--text-primary)]"
+        >
+          <ChevronDown
+            className={`h-3.5 w-3.5 transition-transform duration-150 ${
+              showPopoverMenu ? "rotate-180" : ""
+            }`}
+            aria-hidden="true"
+          />
+        </button>
+      </div>
+
+      {showPopoverMenu && (
+        <div
+          ref={popoverRef}
+          id={listboxId}
+          role="listbox"
+          aria-label="分组选项"
+          {...(supportsPopover ? { popover: "manual" } : {})}
+          onPointerDown={() => {
+            pointerInPopoverRef.current = true;
+            window.requestAnimationFrame(() => {
+              pointerInPopoverRef.current = false;
+            });
+          }}
+          style={{
+            backgroundColor: "var(--bg-sheet)",
+            border: "1px solid var(--border-subtle)",
+            boxShadow: "var(--shadow-popover)",
+            color: "var(--text-primary)",
+          }}
+          className={`${
+            supportsPopover
+              ? "fixed inset-auto m-0"
+              : "absolute top-[calc(100%+4px)] right-0 left-0 z-50"
+          } max-h-[212px] overflow-y-auto rounded-[10px] p-1 text-[12.5px]`}
+        >
+          {items.map((item, idx) => {
+            const selected =
+              item.kind !== "custom" && value.trim() === item.value;
+            const active = idx === activeIndex;
+            return (
+              <div
+                key={`${item.kind}:${item.value}`}
+                ref={(el) => {
+                  optionRefs.current[idx] = el;
+                }}
+                id={`${listboxId}-opt-${idx}`}
+                role="option"
+                aria-selected={selected}
+                onMouseDown={(e) => e.preventDefault()}
+                onMouseEnter={() => setActiveIndex(idx)}
+                onClick={() => selectOption(item.value)}
+                style={{
+                  backgroundColor: active
+                    ? "var(--bg-hover)"
+                    : selected
+                      ? "var(--accent-soft)"
+                      : "transparent",
+                  color: selected
+                    ? "var(--accent-ink)"
+                    : "var(--text-primary)",
+                }}
+                className="flex cursor-pointer items-center justify-between gap-2 rounded-[7px] px-2.5 py-1.5 transition-colors select-none"
+              >
+                <span className="truncate font-medium">
+                  {item.kind === "custom"
+                    ? `使用新分组 “${item.label}”`
+                    : item.label}
+                </span>
+                <span className="inline-flex shrink-0 items-center gap-1.5">
+                  {item.kind === "existing" && !selected && (
+                    <span
+                      style={{ color: "var(--text-tertiary)" }}
+                      className="text-[11px]"
+                    >
+                      已有
+                    </span>
+                  )}
+                  {item.kind === "custom" && (
+                    <span
+                      style={{ color: "var(--accent-ink)" }}
+                      className="text-[11px] font-medium"
+                    >
+                      新建
+                    </span>
+                  )}
+                  {selected && (
+                    <Check
+                      style={{ color: "var(--accent-ink)" }}
+                      className="h-3.5 w-3.5"
+                      aria-hidden="true"
+                    />
+                  )}
+                </span>
+              </div>
+            );
+          })}
+        </div>
+      )}
+    </div>
   );
 }

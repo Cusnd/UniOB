@@ -1,4 +1,4 @@
-import React, { useEffect, useId, useMemo, useState } from "react";
+import React, { useEffect, useId, useMemo, useRef, useState } from "react";
 import { Check, Loader2, RefreshCw } from "lucide-react";
 import type {
   CreateNodePayload,
@@ -10,6 +10,7 @@ import type { WsConnectionStatus } from "../hooks/useFleetSocket";
 import {
   Button,
   CopyButton,
+  GroupCombobox,
   IconCloseButton,
   NativeDialog,
 } from "./ui/Primitives";
@@ -52,7 +53,7 @@ export function AddServerWizardModal(
   } = props;
 
   const titleId = useId();
-  const groupDatalistId = useId();
+  const wasOpenRef = useRef(false);
 
   const [name, setName] = useState("");
   const [groupName, setGroupName] = useState("");
@@ -68,9 +69,9 @@ export function AddServerWizardModal(
   const [copiedCmd, setCopiedCmd] = useState(false);
   const [refreshing, setRefreshing] = useState(false);
 
-  // Reset form cleanly each time the modal opens
+  // Reset form cleanly only when the modal transitions from closed -> open
   useEffect(() => {
-    if (open) {
+    if (open && !wasOpenRef.current) {
       setName("");
       setGroupName(existingGroups[0] ?? "");
       setTagsInput("");
@@ -84,6 +85,7 @@ export function AddServerWizardModal(
       setCopiedCmd(false);
       setRefreshing(false);
     }
+    wasOpenRef.current = open;
   }, [open, existingGroups]);
 
   const liveNode = useMemo(() => {
@@ -289,11 +291,18 @@ export function AddServerWizardModal(
               </label>
               <input
                 id="add-srv-name"
+                name="name"
                 type="text"
                 required
                 autoFocus
+                autoCorrect="off"
+                autoCapitalize="none"
+                spellCheck={false}
                 value={name}
-                onChange={(e) => setName(e.target.value)}
+                onChange={(e) => {
+                  setName(e.target.value);
+                  if (error) setError(null);
+                }}
                 placeholder="例如：tokyo-edge-01"
                 style={{
                   backgroundColor: "var(--bg-subtle)",
@@ -313,25 +322,14 @@ export function AddServerWizardModal(
                 >
                   分组
                 </label>
-                <input
+                <GroupCombobox
                   id="add-srv-group"
-                  type="text"
-                  list={groupDatalistId}
+                  name="group_name"
                   value={groupName}
-                  onChange={(e) => setGroupName(e.target.value)}
+                  onChange={setGroupName}
+                  existingGroups={existingGroups}
                   placeholder="例如：亚太节点"
-                  style={{
-                    backgroundColor: "var(--bg-subtle)",
-                    color: "var(--text-primary)",
-                    border: "1px solid var(--border-subtle)",
-                  }}
-                  className="h-9 w-full rounded-[8px] px-3 text-[13px] outline-none"
                 />
-                <datalist id={groupDatalistId}>
-                  {existingGroups.map((grp) => (
-                    <option key={grp} value={grp} />
-                  ))}
-                </datalist>
               </div>
 
               <div className="space-y-1.5">
@@ -344,6 +342,7 @@ export function AddServerWizardModal(
                 </label>
                 <input
                   id="add-srv-tags"
+                  name="tags"
                   type="text"
                   value={tagsInput}
                   onChange={(e) => setTagsInput(e.target.value)}
