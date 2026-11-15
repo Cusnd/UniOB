@@ -1,25 +1,44 @@
-import type { DiskMetrics, NodeSummary } from "../types";
+import type { DiskMetrics, HorizonNode, NodeSummary } from "../types";
 
 const SIZE_UNITS = ["B", "KB", "MB", "GB", "TB", "PB"];
 
-export function formatBytes(bytes: number | null | undefined, decimals = 1): string {
-  if (bytes === null || bytes === undefined || !Number.isFinite(bytes) || bytes < 0) {
+export function formatBytes(
+  bytes: number | null | undefined,
+  decimals = 1,
+): string {
+  if (
+    bytes === null ||
+    bytes === undefined ||
+    !Number.isFinite(bytes) ||
+    bytes < 0
+  ) {
     return "0 B";
   }
   if (bytes === 0) return "0 B";
   const k = 1024;
-  const idx = Math.min(Math.floor(Math.log(bytes) / Math.log(k)), SIZE_UNITS.length - 1);
+  const idx = Math.min(
+    Math.floor(Math.log(bytes) / Math.log(k)),
+    SIZE_UNITS.length - 1,
+  );
   const val = bytes / Math.pow(k, idx);
   const digits = idx === 0 ? 0 : val >= 100 ? 0 : decimals;
   return `${val.toFixed(digits)} ${SIZE_UNITS[idx]}`;
 }
 
 export function formatBytesCompact(bytes: number | null | undefined): string {
-  if (bytes === null || bytes === undefined || !Number.isFinite(bytes) || bytes <= 0) {
+  if (
+    bytes === null ||
+    bytes === undefined ||
+    !Number.isFinite(bytes) ||
+    bytes <= 0
+  ) {
     return "0B";
   }
   const k = 1024;
-  const idx = Math.min(Math.floor(Math.log(bytes) / Math.log(k)), SIZE_UNITS.length - 1);
+  const idx = Math.min(
+    Math.floor(Math.log(bytes) / Math.log(k)),
+    SIZE_UNITS.length - 1,
+  );
   const val = bytes / Math.pow(k, idx);
   const digits = idx === 0 ? 0 : val >= 100 ? 0 : val >= 10 ? 1 : 2;
   return `${val.toFixed(digits)} ${SIZE_UNITS[idx]}`;
@@ -30,19 +49,32 @@ export function formatRate(bps: number | null | undefined): string {
     return "0 B/s";
   }
   const k = 1024;
-  const idx = Math.min(Math.floor(Math.log(bps) / Math.log(k)), SIZE_UNITS.length - 1);
+  const idx = Math.min(
+    Math.floor(Math.log(bps) / Math.log(k)),
+    SIZE_UNITS.length - 1,
+  );
   const val = bps / Math.pow(k, idx);
   const digits = idx === 0 ? 0 : val >= 100 ? 0 : 1;
   return `${val.toFixed(digits)} ${SIZE_UNITS[idx]}/s`;
 }
 
-export function formatPercent(val: number | null | undefined, digits = 1): string {
-  if (val === null || val === undefined || !Number.isFinite(val)) return "0.0%";
+export function formatPercent(
+  val: number | null | undefined,
+  digits = 1,
+): string {
+  if (val === null || val === undefined || !Number.isFinite(val)) {
+    return "0.0%";
+  }
   return `${Math.max(0, Math.min(100, val)).toFixed(digits)}%`;
 }
 
 export function formatUptime(seconds: number | null | undefined): string {
-  if (seconds === null || seconds === undefined || !Number.isFinite(seconds) || seconds < 0) {
+  if (
+    seconds === null ||
+    seconds === undefined ||
+    !Number.isFinite(seconds) ||
+    seconds < 0
+  ) {
     return "—";
   }
   const s = Math.floor(seconds);
@@ -56,7 +88,12 @@ export function formatUptime(seconds: number | null | undefined): string {
 }
 
 export function formatDuration(seconds: number | null | undefined): string {
-  if (seconds === null || seconds === undefined || !Number.isFinite(seconds) || seconds < 0) {
+  if (
+    seconds === null ||
+    seconds === undefined ||
+    !Number.isFinite(seconds) ||
+    seconds < 0
+  ) {
     return "0 秒";
   }
   const s = Math.floor(seconds);
@@ -89,17 +126,23 @@ export function formatTimestamp(unixSec: number | null | undefined): string {
   return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds())}`;
 }
 
-export function getRootDisk(disks: DiskMetrics[] | undefined | null): DiskMetrics | null {
+export function getRootDisk(
+  disks: DiskMetrics[] | undefined | null,
+): DiskMetrics | null {
   if (!disks || disks.length === 0) return null;
   const root = disks.find((d) => d.mp === "/");
   if (root) return root;
-  return disks.reduce((max, cur) => (cur.total > max.total ? cur : max), disks[0]);
+  return disks.reduce(
+    (max, cur) => (cur.total > max.total ? cur : max),
+    disks[0],
+  );
 }
 
 export function getMemUsagePct(node: NodeSummary): number {
   const m = node.metrics?.mem;
   if (!m) return 0;
-  const total = node.mem_total && node.mem_total > 0 ? node.mem_total : m.used + m.avail;
+  const total =
+    node.mem_total && node.mem_total > 0 ? node.mem_total : m.used + m.avail;
   if (total <= 0) return 0;
   return Math.max(0, Math.min(100, (m.used / total) * 100));
 }
@@ -129,56 +172,70 @@ export function parseOsBadge(os: string | null | undefined): OsBadgeInfo {
   if (!os) {
     return {
       short: "Linux",
-      colorClass: "bg-slate-500/15 text-slate-400 border-slate-500/30",
+      colorClass:
+        "bg-slate-500/12 text-slate-700 dark:text-slate-300 border-slate-500/25",
     };
   }
   const lower = os.toLowerCase();
   if (lower.includes("debian")) {
     return {
       short: "Debian",
-      colorClass: "bg-rose-500/15 text-rose-400 border-rose-500/30",
+      colorClass:
+        "bg-rose-500/12 text-rose-700 dark:text-rose-300 border-rose-500/25",
     };
   }
   if (lower.includes("ubuntu")) {
     return {
       short: "Ubuntu",
-      colorClass: "bg-orange-500/15 text-orange-400 border-orange-500/30",
+      colorClass:
+        "bg-orange-500/12 text-orange-700 dark:text-orange-300 border-orange-500/25",
     };
   }
   if (lower.includes("alpine")) {
     return {
       short: "Alpine",
-      colorClass: "bg-sky-500/15 text-sky-400 border-sky-500/30",
+      colorClass:
+        "bg-sky-500/12 text-sky-700 dark:text-sky-300 border-sky-500/25",
     };
   }
   if (lower.includes("arch")) {
     return {
       short: "Arch",
-      colorClass: "bg-cyan-500/15 text-cyan-400 border-cyan-500/30",
+      colorClass:
+        "bg-cyan-500/12 text-cyan-700 dark:text-cyan-300 border-cyan-500/25",
     };
   }
   if (lower.includes("rocky")) {
     return {
       short: "Rocky",
-      colorClass: "bg-emerald-500/15 text-emerald-400 border-emerald-500/30",
+      colorClass:
+        "bg-emerald-500/12 text-emerald-700 dark:text-emerald-300 border-emerald-500/25",
     };
   }
   if (lower.includes("alma")) {
     return {
       short: "Alma",
-      colorClass: "bg-indigo-500/15 text-indigo-400 border-indigo-500/30",
+      colorClass:
+        "bg-indigo-500/12 text-indigo-700 dark:text-indigo-300 border-indigo-500/25",
     };
   }
-  if (lower.includes("centos") || lower.includes("red hat") || lower.includes("rhel") || lower.includes("fedora")) {
+  if (
+    lower.includes("centos") ||
+    lower.includes("red hat") ||
+    lower.includes("rhel") ||
+    lower.includes("fedora")
+  ) {
     return {
       short: lower.includes("fedora") ? "Fedora" : "RHEL",
-      colorClass: "bg-blue-500/15 text-blue-400 border-blue-500/30",
+      colorClass:
+        "bg-blue-500/12 text-blue-700 dark:text-blue-300 border-blue-500/25",
     };
   }
   const firstWord = os.split(/[\s/(]/)[0] || "Linux";
   return {
     short: firstWord.slice(0, 12),
-    colorClass: "bg-slate-500/15 text-slate-400 border-slate-500/30",
+    colorClass:
+      "bg-slate-500/12 text-slate-700 dark:text-slate-300 border-slate-500/25",
   };
 }
 
@@ -189,13 +246,15 @@ export function getMetricBarColor(pct: number): string {
 }
 
 export function getMetricTextColor(pct: number): string {
-  if (pct >= 90) return "text-rose-500 dark:text-rose-400";
-  if (pct >= 70) return "text-amber-500 dark:text-amber-400";
-  return "text-emerald-600 dark:text-emerald-400";
+  if (pct >= 90) return "text-rose-700 dark:text-rose-400";
+  if (pct >= 70) return "text-amber-700 dark:text-amber-400";
+  return "text-emerald-700 dark:text-emerald-400";
 }
 
 export function isNodeMuted(node: NodeSummary): boolean {
-  return node.mute_until !== null && node.mute_until > Math.floor(Date.now() / 1000);
+  return (
+    node.mute_until !== null && node.mute_until > Math.floor(Date.now() / 1000)
+  );
 }
 
 const TRAFFIC_MODE_LABELS: Record<string, string> = {
@@ -218,7 +277,10 @@ const ALERT_METRIC_LABELS: Record<string, string> = {
   swap: "虚拟内存占用",
   disk: "磁盘空间占用",
   traffic_pct: "月流量使用率",
+  watchdog: "自建中枢看门狗",
+  firing: "告警中",
   FIRING: "告警中",
+  resolved: "已恢复",
   RESOLVED: "已恢复",
 };
 
@@ -228,9 +290,11 @@ export function formatAlertMetric(metric: string | null | undefined): string {
 }
 
 export function formatAlertStatus(status: string | null | undefined): string {
-  if (status === "FIRING") return "告警中";
-  if (status === "RESOLVED") return "已恢复";
-  return status || "—";
+  if (!status) return "—";
+  const upper = status.toUpperCase();
+  if (upper === "FIRING") return "告警中";
+  if (upper === "RESOLVED") return "已恢复";
+  return status;
 }
 
 export function formatDurationZh(sec: number | null | undefined): string {
@@ -244,7 +308,9 @@ export function formatDurationZh(sec: number | null | undefined): string {
   const parts: string[] = [];
   if (days > 0) parts.push(`${days} 天`);
   if (hours > 0) parts.push(`${hours} 小时`);
-  if (mins > 0) parts.push(`${mins} 分${hours === 0 && days === 0 && secs === 0 ? "钟" : ""}`);
+  if (mins > 0) {
+    parts.push(`${mins} 分${hours === 0 && days === 0 && secs === 0 ? "钟" : ""}`);
+  }
   if (secs > 0) parts.push(`${secs} 秒`);
   return parts.join(" ");
 }
@@ -252,7 +318,7 @@ export function formatDurationZh(sec: number | null | undefined): string {
 export function formatAlertCondition(
   metric: string,
   operator: string,
-  threshold: number
+  threshold: number,
 ): string {
   const opText = operator === "gte" ? "达到或超过" : "超过";
   if (metric === "offline") {
@@ -266,4 +332,20 @@ export function formatCycleMonth(cycleKey: string | null | undefined): string {
   const match = /^(\d{4})-(\d{1,2})$/.exec(cycleKey.trim());
   if (!match) return cycleKey;
   return `${match[1]} 年 ${Number(match[2])} 月`;
+}
+
+export function formatNodeMetaLine(
+  node: Pick<
+    HorizonNode,
+    "region_code" | "provider" | "ipv4_masked" | "hostname"
+  >,
+  options?: { includeHostnameFallback?: boolean },
+): string {
+  const endpoint =
+    node.ipv4_masked ||
+    (options?.includeHostnameFallback ? (node.hostname ?? "") : "");
+  return [node.region_code, node.provider, endpoint]
+    .map((part) => (typeof part === "string" ? part.trim() : ""))
+    .filter(Boolean)
+    .join(" · ");
 }

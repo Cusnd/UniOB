@@ -1,6 +1,7 @@
 import { useEffect, useId, useMemo, useRef, useState } from "react";
 import {
   Activity,
+  AlertCircle,
   ArrowLeftRight,
   ArrowUpDown,
   BellOff,
@@ -10,6 +11,7 @@ import {
   Edit3,
   Eye,
   KeyRound,
+  Loader2,
   Lock,
   Plus,
   Save,
@@ -23,14 +25,15 @@ import {
   X,
 } from "lucide-react";
 import type {
+  HorizonNode,
   InspectorTab,
-  PrototypeNode,
   RotateTokenResponse,
   TrafficCountMode,
   UpdateNodePayload,
 } from "../types";
 import {
   formatBytes,
+  formatNodeMetaLine,
   formatRelativeTime,
   formatTrafficMode,
   getTrafficUsagePct,
@@ -39,14 +42,14 @@ import {
 } from "../utils/format";
 
 export interface NodesOpsViewProps {
-  nodes: PrototypeNode[];
+  nodes: HorizonNode[];
   groups: string[];
-  onInspectNode: (node: PrototypeNode, tab?: InspectorTab) => void;
+  onInspectNode: (node: HorizonNode, tab?: InspectorTab) => void;
   onOpenAddServer: () => void;
-  onUpdateNode: (id: string, patch: UpdateNodePayload) => void;
-  onMuteNode: (id: string, seconds: number | null) => void;
-  onRotateToken: (id: string) => RotateTokenResponse;
-  onDeleteNode: (id: string) => void;
+  onUpdateNode: (id: string, patch: UpdateNodePayload) => Promise<void>;
+  onMuteNode: (id: string, seconds: number | null) => Promise<void>;
+  onRotateToken: (id: string) => Promise<RotateTokenResponse>;
+  onDeleteNode: (id: string) => Promise<void>;
   onNavigateMigration: () => void;
 }
 
@@ -67,6 +70,10 @@ interface EditDraft {
 
 const DIALOG_LIGHT_DISMISS_ATTRS: Record<string, string> = {
   closedby: "any",
+};
+
+const DIALOG_LOCKED_DISMISS_ATTRS: Record<string, string> = {
+  closedby: "none",
 };
 
 const COLLATOR = new Intl.Collator(undefined, {
@@ -191,11 +198,12 @@ export function NodesOpsView({
   onRotateToken,
   onDeleteNode,
   onNavigateMigration,
-}: NodesOpsViewProps): React.JSX.Element {
+}: NodesOpsViewProps) {
   const baseId = useId();
   const tableCaptionId = `${baseId}-table-caption`;
   const groupListId = `${baseId}-group-datalist`;
   const editTitleId = `${baseId}-edit-title`;
+  const tokenTitleId = `${baseId}-token-title`;
   const deleteTitleId = `${baseId}-delete-title`;
 
   const [selectedGroup, setSelectedGroup] = useState<string>("ALL");
@@ -205,24 +213,48 @@ export function NodesOpsView({
   const [sortDir, setSortDir] = useState<SortDir>("asc");
   const [sortAnnouncement, setSortAnnouncement] = useState("");
 
+  // Async row operation states
+  const [mutingNodeId, setMutingNodeId] = useState<string | null>(null);
+  const [rotatingNodeId, setRotatingNodeId] = useState<string | null>(null);
+  const [rowActionError, setRowActionError] = useState<string | null>(null);
+
+  // Token rotation modal state
+  const [tokenModalNode, setTokenModalNode] = useState<HorizonNode | null>(null);
   const [rotatedInfo, setRotatedInfo] = useState<{
     nodeId: string;
     nodeName: string;
     data: RotateTokenResponse;
   } | null>(null);
+  const [tokenError, setTokenError] = useState<string | null>(null);
 
+  // Edit dialog state
   const [editing, setEditing] = useState<EditDraft | null>(null);
+  const [savingEdit, setSavingEdit] = useState(false);
   const [editError, setEditError] = useState<string | null>(null);
+
+  // Delete dialog state
   const [pendingDeleteNode, setPendingDeleteNode] =
-    useState<PrototypeNode | null>(null);
+    useState<HorizonNode | null>(null);
+  const [deleting, setDeleting] = useState(false);
+  const [deleteError, setDeleteError] = useState<string | null>(null);
 
   const editDialogRef = useRef<HTMLDialogElement | null>(null);
   const editPointerDownOutsideRef = useRef(false);
   const editSyncingRef = useRef(false);
 
+  const tokenDialogRef = useRef<HTMLDialogElement | null>(null);
+  const tokenPointerDownOutsideRef = useRef(false);
+  const tokenSyncingRef = useRef(false);
+
   const deleteDialogRef = useRef<HTMLDialogElement | null>(null);
   const deletePointerDownOutsideRef = useRef(false);
   const deleteSyncingRef = useRef(false);
+
+  useEffect(() => {
+    if (selectedGroup !== "ALL" && !groups.includes(selectedGroup)) {
+      setSelectedGroup("ALL");
+    }
+  }, [groups, selectedGroup]);
 
   useEffect(() => {
     const dialog = editDialogRef.current;
@@ -235,6 +267,18 @@ export function NodesOpsView({
       editSyncingRef.current = false;
     }
   }, [editing]);
+
+  useEffect(() => {
+    const dialog = tokenDialogRef.current;
+    if (!dialog) return;
+    if (tokenModalNode) {
+      if (!dialog.open) dialog.showModal();
+    } else if (dialog.open) {
+      tokenSyncingRef.current = true;
+      dialog.close();
+      tokenSyncingRef.current = false;
+    }
+  }, [tokenModalNode]);
 
   useEffect(() => {
     const dialog = deleteDialogRef.current;
@@ -334,7 +378,7 @@ export function NodesOpsView({
     );
   };
 
-  const openEditModal = (node: PrototypeNode) => {
+  const openEditModal = (node: HorizonNode) => {
     setEditError(null);
     setEditing({
       id: node.id,
@@ -355,9 +399,9 @@ export function NodesOpsView({
     });
   };
 
-  const handleSaveEdit = (e: React.FormEvent) => {
+  const handleSaveEdit = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!editing) return;
+    if (!editing || savingEdit) return;
     if (!editing.name.trim()) {
       setEditError("服务器名称不能为空");
       return;
@@ -385,28 +429,104 @@ export function NodesOpsView({
 
     const sortNum = Number.parseInt(editing.sort_order, 10);
 
-    onUpdateNode(editing.id, {
-      name: editing.name.trim(),
-      group_name: editing.group_name.trim() || "Default",
-      tags: editing.tagsText
-        .split(/[,，]/)
-        .map((t) => t.trim())
-        .filter(Boolean),
-      sort_order: Number.isFinite(sortNum) ? sortNum : 0,
-      traffic_limit_bytes: limitBytes,
-      traffic_reset_day: clampedResetDay,
-      traffic_count_mode: editing.count_mode,
-    });
-    setEditing(null);
+    setSavingEdit(true);
+    setEditError(null);
+    try {
+      await onUpdateNode(editing.id, {
+        name: editing.name.trim(),
+        group_name: editing.group_name.trim() || "Default",
+        tags: editing.tagsText
+          .split(/[,，]/)
+          .map((t) => t.trim())
+          .filter(Boolean),
+        sort_order: Number.isFinite(sortNum) ? sortNum : 0,
+        traffic_limit_bytes: limitBytes,
+        traffic_reset_day: clampedResetDay,
+        traffic_count_mode: editing.count_mode,
+      });
+      setEditing(null);
+    } catch (err) {
+      setEditError(err instanceof Error ? err.message : "保存节点配置失败");
+    } finally {
+      setSavingEdit(false);
+    }
   };
 
-  const handleRotate = (node: PrototypeNode) => {
-    const res = onRotateToken(node.id);
-    setRotatedInfo({
-      nodeId: node.id,
-      nodeName: node.name,
-      data: res,
-    });
+  const handleMuteRow = async (node: HorizonNode, seconds: number | null) => {
+    setMutingNodeId(node.id);
+    setRowActionError(null);
+    try {
+      await onMuteNode(node.id, seconds);
+    } catch (err) {
+      setRowActionError(
+        err instanceof Error
+          ? `「${node.name}」静默设置失败：${err.message}`
+          : `「${node.name}」静默设置失败`,
+      );
+    } finally {
+      setMutingNodeId(null);
+    }
+  };
+
+  const handleMuteInEdit = async (nodeId: string, seconds: number | null) => {
+    setMutingNodeId(nodeId);
+    setEditError(null);
+    try {
+      await onMuteNode(nodeId, seconds);
+    } catch (err) {
+      setEditError(err instanceof Error ? err.message : "维护静默设置失败");
+    } finally {
+      setMutingNodeId(null);
+    }
+  };
+
+  const openRotateModal = (node: HorizonNode) => {
+    setTokenError(null);
+    setTokenModalNode(node);
+  };
+
+  const handleConfirmRotate = async () => {
+    if (!tokenModalNode || rotatingNodeId) return;
+    const target = tokenModalNode;
+    setRotatingNodeId(target.id);
+    setTokenError(null);
+    setRowActionError(null);
+    try {
+      const res = await onRotateToken(target.id);
+      setRotatedInfo({
+        nodeId: target.id,
+        nodeName: target.name,
+        data: res,
+      });
+      setTokenModalNode(null);
+    } catch (err) {
+      setTokenError(err instanceof Error ? err.message : "轮换连接密钥失败");
+    } finally {
+      setRotatingNodeId(null);
+    }
+  };
+
+  const openDeleteModal = (node: HorizonNode) => {
+    setDeleteError(null);
+    setPendingDeleteNode(node);
+  };
+
+  const handleConfirmDelete = async () => {
+    if (!pendingDeleteNode || deleting) return;
+    const targetId = pendingDeleteNode.id;
+    setDeleting(true);
+    setDeleteError(null);
+    try {
+      await onDeleteNode(targetId);
+      if (rotatedInfo?.nodeId === targetId) {
+        setRotatedInfo(null);
+      }
+      setPendingDeleteNode(null);
+    } catch (err) {
+      setDeleteError(err instanceof Error ? err.message : "移除服务器失败");
+    } finally {
+      setDeleting(false);
+    }
   };
 
   const editingNodeObj = useMemo(() => {
@@ -518,6 +638,27 @@ export function NodesOpsView({
           <span>进入双模热迁移工作台</span>
         </button>
       </div>
+
+      {/* Inline Row Action Error Banner */}
+      {rowActionError && (
+        <div
+          role="alert"
+          className="rounded-2xl border border-rose-500/40 bg-rose-500/10 px-4 py-3 text-xs text-rose-700 dark:text-rose-300 flex items-center justify-between gap-3"
+        >
+          <div className="flex items-center gap-2 min-w-0">
+            <AlertCircle className="w-4 h-4 shrink-0" aria-hidden="true" />
+            <span className="break-words">{rowActionError}</span>
+          </div>
+          <button
+            type="button"
+            onClick={() => setRowActionError(null)}
+            aria-label="关闭错误提示"
+            className="p-1 rounded-lg hover:bg-rose-500/15 shrink-0"
+          >
+            <X className="w-3.5 h-3.5" aria-hidden="true" />
+          </button>
+        </div>
+      )}
 
       {/* Rotated Token Echo Banner */}
       {rotatedInfo && (
@@ -847,6 +988,12 @@ export function NodesOpsView({
                       : trafficPct >= 75
                         ? "bg-amber-500"
                         : "bg-emerald-500";
+                  const metaLine = formatNodeMetaLine(node, {
+                    includeHostnameFallback: true,
+                  });
+                  const isMutingRow = mutingNodeId === node.id;
+                  const isRotatingRow = rotatingNodeId === node.id;
+                  const rowBusy = isMutingRow || isRotatingRow;
 
                   return (
                     <tr
@@ -880,7 +1027,8 @@ export function NodesOpsView({
                             onClick={() => onInspectNode(node, "charts")}
                             className="font-semibold text-[var(--text-primary)] hover:text-[var(--accent-primary)] transition-colors text-left"
                           >
-                            {node.region_flag} {node.name}
+                            {node.region_flag ? `${node.region_flag} ` : ""}
+                            {node.name}
                           </button>
 
                           {muted && (
@@ -891,12 +1039,8 @@ export function NodesOpsView({
                           )}
                         </div>
 
-                        <div className="mt-1 font-mono-num text-[11px] text-[var(--text-muted)] flex flex-wrap items-center gap-x-2 gap-y-0.5">
-                          <span>{node.hostname || "等待首帧握手"}</span>
-                          <span>·</span>
-                          <span>{node.ipv4_masked}</span>
-                          <span>·</span>
-                          <span>{node.provider}</span>
+                        <div className="mt-1 font-mono-num text-[11px] text-[var(--text-muted)] break-all">
+                          {metaLine || "等待首帧握手"}
                         </div>
 
                         {node.tags.length > 0 && (
@@ -1037,18 +1181,20 @@ export function NodesOpsView({
 
                           <button
                             type="button"
+                            disabled={rowBusy}
                             onClick={() => openEditModal(node)}
                             title="编辑节点配置与流量口径"
                             aria-label={`编辑 ${node.name} 配置`}
-                            className="p-1.5 rounded-lg border border-[var(--border-subtle)] bg-[var(--bg-surface)] text-[var(--text-secondary)] hover:text-sky-600 dark:hover:text-sky-400 hover:border-sky-500/40 transition-colors"
+                            className="p-1.5 rounded-lg border border-[var(--border-subtle)] bg-[var(--bg-surface)] text-[var(--text-secondary)] hover:text-sky-600 dark:hover:text-sky-400 hover:border-sky-500/40 disabled:opacity-50 transition-colors"
                           >
                             <Edit3 className="w-3.5 h-3.5" aria-hidden="true" />
                           </button>
 
                           <button
                             type="button"
+                            disabled={rowBusy}
                             onClick={() =>
-                              onMuteNode(node.id, muted ? null : 1800)
+                              void handleMuteRow(node, muted ? null : 1800)
                             }
                             title={muted ? "取消维护静默" : "快速静默 30 分钟"}
                             aria-label={
@@ -1056,13 +1202,18 @@ export function NodesOpsView({
                                 ? `取消 ${node.name} 告警静默`
                                 : `将 ${node.name} 静默 30 分钟`
                             }
-                            className={`p-1.5 rounded-lg border transition-colors ${
+                            className={`p-1.5 rounded-lg border transition-colors disabled:opacity-50 ${
                               muted
                                 ? "border-amber-500/40 bg-amber-500/15 text-amber-700 dark:text-amber-300"
                                 : "border-[var(--border-subtle)] bg-[var(--bg-surface)] text-[var(--text-secondary)] hover:text-amber-600 dark:hover:text-amber-400 hover:border-amber-500/40"
                             }`}
                           >
-                            {muted ? (
+                            {isMutingRow ? (
+                              <Loader2
+                                className="w-3.5 h-3.5 animate-spin"
+                                aria-hidden="true"
+                              />
+                            ) : muted ? (
                               <Volume2 className="w-3.5 h-3.5" aria-hidden="true" />
                             ) : (
                               <BellOff className="w-3.5 h-3.5" aria-hidden="true" />
@@ -1071,20 +1222,29 @@ export function NodesOpsView({
 
                           <button
                             type="button"
-                            onClick={() => handleRotate(node)}
+                            disabled={rowBusy}
+                            onClick={() => openRotateModal(node)}
                             title="轮换连接密钥"
                             aria-label={`轮换 ${node.name} 的连接密钥`}
-                            className="p-1.5 rounded-lg border border-[var(--border-subtle)] bg-[var(--bg-surface)] text-[var(--text-secondary)] hover:text-amber-600 dark:hover:text-amber-400 hover:border-amber-500/40 transition-colors"
+                            className="p-1.5 rounded-lg border border-[var(--border-subtle)] bg-[var(--bg-surface)] text-[var(--text-secondary)] hover:text-amber-600 dark:hover:text-amber-400 hover:border-amber-500/40 disabled:opacity-50 transition-colors"
                           >
-                            <KeyRound className="w-3.5 h-3.5" aria-hidden="true" />
+                            {isRotatingRow ? (
+                              <Loader2
+                                className="w-3.5 h-3.5 animate-spin"
+                                aria-hidden="true"
+                              />
+                            ) : (
+                              <KeyRound className="w-3.5 h-3.5" aria-hidden="true" />
+                            )}
                           </button>
 
                           <button
                             type="button"
-                            onClick={() => setPendingDeleteNode(node)}
+                            disabled={rowBusy}
+                            onClick={() => openDeleteModal(node)}
                             title="安全移除节点"
                             aria-label={`移除 ${node.name}`}
-                            className="p-1.5 rounded-lg border border-[var(--border-subtle)] bg-[var(--bg-surface)] text-[var(--text-secondary)] hover:text-rose-600 dark:hover:text-rose-400 hover:border-rose-500/40 hover:bg-rose-500/10 transition-colors"
+                            className="p-1.5 rounded-lg border border-[var(--border-subtle)] bg-[var(--bg-surface)] text-[var(--text-secondary)] hover:text-rose-600 dark:hover:text-rose-400 hover:border-rose-500/40 hover:bg-rose-500/10 disabled:opacity-50 transition-colors"
                           >
                             <Trash2 className="w-3.5 h-3.5" aria-hidden="true" />
                           </button>
@@ -1106,30 +1266,38 @@ export function NodesOpsView({
       {/* Native <dialog> Node Edit Modal */}
       <dialog
         ref={editDialogRef}
-        {...DIALOG_LIGHT_DISMISS_ATTRS}
+        {...(savingEdit ? DIALOG_LOCKED_DISMISS_ATTRS : DIALOG_LIGHT_DISMISS_ATTRS)}
         aria-labelledby={editing ? editTitleId : undefined}
         aria-label={editing ? undefined : "编辑服务器配置"}
         onPointerDown={(e) => {
-          const d = editDialogRef.current;
-          if (!d) return;
-          editPointerDownOutsideRef.current =
-            e.target === d && isOutsideDialogBounds(e, d);
+          if (!("closedBy" in HTMLDialogElement.prototype)) {
+            const d = editDialogRef.current;
+            if (!d) return;
+            editPointerDownOutsideRef.current =
+              e.target === d && isOutsideDialogBounds(e, d);
+          }
         }}
         onPointerUp={(e) => {
-          const d = editDialogRef.current;
-          const startedOutside = editPointerDownOutsideRef.current;
-          editPointerDownOutsideRef.current = false;
-          if (!d || !startedOutside) return;
-          if (e.target === d && isOutsideDialogBounds(e, d)) {
-            setEditing(null);
+          if (!("closedBy" in HTMLDialogElement.prototype)) {
+            const d = editDialogRef.current;
+            const startedOutside = editPointerDownOutsideRef.current;
+            editPointerDownOutsideRef.current = false;
+            if (!d || !startedOutside || savingEdit) return;
+            if (e.target === d && isOutsideDialogBounds(e, d)) {
+              setEditing(null);
+            }
           }
         }}
         onCancel={(e) => {
           e.preventDefault();
-          setEditing(null);
+          if (!savingEdit) setEditing(null);
         }}
         onClose={() => {
           if (!editSyncingRef.current && editing !== null) {
+            if (savingEdit) {
+              editDialogRef.current?.showModal();
+              return;
+            }
             setEditing(null);
           }
         }}
@@ -1153,9 +1321,10 @@ export function NodesOpsView({
                 </div>
                 <button
                   type="button"
+                  disabled={savingEdit}
                   onClick={() => setEditing(null)}
                   aria-label="关闭编辑窗口"
-                  className="p-1.5 rounded-lg text-[var(--text-secondary)] hover:text-[var(--text-primary)] hover:bg-[var(--bg-elevated)]"
+                  className="p-1.5 rounded-lg text-[var(--text-secondary)] hover:text-[var(--text-primary)] hover:bg-[var(--bg-elevated)] disabled:opacity-50"
                 >
                   <X className="w-4 h-4" aria-hidden="true" />
                 </button>
@@ -1163,7 +1332,7 @@ export function NodesOpsView({
 
               <form
                 noValidate
-                onSubmit={handleSaveEdit}
+                onSubmit={(e) => void handleSaveEdit(e)}
                 className="flex-1 overflow-y-auto p-5 space-y-4 text-xs"
               >
                 {editError && (
@@ -1377,8 +1546,13 @@ export function NodesOpsView({
                         <button
                           key={opt.sec}
                           type="button"
-                          onClick={() => onMuteNode(editingNodeObj.id, opt.sec)}
-                          className="px-2.5 py-1 rounded-lg text-[11px] border border-[var(--border-subtle)] bg-[var(--bg-elevated)] text-[var(--text-secondary)] hover:text-[var(--text-primary)]"
+                          disabled={
+                            savingEdit || mutingNodeId === editingNodeObj.id
+                          }
+                          onClick={() =>
+                            void handleMuteInEdit(editingNodeObj.id, opt.sec)
+                          }
+                          className="px-2.5 py-1 rounded-lg text-[11px] border border-[var(--border-subtle)] bg-[var(--bg-elevated)] text-[var(--text-secondary)] hover:text-[var(--text-primary)] disabled:opacity-50"
                         >
                           {opt.label}
                         </button>
@@ -1386,8 +1560,13 @@ export function NodesOpsView({
                       {isNodeMuted(editingNodeObj) && (
                         <button
                           type="button"
-                          onClick={() => onMuteNode(editingNodeObj.id, null)}
-                          className="px-2.5 py-1 rounded-lg text-[11px] border border-emerald-500/35 bg-emerald-500/12 text-emerald-700 dark:text-emerald-300 font-medium"
+                          disabled={
+                            savingEdit || mutingNodeId === editingNodeObj.id
+                          }
+                          onClick={() =>
+                            void handleMuteInEdit(editingNodeObj.id, null)
+                          }
+                          className="px-2.5 py-1 rounded-lg text-[11px] border border-emerald-500/35 bg-emerald-500/12 text-emerald-700 dark:text-emerald-300 font-medium disabled:opacity-50"
                         >
                           立即取消静默
                         </button>
@@ -1399,18 +1578,27 @@ export function NodesOpsView({
                 <div className="pt-3 border-t border-[var(--border-subtle)] flex items-center justify-end gap-2">
                   <button
                     type="button"
+                    disabled={savingEdit}
                     onClick={() => setEditing(null)}
-                    className="px-4 py-2 rounded-xl border border-[var(--border-subtle)] bg-[var(--bg-elevated)] text-[var(--text-secondary)] hover:text-[var(--text-primary)] font-medium"
+                    className="px-4 py-2 rounded-xl border border-[var(--border-subtle)] bg-[var(--bg-elevated)] text-[var(--text-secondary)] hover:text-[var(--text-primary)] font-medium disabled:opacity-50"
                   >
                     取消
                   </button>
                   <button
                     type="submit"
-                    className="inline-flex items-center gap-1.5 px-4 py-2 rounded-xl text-white font-semibold shadow-sm"
+                    disabled={savingEdit}
+                    className="inline-flex items-center gap-1.5 px-4 py-2 rounded-xl text-white font-semibold shadow-sm disabled:opacity-60"
                     style={{ backgroundColor: "var(--accent-solid)" }}
                   >
-                    <Save className="w-3.5 h-3.5" aria-hidden="true" />
-                    <span>保存配置变更</span>
+                    {savingEdit ? (
+                      <Loader2
+                        className="w-3.5 h-3.5 animate-spin"
+                        aria-hidden="true"
+                      />
+                    ) : (
+                      <Save className="w-3.5 h-3.5" aria-hidden="true" />
+                    )}
+                    <span>{savingEdit ? "保存中..." : "保存配置变更"}</span>
                   </button>
                 </div>
               </form>
@@ -1419,33 +1607,151 @@ export function NodesOpsView({
         </div>
       </dialog>
 
-      {/* Native <dialog> Safe Two-Step Delete Confirmation Modal */}
+      {/* Native <dialog> Token Rotation Confirmation Modal */}
       <dialog
-        ref={deleteDialogRef}
-        {...DIALOG_LIGHT_DISMISS_ATTRS}
-        aria-labelledby={pendingDeleteNode ? deleteTitleId : undefined}
-        aria-label={pendingDeleteNode ? undefined : "确认移除服务器"}
+        ref={tokenDialogRef}
+        {...(rotatingNodeId ? DIALOG_LOCKED_DISMISS_ATTRS : DIALOG_LIGHT_DISMISS_ATTRS)}
+        aria-labelledby={tokenModalNode ? tokenTitleId : undefined}
+        aria-label={tokenModalNode ? undefined : "轮换节点连接密钥"}
         onPointerDown={(e) => {
-          const d = deleteDialogRef.current;
-          if (!d) return;
-          deletePointerDownOutsideRef.current =
-            e.target === d && isOutsideDialogBounds(e, d);
+          if (!("closedBy" in HTMLDialogElement.prototype)) {
+            const d = tokenDialogRef.current;
+            if (!d) return;
+            tokenPointerDownOutsideRef.current =
+              e.target === d && isOutsideDialogBounds(e, d);
+          }
         }}
         onPointerUp={(e) => {
-          const d = deleteDialogRef.current;
-          const startedOutside = deletePointerDownOutsideRef.current;
-          deletePointerDownOutsideRef.current = false;
-          if (!d || !startedOutside) return;
-          if (e.target === d && isOutsideDialogBounds(e, d)) {
-            setPendingDeleteNode(null);
+          if (!("closedBy" in HTMLDialogElement.prototype)) {
+            const d = tokenDialogRef.current;
+            const startedOutside = tokenPointerDownOutsideRef.current;
+            tokenPointerDownOutsideRef.current = false;
+            if (!d || !startedOutside || rotatingNodeId) return;
+            if (e.target === d && isOutsideDialogBounds(e, d)) {
+              setTokenModalNode(null);
+            }
           }
         }}
         onCancel={(e) => {
           e.preventDefault();
-          setPendingDeleteNode(null);
+          if (!rotatingNodeId) setTokenModalNode(null);
+        }}
+        onClose={() => {
+          if (!tokenSyncingRef.current && tokenModalNode !== null) {
+            if (rotatingNodeId) {
+              tokenDialogRef.current?.showModal();
+              return;
+            }
+            setTokenModalNode(null);
+          }
+        }}
+        className="m-auto w-[min(28rem,calc(100vw-2rem))] overflow-hidden overscroll-contain rounded-2xl border border-amber-500/35 bg-[var(--bg-surface)] text-[var(--text-primary)] shadow-2xl"
+      >
+        <div className="flex flex-col w-full bg-[var(--bg-surface)] text-[var(--text-primary)] p-5 space-y-4">
+          {tokenModalNode && (
+            <>
+              <div className="flex items-start gap-3">
+                <div className="w-10 h-10 rounded-xl bg-amber-500/15 border border-amber-500/35 flex items-center justify-center shrink-0">
+                  <KeyRound
+                    className="w-5 h-5 text-amber-600 dark:text-amber-400"
+                    aria-hidden="true"
+                  />
+                </div>
+                <div className="min-w-0 space-y-1">
+                  <h2
+                    id={tokenTitleId}
+                    className="text-sm font-bold text-[var(--text-primary)]"
+                  >
+                    轮换探针连接密钥？
+                  </h2>
+                  <p className="text-xs text-[var(--text-secondary)] leading-relaxed">
+                    即将为{" "}
+                    <span className="font-semibold text-[var(--text-primary)]">
+                      {tokenModalNode.region_flag
+                        ? `${tokenModalNode.region_flag} `
+                        : ""}
+                      {tokenModalNode.name}
+                    </span>{" "}
+                    签发一次性新密钥。旧密钥哈希将立即吊销，需在服务器终端执行新命令重连。
+                  </p>
+                </div>
+              </div>
+
+              {tokenError && (
+                <div
+                  role="alert"
+                  className="rounded-xl border border-rose-500/40 bg-rose-500/10 px-3 py-2 text-xs text-rose-700 dark:text-rose-300"
+                >
+                  {tokenError}
+                </div>
+              )}
+
+              <div className="flex items-center justify-end gap-2 pt-2 border-t border-[var(--border-subtle)]">
+                <button
+                  type="button"
+                  disabled={Boolean(rotatingNodeId)}
+                  onClick={() => setTokenModalNode(null)}
+                  className="px-4 py-2 rounded-xl text-xs font-medium border border-[var(--border-subtle)] bg-[var(--bg-elevated)] text-[var(--text-secondary)] hover:text-[var(--text-primary)] disabled:opacity-50"
+                >
+                  取消
+                </button>
+                <button
+                  type="button"
+                  disabled={Boolean(rotatingNodeId)}
+                  onClick={() => void handleConfirmRotate()}
+                  className="inline-flex items-center gap-1.5 px-4 py-2 rounded-xl text-xs font-semibold bg-amber-600 hover:bg-amber-500 text-white shadow-sm disabled:opacity-60"
+                >
+                  {rotatingNodeId ? (
+                    <Loader2
+                      className="w-3.5 h-3.5 animate-spin"
+                      aria-hidden="true"
+                    />
+                  ) : (
+                    <KeyRound className="w-3.5 h-3.5" aria-hidden="true" />
+                  )}
+                  <span>{rotatingNodeId ? "轮换中..." : "确认轮换密钥"}</span>
+                </button>
+              </div>
+            </>
+          )}
+        </div>
+      </dialog>
+
+      {/* Native <dialog> Safe Two-Step Delete Confirmation Modal */}
+      <dialog
+        ref={deleteDialogRef}
+        {...(deleting ? DIALOG_LOCKED_DISMISS_ATTRS : DIALOG_LIGHT_DISMISS_ATTRS)}
+        aria-labelledby={pendingDeleteNode ? deleteTitleId : undefined}
+        aria-label={pendingDeleteNode ? undefined : "确认移除服务器"}
+        onPointerDown={(e) => {
+          if (!("closedBy" in HTMLDialogElement.prototype)) {
+            const d = deleteDialogRef.current;
+            if (!d) return;
+            deletePointerDownOutsideRef.current =
+              e.target === d && isOutsideDialogBounds(e, d);
+          }
+        }}
+        onPointerUp={(e) => {
+          if (!("closedBy" in HTMLDialogElement.prototype)) {
+            const d = deleteDialogRef.current;
+            const startedOutside = deletePointerDownOutsideRef.current;
+            deletePointerDownOutsideRef.current = false;
+            if (!d || !startedOutside || deleting) return;
+            if (e.target === d && isOutsideDialogBounds(e, d)) {
+              setPendingDeleteNode(null);
+            }
+          }
+        }}
+        onCancel={(e) => {
+          e.preventDefault();
+          if (!deleting) setPendingDeleteNode(null);
         }}
         onClose={() => {
           if (!deleteSyncingRef.current && pendingDeleteNode !== null) {
+            if (deleting) {
+              deleteDialogRef.current?.showModal();
+              return;
+            }
             setPendingDeleteNode(null);
           }
         }}
@@ -1471,7 +1777,10 @@ export function NodesOpsView({
                   <p className="text-xs text-[var(--text-secondary)] leading-relaxed">
                     即将移除{" "}
                     <span className="font-semibold text-[var(--text-primary)]">
-                      {pendingDeleteNode.region_flag} {pendingDeleteNode.name}
+                      {pendingDeleteNode.region_flag
+                        ? `${pendingDeleteNode.region_flag} `
+                        : ""}
+                      {pendingDeleteNode.name}
                     </span>
                     （<span className="font-mono-num">{pendingDeleteNode.id}</span>
                     ）。节点配置、连接密钥哈希与关联事件将被清理，探针将立即失去接入权限。
@@ -1479,24 +1788,39 @@ export function NodesOpsView({
                 </div>
               </div>
 
+              {deleteError && (
+                <div
+                  role="alert"
+                  className="rounded-xl border border-rose-500/40 bg-rose-500/10 px-3 py-2 text-xs text-rose-700 dark:text-rose-300"
+                >
+                  {deleteError}
+                </div>
+              )}
+
               <div className="flex items-center justify-end gap-2 pt-2 border-t border-[var(--border-subtle)]">
                 <button
                   type="button"
+                  disabled={deleting}
                   onClick={() => setPendingDeleteNode(null)}
-                  className="px-4 py-2 rounded-xl text-xs font-medium border border-[var(--border-subtle)] bg-[var(--bg-elevated)] text-[var(--text-secondary)] hover:text-[var(--text-primary)]"
+                  className="px-4 py-2 rounded-xl text-xs font-medium border border-[var(--border-subtle)] bg-[var(--bg-elevated)] text-[var(--text-secondary)] hover:text-[var(--text-primary)] disabled:opacity-50"
                 >
                   取消保留
                 </button>
                 <button
                   type="button"
-                  onClick={() => {
-                    onDeleteNode(pendingDeleteNode.id);
-                    setPendingDeleteNode(null);
-                  }}
-                  className="inline-flex items-center gap-1.5 px-4 py-2 rounded-xl text-xs font-semibold bg-rose-600 hover:bg-rose-500 text-white shadow-sm"
+                  disabled={deleting}
+                  onClick={() => void handleConfirmDelete()}
+                  className="inline-flex items-center gap-1.5 px-4 py-2 rounded-xl text-xs font-semibold bg-rose-600 hover:bg-rose-500 text-white shadow-sm disabled:opacity-60"
                 >
-                  <Trash2 className="w-3.5 h-3.5" aria-hidden="true" />
-                  <span>确认永久移除</span>
+                  {deleting ? (
+                    <Loader2
+                      className="w-3.5 h-3.5 animate-spin"
+                      aria-hidden="true"
+                    />
+                  ) : (
+                    <Trash2 className="w-3.5 h-3.5" aria-hidden="true" />
+                  )}
+                  <span>{deleting ? "移除中..." : "确认永久移除"}</span>
                 </button>
               </div>
             </>

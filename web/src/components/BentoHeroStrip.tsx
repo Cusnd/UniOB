@@ -18,9 +18,9 @@ import {
 } from "lucide-react";
 import type {
   AppRoute,
+  HorizonNode,
   HubStatusResponse,
   InspectorTab,
-  PrototypeNode,
   WatchdogHealthStatus,
 } from "../types";
 import {
@@ -32,25 +32,32 @@ import {
 } from "../utils/format";
 
 export interface BentoHeroStripProps {
-  nodes: PrototypeNode[];
+  nodes: HorizonNode[];
   activeAlertsCount: number;
-  hubStatus: HubStatusResponse;
-  onSelectNode: (node: PrototypeNode, initialTab?: InspectorTab) => void;
+  hubStatus: HubStatusResponse | null;
+  onSelectNode: (node: HorizonNode, initialTab?: InspectorTab) => void;
   onNavigate: (route: AppRoute) => void;
 }
 
 interface HotspotItem {
-  node: PrototypeNode;
+  node: HorizonNode;
   kind: "offline" | "steal" | "mem" | "traffic";
   label: string;
   valueText: string;
   severity: "critical" | "warning";
 }
 
-function getWatchdogMeta(status: WatchdogHealthStatus): {
+function getWatchdogMeta(status?: WatchdogHealthStatus | null): {
   label: string;
   badgeCls: string;
 } {
+  if (!status) {
+    return {
+      label: "检测中",
+      badgeCls:
+        "border-[var(--border-subtle)] bg-[var(--bg-elevated)] text-[var(--text-secondary)]",
+    };
+  }
   switch (status) {
     case "healthy":
       return {
@@ -252,12 +259,11 @@ export function BentoHeroStrip({
   const rxPaths = buildAreaPaths(summary.aggRx, netMax, svgWidth, svgHeight);
   const txPaths = buildAreaPaths(summary.aggTx, netMax, svgWidth, svgHeight);
 
-  const isCloudflare = hubStatus.mode === "cloudflare-worker";
-  const watchdogMeta = getWatchdogMeta(hubStatus.watchdog.status);
-  const estimatedD1QuotaPct = Math.min(
-    88,
-    Math.max(4, Math.round(hubStatus.total_nodes * 1.35)),
-  );
+  const isCloudflare = hubStatus?.mode === "cloudflare-worker";
+  const watchdogMeta = getWatchdogMeta(hubStatus?.watchdog.status);
+  const estimatedD1QuotaPct = hubStatus
+    ? Math.min(88, Math.max(4, Math.round(hubStatus.total_nodes * 1.35)))
+    : 0;
 
   return (
     <section
@@ -281,9 +287,11 @@ export function BentoHeroStrip({
               </span>
               <span
                 className={`px-2 py-0.5 rounded-full text-[11px] font-semibold border ${
-                  summary.offlineCount === 0
-                    ? "border-emerald-500/30 bg-emerald-500/10 text-emerald-700 dark:text-emerald-300"
-                    : "border-amber-500/35 bg-amber-500/10 text-amber-700 dark:text-amber-300"
+                  nodes.length === 0
+                    ? "border-[var(--border-subtle)] bg-[var(--bg-elevated)] text-[var(--text-secondary)]"
+                    : summary.offlineCount === 0
+                      ? "border-emerald-500/30 bg-emerald-500/10 text-emerald-700 dark:text-emerald-300"
+                      : "border-amber-500/35 bg-amber-500/10 text-amber-700 dark:text-amber-300"
                 }`}
               >
                 {summary.onlinePct.toFixed(1)}%
@@ -313,76 +321,88 @@ export function BentoHeroStrip({
 
         {/* Clickable Waffle Matrix */}
         <div>
-          <div
-            className="grid grid-cols-6 sm:grid-cols-8 xl:grid-cols-6 gap-1.5"
-            role="group"
-            aria-label="节点健康状态快捷矩阵"
-          >
-            {nodes.map((node) => {
-              const m = node.metrics;
-              const steal = m?.cpu.steal ?? 0;
-              const memPct = getMemUsagePct(node);
-              const cpuPct = m?.cpu.all ?? 0;
-              const trafficPct = getTrafficUsagePct(node.traffic);
-              const isWarn =
-                node.online &&
-                (steal >= 1.5 ||
-                  memPct >= 85 ||
-                  cpuPct >= 85 ||
-                  (node.traffic.limit_bytes !== null &&
-                    node.traffic.limit_bytes > 0 &&
-                    trafficPct >= 85));
-              const muted = isNodeMuted(node);
+          {nodes.length === 0 ? (
+            <div className="h-14 rounded-xl border border-dashed border-[var(--border-subtle)] bg-[var(--bg-elevated)]/60 flex items-center justify-center px-3 text-center text-[11px] text-[var(--text-secondary)]">
+              暂无服务器，点击右上角新增探针
+            </div>
+          ) : (
+            <div
+              className={`grid grid-cols-6 sm:grid-cols-8 xl:grid-cols-6 gap-1.5 ${
+                nodes.length > 36 ? "max-h-28 overflow-y-auto pr-0.5" : ""
+              }`}
+              role="group"
+              aria-label="节点健康状态快捷矩阵"
+            >
+              {nodes.map((node) => {
+                const m = node.metrics;
+                const steal = m?.cpu.steal ?? 0;
+                const memPct = getMemUsagePct(node);
+                const cpuPct = m?.cpu.all ?? 0;
+                const trafficPct = getTrafficUsagePct(node.traffic);
+                const isWarn =
+                  node.online &&
+                  (steal >= 1.5 ||
+                    memPct >= 85 ||
+                    cpuPct >= 85 ||
+                    (node.traffic.limit_bytes !== null &&
+                      node.traffic.limit_bytes > 0 &&
+                      trafficPct >= 85));
+                const muted = isNodeMuted(node);
 
-              const tileStateLabel = !node.online
-                ? "离线"
-                : isWarn
-                  ? "资源预警"
-                  : "运行正常";
+                const tileStateLabel = !node.online
+                  ? "离线"
+                  : isWarn
+                    ? "资源预警"
+                    : "运行正常";
 
-              return (
-                <button
-                  key={node.id}
-                  type="button"
-                  onClick={() => onSelectNode(node, "charts")}
-                  onMouseEnter={() => setHoveredNodeId(node.id)}
-                  onMouseLeave={() => setHoveredNodeId(null)}
-                  onFocus={() => setHoveredNodeId(node.id)}
-                  onBlur={() => setHoveredNodeId(null)}
-                  title={`${node.name} (${tileStateLabel})`}
-                  aria-label={`${node.name}，${tileStateLabel}，点击查看详情`}
-                  className={`h-6 rounded-md border flex items-center justify-center text-[10px] font-mono-num transition-transform hover:scale-105 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--accent-primary)] ${
-                    !node.online
-                      ? "border-rose-500/60 bg-rose-500/20 text-rose-600 dark:text-rose-300"
-                      : isWarn
-                        ? "border-amber-500/60 bg-amber-500/20 text-amber-700 dark:text-amber-300"
-                        : "border-emerald-500/45 bg-emerald-500/18 text-emerald-700 dark:text-emerald-300"
-                  } ${muted ? "border-dashed" : ""}`}
-                >
-                  {!node.online ? (
-                    <WifiOff className="w-3 h-3" aria-hidden="true" />
-                  ) : isWarn ? (
-                    <AlertTriangle className="w-3 h-3" aria-hidden="true" />
-                  ) : (
-                    <span className="text-[9px] font-bold">
-                      {node.region_code.slice(0, 2)}
-                    </span>
-                  )}
-                </button>
-              );
-            })}
-          </div>
+                return (
+                  <button
+                    key={node.id}
+                    type="button"
+                    onClick={() => onSelectNode(node, "charts")}
+                    onMouseEnter={() => setHoveredNodeId(node.id)}
+                    onMouseLeave={() => setHoveredNodeId(null)}
+                    onFocus={() => setHoveredNodeId(node.id)}
+                    onBlur={() => setHoveredNodeId(null)}
+                    title={`${node.name} (${tileStateLabel})`}
+                    aria-label={`${node.name}，${tileStateLabel}，点击查看详情`}
+                    className={`h-6 rounded-md border flex items-center justify-center text-[10px] font-mono-num transition-transform hover:scale-105 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--accent-primary)] ${
+                      !node.online
+                        ? "border-rose-500/60 bg-rose-500/20 text-rose-600 dark:text-rose-300"
+                        : isWarn
+                          ? "border-amber-500/60 bg-amber-500/20 text-amber-700 dark:text-amber-300"
+                          : "border-emerald-500/45 bg-emerald-500/18 text-emerald-700 dark:text-emerald-300"
+                    } ${muted ? "border-dashed" : ""}`}
+                  >
+                    {!node.online ? (
+                      <WifiOff className="w-3 h-3" aria-hidden="true" />
+                    ) : isWarn ? (
+                      <AlertTriangle className="w-3 h-3" aria-hidden="true" />
+                    ) : (
+                      <span className="text-[9px] font-bold">
+                        {(node.region_code || node.name).slice(0, 2).toUpperCase()}
+                      </span>
+                    )}
+                  </button>
+                );
+              })}
+            </div>
+          )}
 
           <div className="mt-2 h-4 flex items-center justify-between text-[11px] font-mono-num text-[var(--text-secondary)] truncate">
             {hoveredNode ? (
               <span className="truncate text-[var(--text-primary)]">
-                {hoveredNode.region_flag} {hoveredNode.name} ·{" "}
+                {[hoveredNode.region_flag, hoveredNode.name].filter(Boolean).join(" ")} ·{" "}
                 {hoveredNode.online
                   ? `CPU ${(hoveredNode.metrics?.cpu.all ?? 0).toFixed(1)}%`
                   : `离线 ${formatRelativeTime(hoveredNode.last_seen_ts)}`}
               </span>
             ) : (
-              <span>点击任意晶格直达服务器遥测</span>
+              <span>
+                {nodes.length === 0
+                  ? "等待接入首台服务器探针"
+                  : "点击任意晶格直达服务器遥测"}
+              </span>
             )}
           </div>
         </div>
@@ -407,7 +427,7 @@ export function BentoHeroStrip({
               </span>
             </div>
           </div>
-          <span className="px-2 py-0.5 rounded-full text-[10px] font-mono-num border border-[var(--border-subtle)] bg-[var(--bg-elevated)] text-[var(--text-secondary)]">
+          <span className="px-2 py-0.5 rounded-full text-[10px] font-mono-num border border-[var(--border-subtle)] bg-[var(--bg-elevated)] text-[var(--text-secondary)] whitespace-nowrap shrink-0">
             24 点聚合
           </span>
         </div>
@@ -580,38 +600,72 @@ export function BentoHeroStrip({
         <div className="flex items-start justify-between gap-2">
           <div>
             <div className="flex items-center gap-1.5 text-[11px] font-medium text-[var(--text-secondary)]">
-              {isCloudflare ? (
+              {!hubStatus ? (
+                <Server
+                  className="w-3.5 h-3.5 text-[var(--text-secondary)]"
+                  aria-hidden="true"
+                />
+              ) : isCloudflare ? (
                 <Cloud className="w-3.5 h-3.5 text-sky-500" aria-hidden="true" />
               ) : (
                 <Server className="w-3.5 h-3.5 text-emerald-500" aria-hidden="true" />
               )}
               <span>控制面架构与配额</span>
             </div>
-            <div className="mt-1 flex items-center gap-1.5">
-              <span className="text-sm font-bold text-[var(--text-primary)]">
-                {isCloudflare ? "Cloudflare SCCH" : "Rust uniob-hub"}
+            <div className="mt-1 flex flex-wrap items-center gap-1.5">
+              <span className="text-sm font-bold text-[var(--text-primary)] whitespace-nowrap shrink-0">
+                {!hubStatus
+                  ? "连接控制面中…"
+                  : isCloudflare
+                    ? "Cloudflare SCCH"
+                    : "Rust uniob-hub"}
               </span>
-              <span className="px-1.5 py-0.5 rounded-md text-[10px] font-mono-num font-semibold border border-sky-500/30 bg-sky-500/10 text-sky-700 dark:text-sky-300">
-                {isCloudflare ? "$0/月" : `v${hubStatus.version}`}
+              <span
+                className={`px-1.5 py-0.5 rounded-md text-[10px] font-mono-num font-semibold border whitespace-nowrap shrink-0 ${
+                  !hubStatus
+                    ? "border-[var(--border-subtle)] bg-[var(--bg-elevated)] text-[var(--text-secondary)]"
+                    : "border-sky-500/30 bg-sky-500/10 text-sky-700 dark:text-sky-300"
+                }`}
+              >
+                {!hubStatus
+                  ? "同步中"
+                  : isCloudflare
+                    ? "$0/月"
+                    : `v${hubStatus.version}`}
               </span>
             </div>
           </div>
 
           <span
-            className={`px-2 py-0.5 rounded-full text-[10px] font-medium border ${watchdogMeta.badgeCls}`}
+            className={`px-2 py-0.5 rounded-full text-[10px] font-medium border whitespace-nowrap shrink-0 ${watchdogMeta.badgeCls}`}
           >
             看门狗: {watchdogMeta.label}
           </span>
         </div>
 
-        {isCloudflare ? (
+        {!hubStatus ? (
+          <div className="space-y-2 text-[11px] font-mono-num">
+            <div className="flex items-center justify-between gap-2">
+              <span className="text-[var(--text-secondary)]">运行架构</span>
+              <span className="text-[var(--text-secondary)] whitespace-nowrap shrink-0">
+                正在获取拓扑…
+              </span>
+            </div>
+            <div className="flex items-center justify-between gap-2">
+              <span className="text-[var(--text-secondary)]">探针连接</span>
+              <span className="text-[var(--text-primary)] font-semibold whitespace-nowrap shrink-0">
+                {summary.onlineCount} / {nodes.length} 在线
+              </span>
+            </div>
+          </div>
+        ) : isCloudflare ? (
           <div className="space-y-2 text-[11px] font-mono-num">
             <div>
-              <div className="flex items-center justify-between mb-1">
+              <div className="flex items-center justify-between gap-2 mb-1">
                 <span className="text-[var(--text-secondary)]">
                   D1 日行写入配额 (Zero-Hot-Path)
                 </span>
-                <span className="font-semibold text-[var(--text-primary)]">
+                <span className="font-semibold text-[var(--text-primary)] whitespace-nowrap shrink-0">
                   ~{estimatedD1QuotaPct}% / 100k
                 </span>
               </div>
@@ -622,24 +676,24 @@ export function BentoHeroStrip({
                 />
               </div>
             </div>
-            <div className="flex items-center justify-between text-[var(--text-secondary)]">
-              <span>DO 环形分块 TSDB</span>
-              <span className="text-emerald-600 dark:text-emerald-400 font-semibold">
+            <div className="flex flex-wrap items-center justify-between gap-2 text-[var(--text-secondary)]">
+              <span className="whitespace-nowrap">DO 环形分块 TSDB</span>
+              <span className="text-emerald-600 dark:text-emerald-400 font-semibold whitespace-nowrap shrink-0">
                 30s 热片 · 0 D1 压力
               </span>
             </div>
           </div>
         ) : (
           <div className="space-y-2 text-[11px] font-mono-num">
-            <div className="flex items-center justify-between">
+            <div className="flex items-center justify-between gap-2">
               <span className="text-[var(--text-secondary)]">存储与持久化</span>
-              <span className="text-emerald-600 dark:text-emerald-400 font-semibold">
+              <span className="text-emerald-600 dark:text-emerald-400 font-semibold whitespace-nowrap shrink-0">
                 SQLite WAL 毫秒落盘
               </span>
             </div>
-            <div className="flex items-center justify-between">
+            <div className="flex items-center justify-between gap-2">
               <span className="text-[var(--text-secondary)]">探针直连会话</span>
-              <span className="text-[var(--text-primary)] font-semibold">
+              <span className="text-[var(--text-primary)] font-semibold whitespace-nowrap shrink-0">
                 {hubStatus.connected_agents} / {hubStatus.total_nodes} 通道就绪
               </span>
             </div>

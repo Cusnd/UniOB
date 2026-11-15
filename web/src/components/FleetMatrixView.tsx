@@ -11,8 +11,9 @@ import {
   Terminal,
   WifiOff,
 } from "lucide-react";
-import type { DensityMode, InspectorTab, PrototypeNode } from "../types";
+import type { DensityMode, HorizonNode, InspectorTab } from "../types";
 import {
+  formatNodeMetaLine,
   formatRate,
   formatRelativeTime,
   getMemUsagePct,
@@ -23,14 +24,14 @@ import {
 } from "../utils/format";
 
 export interface FleetMatrixViewProps {
-  nodes: PrototypeNode[];
+  nodes: HorizonNode[];
   density: DensityMode;
-  onSelectNode: (node: PrototypeNode, initialTab?: InspectorTab) => void;
+  onSelectNode: (node: HorizonNode, initialTab?: InspectorTab) => void;
 }
 
 interface GroupCluster {
   name: string;
-  nodes: PrototypeNode[];
+  nodes: HorizonNode[];
   onlineCount: number;
   onlinePct: number;
   totalTxBps: number;
@@ -51,7 +52,7 @@ export function FleetMatrixView({
   const isCompact = density === "compact";
 
   const clusters = useMemo<GroupCluster[]>(() => {
-    const map = new Map<string, PrototypeNode[]>();
+    const map = new Map<string, HorizonNode[]>();
     for (const node of nodes) {
       const grp = node.group_name || "未分组";
       const list = map.get(grp);
@@ -182,7 +183,9 @@ export function FleetMatrixView({
                     <ArrowUp className="w-3 h-3" aria-hidden="true" />
                     {formatRate(cluster.totalTxBps)}
                   </span>
-                  <span className="text-[var(--border-subtle)]">|</span>
+                  <span className="text-[var(--border-subtle)]" aria-hidden="true">
+                    |
+                  </span>
                   <span className="inline-flex items-center gap-1 text-cyan-600 dark:text-cyan-400">
                     <ArrowDown className="w-3 h-3" aria-hidden="true" />
                     {formatRate(cluster.totalRxBps)}
@@ -234,6 +237,8 @@ export function FleetMatrixView({
                   trafficPct >= 85;
                 const hasWarn =
                   node.online && (stealPct >= 1.5 || memPct >= 85 || hasTrafficWarn);
+                const metaLine =
+                  formatNodeMetaLine(node, { includeHostnameFallback: true }) || "—";
 
                 return (
                   <div
@@ -264,9 +269,11 @@ export function FleetMatrixView({
                               aria-label="离线"
                             />
                           )}
-                          <span aria-hidden="true" className="text-xs">
-                            {node.region_flag}
-                          </span>
+                          {node.region_flag && (
+                            <span aria-hidden="true" className="text-xs shrink-0">
+                              {node.region_flag}
+                            </span>
+                          )}
                           <button
                             type="button"
                             onClick={(e) => {
@@ -279,7 +286,7 @@ export function FleetMatrixView({
                           </button>
                         </div>
                         <div className="mt-0.5 text-[10px] font-mono-num text-[var(--text-secondary)] truncate">
-                          {node.region_code} · {node.provider}
+                          {metaLine}
                         </div>
                       </div>
 

@@ -375,6 +375,31 @@ export interface SmartMigrateResponse {
   epoch: number;
 }
 
-export type AppRoute = "dashboard" | "nodes" | "alerts";
+export type AppRoute = "dashboard" | "nodes" | "migration" | "alerts";
+export type FleetViewMode = "bento" | "table" | "matrix";
 export type ViewMode = "grid" | "table";
 export type ThemeMode = "dark" | "light" | "system";
+export type AccentPreset = "emerald" | "indigo" | "cyan";
+export type DensityMode = "comfortable" | "compact";
+export type InspectorTab = "charts" | "procs" | "hardware";
+
+export type ToastTone = "success" | "info" | "warning" | "danger";
+
+export interface ToastMessage {
+  id: string;
+  tone: ToastTone;
+  title: string;
+  description?: string;
+}
+
+export interface HorizonNode extends NodeSummary {
+  region_code: string;
+  region_flag: string;
+  provider: string;
+  ipv4_masked: string;
+  sparkline_cpu: number[];
+  sparkline_rx: number[];
+  sparkline_tx: number[];
+}
+
+export type PrototypeNode = HorizonNode;

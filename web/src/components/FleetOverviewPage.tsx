@@ -13,9 +13,9 @@ import type {
   AppRoute,
   DensityMode,
   FleetViewMode,
+  HorizonNode,
   HubStatusResponse,
   InspectorTab,
-  PrototypeNode,
 } from "../types";
 import { getMemUsagePct, getTrafficUsagePct } from "../utils/format";
 import { BentoHeroStrip } from "./BentoHeroStrip";
@@ -24,26 +24,26 @@ import { FleetDataGrid } from "./FleetDataGrid";
 import { FleetMatrixView } from "./FleetMatrixView";
 
 export interface FleetOverviewPageProps {
-  nodes: PrototypeNode[];
+  nodes: HorizonNode[];
   groups: string[];
   selectedGroup: string;
-  onGroupChange: (group: string) => void;
+  onGroupChange: (g: string) => void;
   searchQuery: string;
   onSearchChange: (q: string) => void;
   viewMode: FleetViewMode;
-  onViewModeChange: (mode: FleetViewMode) => void;
+  onViewModeChange: (m: FleetViewMode) => void;
   activeAlertsCount: number;
-  hubStatus: HubStatusResponse;
+  hubStatus: HubStatusResponse | null;
   density: DensityMode;
-  onSelectNode: (node: PrototypeNode, initialTab?: InspectorTab) => void;
-  onMuteNode: (nodeId: string, seconds: number | null) => void;
+  onSelectNode: (node: HorizonNode, initialTab?: InspectorTab) => void;
+  onMuteNode: (nodeId: string, seconds: number | null) => void | Promise<void>;
   onOpenAddServer: () => void;
   onNavigate: (route: AppRoute) => void;
 }
 
 type HealthFilter = "all" | "online" | "attention" | "offline";
 
-function isAttentionNode(node: PrototypeNode): boolean {
+function isAttentionNode(node: HorizonNode): boolean {
   if (!node.online) return true;
   const steal = node.metrics?.cpu.steal ?? 0;
   const memPct = getMemUsagePct(node);
@@ -109,7 +109,7 @@ export function FleetOverviewPage({
       return (
         n.name.toLowerCase().includes(q) ||
         (n.hostname ?? "").toLowerCase().includes(q) ||
-        n.group_name.toLowerCase().includes(q) ||
+        (n.group_name ?? "").toLowerCase().includes(q) ||
         n.provider.toLowerCase().includes(q) ||
         n.region_code.toLowerCase().includes(q) ||
         n.ipv4_masked.toLowerCase().includes(q) ||
@@ -142,7 +142,10 @@ export function FleetOverviewPage({
       />
 
       {/* Filter & View Switcher Toolbar */}
-      <div className="surface-card rounded-2xl p-3 sm:p-3.5 space-y-2.5">
+      <search
+        aria-label="筛选与搜索机群服务器"
+        className="block surface-card rounded-2xl p-3 sm:p-3.5 space-y-2.5"
+      >
         <div className="flex flex-col xl:flex-row xl:items-center xl:justify-between gap-3">
           {/* Group Pills */}
           <div
@@ -308,7 +311,7 @@ export function FleetOverviewPage({
             )}
           </div>
         </div>
-      </div>
+      </search>
 
       {/* Main Fleet View */}
       {filteredNodes.length === 0 ? (
@@ -319,10 +322,14 @@ export function FleetOverviewPage({
           />
           <div>
             <p className="text-sm font-semibold text-[var(--text-primary)]">
-              没有符合当前条件的服务器
+              {nodes.length === 0
+                ? "暂无已接入的服务器"
+                : "没有符合当前条件的服务器"}
             </p>
             <p className="text-xs text-[var(--text-secondary)] mt-1">
-              可尝试放宽分组、状态或关键词过滤，或直接部署一台新节点探针。
+              {nodes.length === 0
+                ? "点击下方「部署探针」添加第一台 Linux 服务器，开启实时遥测。"
+                : "可尝试放宽分组、状态或关键词过滤，或直接部署一台新节点探针。"}
             </p>
           </div>
           <div className="flex items-center justify-center gap-2">

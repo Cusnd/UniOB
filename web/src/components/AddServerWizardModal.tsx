@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useId, useMemo, useRef, useState } from "react";
 import {
+  AlertTriangle,
   Check,
   CheckCircle2,
   Copy,
@@ -7,36 +8,41 @@ import {
   Loader2,
   Lock,
   Plus,
+  RefreshCw,
   Server,
   ShieldCheck,
   Sparkles,
   Terminal,
   X,
-  Zap,
 } from "lucide-react";
 import type {
   CreateNodePayload,
   CreateNodeResponse,
-  PrototypeNode,
+  HorizonNode,
   TrafficCountMode,
 } from "../types";
+import type { WsConnectionStatus } from "../hooks/useFleetSocket";
 import { formatTrafficMode } from "../utils/format";
 
 export interface AddServerWizardModalProps {
   open: boolean;
   existingGroups: string[];
-  nodes: PrototypeNode[];
+  nodes: HorizonNode[];
+  wsStatus: WsConnectionStatus;
   onClose: () => void;
-  onCreateNode: (payload: CreateNodePayload) => CreateNodeResponse;
-  onSimulateOnline: (nodeId: string) => void;
-  onInspectNode: (node: PrototypeNode) => void;
+  onCreateNode: (payload: CreateNodePayload) => Promise<CreateNodeResponse>;
+  onRefreshNodes: () => Promise<void>;
+  onInspectNode: (node: HorizonNode) => void;
 }
 
-const DIALOG_LIGHT_DISMISS_ATTRS: Record<string, string> = {
-  closedby: "any",
-};
-
-const QUICK_TAG_SUGGESTIONS = ["Prod", "BGP", "Edge", "NVMe", "1G-VPS", "CN2-GIA"];
+const QUICK_TAG_SUGGESTIONS = [
+  "Prod",
+  "BGP",
+  "Edge",
+  "NVMe",
+  "1G-VPS",
+  "CN2-GIA",
+];
 
 function isOutsideDialogBounds(
   e: React.PointerEvent<HTMLDialogElement>,
@@ -84,10 +90,12 @@ function WizardCopyButton({
   text,
   label,
   ariaLabel,
+  compact = false,
 }: {
   text: string;
   label: string;
   ariaLabel: string;
+  compact?: boolean;
 }) {
   const [copied, setCopied] = useState(false);
   const [failed, setFailed] = useState(false);
@@ -123,12 +131,16 @@ function WizardCopyButton({
         type="button"
         onClick={() => void handleCopy()}
         aria-label={ariaLabel}
-        className={`inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-medium border transition-colors ${
+        className={`inline-flex items-center gap-1.5 rounded-lg text-xs font-medium border transition-colors ${
+          compact ? "px-2.5 py-1" : "px-3 py-1.5"
+        } ${
           copied
-            ? "border-emerald-500/50 bg-emerald-500/20 text-emerald-300"
+            ? "border-emerald-500/50 bg-emerald-500/20 text-emerald-700 dark:text-emerald-300"
             : failed
-              ? "border-rose-500/50 bg-rose-500/20 text-rose-300"
-              : "border-slate-700 bg-slate-800/90 text-slate-200 hover:bg-slate-700"
+              ? "border-rose-500/50 bg-rose-500/20 text-rose-700 dark:text-rose-300"
+              : compact
+                ? "border-[var(--border-subtle)] bg-[var(--bg-elevated)] text-[var(--text-primary)] hover:bg-[var(--bg-card-hover)]"
+                : "border-slate-700 bg-slate-800/90 text-slate-200 hover:bg-slate-700"
         }`}
       >
         {copied ? (
@@ -160,7 +172,8 @@ function renderHighlightedCommand(cmd: string): React.JSX.Element[] {
     } else if (token === "|" || token === "--") {
       cls = "text-amber-400 font-semibold";
     } else if (token.startsWith("https://") || token.startsWith("http://")) {
-      cls = "text-emerald-300 underline decoration-emerald-500/40 underline-offset-2";
+      cls =
+        "text-emerald-300 underline decoration-emerald-500/40 underline-offset-2";
     } else if (token === "--cmdline" || token === "--disable-proc") {
       cls = "text-fuchsia-300 font-semibold";
     } else if (token.startsWith("-")) {
@@ -186,9 +199,10 @@ export function AddServerWizardModal({
   open,
   existingGroups,
   nodes,
+  wsStatus,
   onClose,
   onCreateNode,
-  onSimulateOnline,
+  onRefreshNodes,
   onInspectNode,
 }: AddServerWizardModalProps): React.JSX.Element {
   const baseId = useId();
@@ -207,42 +221,48 @@ export function AddServerWizardModal({
   const dialogRef = useRef<HTMLDialogElement | null>(null);
   const pointerDownOutsideRef = useRef(false);
   const syncingCloseRef = useRef(false);
+  const openRef = useRef(open);
+  openRef.current = open;
+
+  const defaultGroupRef = useRef(existingGroups[0] ?? "Default");
+  defaultGroupRef.current = existingGroups[0] ?? "Default";
+  const nextSortOrderRef = useRef(String(nodes.length + 1));
+  nextSortOrderRef.current = String(nodes.length + 1);
 
   const [name, setName] = useState("");
-  const [groupName, setGroupName] = useState(
-    existingGroups[0] ?? "亚太核心 BGP",
-  );
+  const [groupName, setGroupName] = useState(existingGroups[0] ?? "Default");
   const [tagsText, setTagsText] = useState("");
   const [sortOrder, setSortOrder] = useState(String(nodes.length + 1));
-  const [limitGb, setLimitGb] = useState("2048");
+  const [limitGb, setLimitGb] = useState("");
   const [resetDay, setResetDay] = useState("1");
   const [countMode, setCountMode] = useState<TrafficCountMode>("both");
   const [formError, setFormError] = useState<string | null>(null);
+  const [submitting, setSubmitting] = useState(false);
 
   const [created, setCreated] = useState<CreateNodeResponse | null>(null);
   const [cmdlineCommOnly, setCmdlineCommOnly] = useState(false);
   const [disableProc, setDisableProc] = useState(false);
-  const [simulating, setSimulating] = useState(false);
-  const simTimerRef = useRef<number | null>(null);
+  const [refreshing, setRefreshing] = useState(false);
+  const [refreshError, setRefreshError] = useState<string | null>(null);
+  const pollingBusyRef = useRef(false);
 
   const resetFormState = useCallback(() => {
-    if (simTimerRef.current !== null) {
-      window.clearTimeout(simTimerRef.current);
-      simTimerRef.current = null;
-    }
     setName("");
-    setGroupName(existingGroups[0] ?? "亚太核心 BGP");
+    setGroupName(defaultGroupRef.current);
     setTagsText("");
-    setSortOrder(String(nodes.length + 1));
-    setLimitGb("2048");
+    setSortOrder(nextSortOrderRef.current);
+    setLimitGb("");
     setResetDay("1");
     setCountMode("both");
     setFormError(null);
+    setSubmitting(false);
     setCreated(null);
     setCmdlineCommOnly(false);
     setDisableProc(false);
-    setSimulating(false);
-  }, [existingGroups, nodes.length]);
+    setRefreshing(false);
+    setRefreshError(null);
+    pollingBusyRef.current = false;
+  }, []);
 
   const resetAndClose = useCallback(() => {
     resetFormState();
@@ -250,20 +270,13 @@ export function AddServerWizardModal({
   }, [onClose, resetFormState]);
 
   useEffect(() => {
-    return () => {
-      if (simTimerRef.current !== null) {
-        window.clearTimeout(simTimerRef.current);
-      }
-    };
-  }, []);
-
-  useEffect(() => {
     const dialog = dialogRef.current;
     if (!dialog) return;
 
     if (open) {
       if (!dialog.open) {
-        setSortOrder(String(nodes.length + 1));
+        setSortOrder(nextSortOrderRef.current);
+        setGroupName(defaultGroupRef.current);
         dialog.showModal();
       }
     } else if (dialog.open) {
@@ -272,14 +285,39 @@ export function AddServerWizardModal({
       syncingCloseRef.current = false;
       resetFormState();
     }
-  }, [open, nodes.length, resetFormState]);
+  }, [open, resetFormState]);
 
-  const matchedNode = useMemo<PrototypeNode | null>(() => {
+  const matchedNode = useMemo<HorizonNode | null>(() => {
     if (!created) return null;
     return nodes.find((n) => n.id === created.node.id) ?? null;
   }, [created, nodes]);
 
   const liveNode = matchedNode ?? created?.node ?? null;
+  const isOnlineNow =
+    matchedNode?.online === true || created?.node.online === true;
+
+  // Fallback polling every 3s when waiting on Step 2 and WebSocket is not connected
+  useEffect(() => {
+    if (!open || !created || isOnlineNow || wsStatus === "connected") {
+      return;
+    }
+
+    const timer = window.setInterval(() => {
+      if (pollingBusyRef.current) return;
+      pollingBusyRef.current = true;
+      void onRefreshNodes()
+        .catch(() => {
+          // Silent background poll; manual button surfaces errors
+        })
+        .finally(() => {
+          pollingBusyRef.current = false;
+        });
+    }, 3000);
+
+    return () => {
+      window.clearInterval(timer);
+    };
+  }, [open, created, isOnlineNow, wsStatus, onRefreshNodes]);
 
   const finalInstallCmd = useMemo(() => {
     if (!created) return "";
@@ -294,8 +332,6 @@ export function AddServerWizardModal({
     [finalInstallCmd],
   );
 
-  const isOnlineNow = liveNode?.online === true;
-
   const handleAppendTag = (tag: string) => {
     const existing = tagsText
       .split(/[,，]/)
@@ -305,8 +341,10 @@ export function AddServerWizardModal({
     setTagsText([...existing, tag].join(", "));
   };
 
-  const handleSubmitStep1 = (e: React.FormEvent) => {
+  const handleSubmitStep1 = async (e: React.FormEvent) => {
     e.preventDefault();
+    if (submitting) return;
+
     if (!name.trim()) {
       setFormError("请输入服务器标识名称（例如：sgp-edge-02）");
       return;
@@ -335,48 +373,82 @@ export function AddServerWizardModal({
       .map((t) => t.trim())
       .filter(Boolean);
 
-    const res = onCreateNode({
-      name: name.trim(),
-      group_name: groupName.trim() || "Default",
-      tags,
-      sort_order: parsedSort,
-      traffic_limit_bytes: limitBytes,
-      traffic_reset_day: parsedResetDay,
-      traffic_count_mode: countMode,
-    });
-
+    setSubmitting(true);
     setFormError(null);
-    setCreated(res);
+
+    try {
+      const res = await onCreateNode({
+        name: name.trim(),
+        group_name: groupName.trim() || "Default",
+        tags,
+        sort_order: parsedSort,
+        traffic_limit_bytes: limitBytes,
+        traffic_reset_day: parsedResetDay,
+        traffic_count_mode: countMode,
+      });
+
+      if (!openRef.current) return;
+      setCreated(res);
+    } catch (err) {
+      if (!openRef.current) return;
+      setFormError(err instanceof Error ? err.message : "创建服务器节点失败");
+    } finally {
+      if (openRef.current) {
+        setSubmitting(false);
+      }
+    }
   };
 
-  const handleSimulateHandshake = () => {
-    if (!created || simulating || isOnlineNow) return;
-    setSimulating(true);
-    simTimerRef.current = window.setTimeout(() => {
-      onSimulateOnline(created.node.id);
-      setSimulating(false);
-      simTimerRef.current = null;
-    }, 520);
+  const handleManualRefresh = async () => {
+    if (refreshing || pollingBusyRef.current) return;
+    setRefreshing(true);
+    setRefreshError(null);
+    pollingBusyRef.current = true;
+    try {
+      await onRefreshNodes();
+    } catch (err) {
+      setRefreshError(err instanceof Error ? err.message : "刷新状态失败");
+    } finally {
+      pollingBusyRef.current = false;
+      setRefreshing(false);
+    }
   };
+
+  const onlineMetaLine = useMemo(() => {
+    if (!liveNode) return "";
+    return [
+      liveNode.hostname || liveNode.name,
+      liveNode.os,
+      liveNode.arch,
+      liveNode.cpu_cores ? `${liveNode.cpu_cores} vCPU` : null,
+      liveNode.agent_version ? `agent v${liveNode.agent_version}` : null,
+    ]
+      .filter(Boolean)
+      .join(" · ");
+  }, [liveNode]);
 
   return (
     <dialog
       ref={dialogRef}
-      {...DIALOG_LIGHT_DISMISS_ATTRS}
+      closedby="any"
       aria-labelledby={titleId}
       onPointerDown={(e) => {
-        const d = dialogRef.current;
-        if (!d) return;
-        pointerDownOutsideRef.current =
-          e.target === d && isOutsideDialogBounds(e, d);
+        if (!("closedBy" in HTMLDialogElement.prototype)) {
+          const d = dialogRef.current;
+          if (!d) return;
+          pointerDownOutsideRef.current =
+            e.target === d && isOutsideDialogBounds(e, d);
+        }
       }}
       onPointerUp={(e) => {
-        const d = dialogRef.current;
-        const startedOutside = pointerDownOutsideRef.current;
-        pointerDownOutsideRef.current = false;
-        if (!d || !startedOutside) return;
-        if (e.target === d && isOutsideDialogBounds(e, d)) {
-          resetAndClose();
+        if (!("closedBy" in HTMLDialogElement.prototype)) {
+          const d = dialogRef.current;
+          const startedOutside = pointerDownOutsideRef.current;
+          pointerDownOutsideRef.current = false;
+          if (!d || !startedOutside) return;
+          if (e.target === d && isOutsideDialogBounds(e, d)) {
+            resetAndClose();
+          }
         }
       }}
       onCancel={(e) => {
@@ -484,13 +556,18 @@ export function AddServerWizardModal({
         {/* Scrollable Content */}
         <div className="flex-1 overflow-y-auto p-5 text-xs">
           {!created ? (
-            <form noValidate onSubmit={handleSubmitStep1} className="space-y-4">
+            <form
+              noValidate
+              onSubmit={(e) => void handleSubmitStep1(e)}
+              className="space-y-4"
+            >
               {formError && (
                 <div
                   role="alert"
-                  className="rounded-xl border border-rose-500/40 bg-rose-500/10 px-3.5 py-2.5 text-rose-700 dark:text-rose-300"
+                  className="rounded-xl border border-rose-500/40 bg-rose-500/10 px-3.5 py-2.5 text-rose-700 dark:text-rose-300 flex items-center gap-2"
                 >
-                  {formError}
+                  <AlertTriangle className="w-4 h-4 shrink-0" aria-hidden="true" />
+                  <span>{formError}</span>
                 </div>
               )}
 
@@ -529,7 +606,7 @@ export function AddServerWizardModal({
                     list={groupDatalistId}
                     value={groupName}
                     onChange={(e) => setGroupName(e.target.value)}
-                    placeholder="选择或输入新分组"
+                    placeholder="Default"
                     className="w-full px-3 py-2 rounded-xl border border-[var(--border-subtle)] bg-[var(--bg-inset)] text-[var(--text-primary)]"
                   />
                   <datalist id={groupDatalistId}>
@@ -689,18 +766,26 @@ export function AddServerWizardModal({
                   </button>
                   <button
                     type="submit"
-                    className="inline-flex items-center gap-1.5 px-4 py-2 rounded-xl text-white font-semibold shadow-sm"
+                    disabled={submitting}
+                    className="inline-flex items-center gap-1.5 px-4 py-2 rounded-xl text-white font-semibold shadow-sm disabled:opacity-60"
                     style={{ backgroundColor: "var(--accent-solid)" }}
                   >
-                    <Plus className="w-3.5 h-3.5" aria-hidden="true" />
-                    <span>生成一键部署命令</span>
+                    {submitting ? (
+                      <Loader2
+                        className="w-3.5 h-3.5 animate-spin"
+                        aria-hidden="true"
+                      />
+                    ) : (
+                      <Plus className="w-3.5 h-3.5" aria-hidden="true" />
+                    )}
+                    <span>{submitting ? "正在生成..." : "生成一键部署命令"}</span>
                   </button>
                 </div>
               </div>
             </form>
           ) : (
             <div className="space-y-4">
-              {/* Step 2 Status Card: Online Success OR Waiting + One-Click Simulation */}
+              {/* Step 2 Status Card: Live Online Detection OR Waiting + Refresh */}
               {isOnlineNow && liveNode ? (
                 <div className="rounded-2xl border border-emerald-500/45 bg-emerald-500/12 p-4 space-y-3 transition-all">
                   <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
@@ -713,16 +798,17 @@ export function AddServerWizardModal({
                       </div>
                       <div className="space-y-0.5">
                         <div className="flex items-center gap-2 text-sm font-bold text-emerald-800 dark:text-emerald-200">
-                          <CheckCircle2 className="w-4 h-4 shrink-0" aria-hidden="true" />
+                          <CheckCircle2
+                            className="w-4 h-4 shrink-0"
+                            aria-hidden="true"
+                          />
                           <span>探针已成功上线并接入实时流！</span>
                         </div>
-                        <div className="font-mono-num text-[11px] text-emerald-700 dark:text-emerald-300">
-                          {liveNode.hostname || liveNode.name} ·{" "}
-                          {liveNode.os || "Debian 12"} ·{" "}
-                          {liveNode.arch || "x86_64"} ·{" "}
-                          {liveNode.cpu_cores ?? 4} vCPU · agent v
-                          {liveNode.agent_version || "2.4.1"}
-                        </div>
+                        {onlineMetaLine && (
+                          <div className="font-mono-num text-[11px] text-emerald-700 dark:text-emerald-300">
+                            {onlineMetaLine}
+                          </div>
+                        )}
                       </div>
                     </div>
 
@@ -757,33 +843,36 @@ export function AddServerWizardModal({
                           正在等待目标节点发起 outbound WSS 443 首帧握手...
                         </div>
                         <p className="text-[11px] text-sky-800/85 dark:text-sky-300/85 mt-0.5">
-                          在目标 Linux 服务器执行下方命令后，控制面将在 1 秒内自动感知上线。在原型中可直接点击右侧按钮模拟执行。
+                          在目标 Linux 服务器执行下方命令后，控制面将自动感知探针上线。
+                          {wsStatus !== "connected"
+                            ? "（当前 WS 未连接，已自动每 3 秒轮询刷新状态）"
+                            : ""}
                         </p>
                       </div>
                     </div>
 
                     <button
                       type="button"
-                      disabled={simulating}
-                      onClick={handleSimulateHandshake}
-                      className="shrink-0 inline-flex items-center justify-center gap-1.5 px-4 py-2.5 rounded-xl font-semibold text-white shadow-md transition-all disabled:opacity-60"
-                      style={{ backgroundColor: "var(--accent-solid)" }}
+                      disabled={refreshing}
+                      onClick={() => void handleManualRefresh()}
+                      className="shrink-0 inline-flex items-center justify-center gap-1.5 px-3.5 py-2 rounded-xl font-semibold border border-sky-500/35 bg-white/85 dark:bg-slate-900/70 text-sky-800 dark:text-sky-200 hover:bg-white dark:hover:bg-slate-800 transition-colors disabled:opacity-60"
                     >
-                      {simulating ? (
-                        <Loader2
-                          className="w-4 h-4 animate-spin"
-                          aria-hidden="true"
-                        />
-                      ) : (
-                        <Zap className="w-4 h-4" aria-hidden="true" />
-                      )}
-                      <span>
-                        {simulating
-                          ? "正在模拟 TLS 握手..."
-                          : "⚡ 模拟目标服务器执行命令并上线"}
-                      </span>
+                      <RefreshCw
+                        className={`w-3.5 h-3.5 ${refreshing ? "animate-spin" : ""}`}
+                        aria-hidden="true"
+                      />
+                      <span>{refreshing ? "正在刷新..." : "刷新状态"}</span>
                     </button>
                   </div>
+
+                  {refreshError && (
+                    <div
+                      role="alert"
+                      className="text-[11px] text-rose-700 dark:text-rose-300 bg-rose-500/10 border border-rose-500/30 rounded-lg px-3 py-1.5"
+                    >
+                      {refreshError}
+                    </div>
+                  )}
                 </div>
               )}
 
@@ -899,7 +988,7 @@ export function AddServerWizardModal({
 
                 {/* One-time Token Strip */}
                 <div className="rounded-xl border border-[var(--border-subtle)] bg-[var(--bg-inset)] px-3.5 py-2.5 flex flex-wrap items-center justify-between gap-2">
-                  <div className="flex items-center gap-2 min-w-0">
+                  <div className="flex items-center gap-2 min-w-0 flex-1">
                     <KeyRound
                       className="w-3.5 h-3.5 text-amber-500 shrink-0"
                       aria-hidden="true"
@@ -911,10 +1000,21 @@ export function AddServerWizardModal({
                       {created.agent_token}
                     </code>
                   </div>
-                  <span className="inline-flex items-center gap-1 text-[10px] text-[var(--text-muted)]">
-                    <ShieldCheck className="w-3 h-3 text-emerald-500" aria-hidden="true" />
-                    仅展示一次，丢失可在台账轮换
-                  </span>
+                  <div className="flex items-center gap-2 shrink-0">
+                    <span className="inline-flex items-center gap-1 text-[10px] text-[var(--text-muted)]">
+                      <ShieldCheck
+                        className="w-3 h-3 text-emerald-500"
+                        aria-hidden="true"
+                      />
+                      仅展示一次
+                    </span>
+                    <WizardCopyButton
+                      text={created.agent_token}
+                      label="复制密钥"
+                      ariaLabel="复制一次性连接密钥"
+                      compact
+                    />
+                  </div>
                 </div>
               </div>
 

@@ -2,21 +2,28 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import uPlot from "uplot";
 import {
   Activity,
+  AlertTriangle,
   Clock,
   Cpu,
+  Database,
   Flame,
   HardDrive,
+  Loader2,
   MemoryStick,
   Network,
   RefreshCw,
   WifiOff,
 } from "lucide-react";
 import type {
-  LiveSample,
+  HorizonNode,
   MetricsRange,
   NodeMetricsHistoryResponse,
-  PrototypeNode,
 } from "../types";
+import type {
+  LiveMetricSample,
+  WsConnectionStatus,
+} from "../hooks/useFleetSocket";
+import { api } from "../api/client";
 import {
   formatBytes,
   formatRate,
@@ -26,10 +33,12 @@ import {
 } from "../utils/format";
 
 export interface TelemetryChartsPanelProps {
-  node: PrototypeNode;
+  node: HorizonNode;
   resolvedTheme: "dark" | "light";
-  liveSeries: LiveSample[];
-  getHistory: (nodeId: string, range: MetricsRange) => NodeMetricsHistoryResponse;
+  liveSeries: LiveMetricSample[];
+  chartMode: "live" | MetricsRange;
+  onChartModeChange: (mode: "live" | MetricsRange) => void;
+  wsStatus: WsConnectionStatus;
 }
 
 type ChartMode = "live" | MetricsRange;
@@ -103,6 +112,7 @@ interface TelemetryUPlotCardProps {
   yMin?: number;
   yMax?: number;
   allowExceedYMax?: boolean;
+  minPoints?: number;
   emptyText?: string;
 }
 
@@ -121,6 +131,7 @@ function TelemetryUPlotCard({
   yMin,
   yMax,
   allowExceedYMax = false,
+  minPoints = 1,
   emptyText = "等待采样数据...",
 }: TelemetryUPlotCardProps) {
   const containerRef = useRef<HTMLDivElement | null>(null);
@@ -268,14 +279,15 @@ function TelemetryUPlotCard({
     const instance = new uPlot(opts, dataTuple, el);
     chartRef.current = instance;
 
+    let lastWidth = initialWidth;
     const syncSize = () => {
       const w = measureWidth();
-      if (w > 40 && chartRef.current === instance) {
+      if (w > 40 && w !== lastWidth && chartRef.current === instance) {
+        lastWidth = w;
         instance.setSize({ width: w, height });
       }
     };
 
-    // Ensure accurate measurement once <dialog> layout settles on open/tab switch
     const raf1 = window.requestAnimationFrame(() => {
       syncSize();
     });
@@ -297,12 +309,13 @@ function TelemetryUPlotCard({
   }, [resolvedTheme, height, yMin, yMax, allowExceedYMax, seriesKey]);
 
   useEffect(() => {
-    if (chartRef.current) {
-      chartRef.current.setData(dataTuple);
+    const chart = chartRef.current;
+    if (chart && dataTuple.length === chart.series.length) {
+      chart.setData(dataTuple);
     }
   }, [dataTuple]);
 
-  const hasData = timestamps.length > 0;
+  const hasData = timestamps.length >= minPoints;
 
   return (
     <section className="surface-card rounded-xl p-3.5 min-w-0 flex flex-col gap-2">
@@ -328,7 +341,7 @@ function TelemetryUPlotCard({
           }
         />
         {!hasData && (
-          <div className="absolute inset-0 flex items-center justify-center text-xs text-slate-500 dark:text-slate-400 font-mono-num">
+          <div className="absolute inset-0 flex items-center justify-center px-3 text-center text-xs text-slate-500 dark:text-slate-400 font-mono-num">
             {emptyText}
           </div>
         )}
@@ -384,39 +397,81 @@ export function TelemetryChartsPanel({
   node,
   resolvedTheme,
   liveSeries,
-  getHistory,
+  chartMode,
+  onChartModeChange,
+  wsStatus,
 }: TelemetryChartsPanelProps): React.JSX.Element {
-  const [chartMode, setChartMode] = useState<ChartMode>("live");
+  const [historyData, setHistoryData] =
+    useState<NodeMetricsHistoryResponse | null>(null);
+  const [historyLoading, setHistoryLoading] = useState(false);
+  const [historyError, setHistoryError] = useState<string | null>(null);
   const [historyRefreshSeq, setHistoryRefreshSeq] = useState(0);
-  const getHistoryRef = useRef(getHistory);
-  getHistoryRef.current = getHistory;
 
   const rangeMeta = useMemo(
     () => TIME_RANGES.find((r) => r.key === chartMode) ?? TIME_RANGES[0],
     [chartMode],
   );
 
-  const historyData = useMemo<NodeMetricsHistoryResponse | null>(() => {
-    if (chartMode === "live") return null;
-    // historyRefreshSeq allows manual re-query of synthetic/cached history snapshot
-    void historyRefreshSeq;
-    return getHistoryRef.current(node.id, chartMode);
-  }, [chartMode, node.id, node.online, historyRefreshSeq]);
+  useEffect(() => {
+    if (chartMode === "live") {
+      setHistoryLoading(false);
+      setHistoryError(null);
+      return;
+    }
+
+    let cancelled = false;
+    setHistoryLoading(true);
+    setHistoryError(null);
+
+    api
+      .getNodeMetrics(node.id, chartMode)
+      .then((res) => {
+        if (cancelled) return;
+        setHistoryData(res);
+      })
+      .catch((err) => {
+        if (cancelled) return;
+        setHistoryError(
+          err instanceof Error ? err.message : "加载历史遥测数据失败",
+        );
+      })
+      .finally(() => {
+        if (cancelled) return;
+        setHistoryLoading(false);
+      });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [node.id, chartMode, historyRefreshSeq]);
+
+  const isCurrentHistory =
+    chartMode !== "live" &&
+    historyData !== null &&
+    historyData.node_id === node.id &&
+    historyData.range === chartMode;
+
+  const activeHistory = isCurrentHistory ? historyData : null;
 
   const granularityLabel = useMemo(() => {
     if (chartMode === "live") return rangeMeta.granularity;
-    const res = historyData?.resolution;
+    const res = activeHistory?.resolution;
     if (res === "30s") return "30s 环形分块";
     if (res === "5m") return "5m Welford";
     if (res === "1h") return "1h 归档";
     return rangeMeta.granularity;
-  }, [chartMode, historyData?.resolution, rangeMeta.granularity]);
+  }, [chartMode, activeHistory?.resolution, rangeMeta.granularity]);
 
-  // Seed live series with current metrics snapshot when empty
-  const effectiveLive = useMemo<LiveSample[]>(() => {
-    if (liveSeries.length > 0) return liveSeries;
-    if (node.metrics) return [{ ts: node.metrics.ts, metrics: node.metrics }];
-    return [];
+  // Seed / merge live series with current snapshot while avoiding duplicates
+  const effectiveLive = useMemo<LiveMetricSample[]>(() => {
+    const list = [...liveSeries];
+    if (node.metrics && (list.length < 2 || node.metrics.ts >= list[0].ts)) {
+      if (!list.some((s) => s.ts === node.metrics!.ts)) {
+        list.push({ ts: node.metrics.ts, metrics: node.metrics });
+      }
+    }
+    list.sort((a, b) => a.ts - b.ts);
+    return list;
   }, [liveSeries, node.metrics]);
 
   const liveArrays = useMemo(() => {
@@ -479,7 +534,16 @@ export function TelemetryChartsPanel({
   }, [effectiveLive]);
 
   const historyArrays = useMemo(() => {
-    const pts = historyData?.points ?? [];
+    const rawPts = activeHistory?.points ?? [];
+    const pts = [...rawPts].sort((a, b) => a.ts - b.ts);
+    const resolution =
+      activeHistory?.resolution ??
+      (chartMode === "1h" || chartMode === "24h"
+        ? "30s"
+        : chartMode === "7d"
+          ? "5m"
+          : "1h");
+
     const ts: number[] = [];
     const cpu: number[] = [];
     const cpuMax: (number | null)[] = [];
@@ -512,13 +576,25 @@ export function TelemetryChartsPanel({
       load1.push(p.load1 ?? null);
     }
 
-    const hasCpuMax = pts.some((p) => p.cpu_max !== undefined);
-    const hasSteal = pts.some((p) => p.steal !== undefined);
-    const hasMemMax = pts.some((p) => p.mem_max !== undefined);
-    const hasSwap = pts.some((p) => p.swap_used !== undefined);
-    const hasDiskIo = pts.some(
-      (p) => p.disk_r_bps !== undefined || p.disk_w_bps !== undefined,
-    );
+    const hasCpuMax =
+      resolution !== "30s" && pts.some((p) => p.cpu_max != null);
+    const hasMemMax =
+      resolution !== "30s" && pts.some((p) => p.mem_max != null);
+    const hasSteal =
+      resolution === "30s" ||
+      resolution === "5m" ||
+      pts.some((p) => (p.steal ?? 0) > 0);
+    const hasSwap =
+      resolution === "30s" || pts.some((p) => (p.swap_used ?? 0) > 0);
+    const hasDiskIo =
+      resolution === "30s" ||
+      pts.some((p) => (p.disk_r_bps ?? 0) > 0 || (p.disk_w_bps ?? 0) > 0);
+    const hasTcp =
+      resolution === "30s" || pts.some((p) => (p.tcp_est ?? 0) > 0);
+    const hasLoad =
+      resolution === "30s" ||
+      resolution === "5m" ||
+      pts.some((p) => (p.load1 ?? 0) > 0);
 
     const lastPt = pts.length > 0 ? pts[pts.length - 1] : null;
     const peakCpuMax = hasCpuMax
@@ -551,12 +627,14 @@ export function TelemetryChartsPanel({
       hasMemMax,
       hasSwap,
       hasDiskIo,
+      hasTcp,
+      hasLoad,
       lastPt,
       peakCpuMax,
       peakNetRx,
       peakNetTx,
     };
-  }, [historyData]);
+  }, [activeHistory, chartMode]);
 
   const memTotal = getMemTotalBytes(node);
   const memPct = getMemUsagePct(node);
@@ -587,6 +665,11 @@ export function TelemetryChartsPanel({
       ? liveArrays.diskW[liveArrays.diskW.length - 1]
       : 0;
 
+  const liveWaiting = chartMode === "live" && liveArrays.ts.length < 2;
+  const liveEmptyText = node.online
+    ? "正在接收实时遥测采样点…"
+    : "节点离线，暂无实时波形";
+
   return (
     <div className="space-y-4">
       {/* Time Range Switch & Sampling Granularity Bar */}
@@ -603,7 +686,7 @@ export function TelemetryChartsPanel({
                 key={r.key}
                 type="button"
                 aria-pressed={active}
-                onClick={() => setChartMode(r.key)}
+                onClick={() => onChartModeChange(r.key)}
                 className={`px-2.5 py-1 rounded-md text-xs font-mono-num font-medium transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--accent-primary)] ${
                   active
                     ? "bg-[var(--accent-primary)] text-white shadow-xs"
@@ -627,30 +710,47 @@ export function TelemetryChartsPanel({
             <span className="text-slate-500 dark:text-slate-400">
               {chartMode === "live"
                 ? `${liveArrays.ts.length} 点`
-                : `${historyArrays.ts.length} 点`}
+                : historyLoading && !isCurrentHistory
+                  ? "加载中..."
+                  : `${historyArrays.ts.length} 点`}
             </span>
           </span>
 
           {chartMode === "live" ? (
-            node.online ? (
+            !node.online ? (
+              <span className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-md bg-rose-500/12 text-rose-700 dark:text-rose-300 border border-rose-500/30">
+                <WifiOff className="w-3.5 h-3.5" aria-hidden="true" />
+                <span>离线 · {formatRelativeTime(node.last_seen_ts)}</span>
+              </span>
+            ) : wsStatus === "connected" ? (
               <span className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-md bg-emerald-500/12 text-emerald-700 dark:text-emerald-300 border border-emerald-500/30">
                 <Activity className="w-3.5 h-3.5" aria-hidden="true" />
                 <span>WebSocket 实时流</span>
               </span>
             ) : (
-              <span className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-md bg-rose-500/12 text-rose-700 dark:text-rose-300 border border-rose-500/30">
-                <WifiOff className="w-3.5 h-3.5" aria-hidden="true" />
-                <span>离线 · {formatRelativeTime(node.last_seen_ts)}</span>
+              <span className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-md bg-amber-500/12 text-amber-700 dark:text-amber-300 border border-amber-500/30">
+                <Loader2 className="w-3.5 h-3.5 animate-spin" aria-hidden="true" />
+                <span>
+                  {wsStatus === "reconnecting"
+                    ? "WS 重连中..."
+                    : wsStatus === "connecting"
+                      ? "WS 连接中..."
+                      : "WS 已断开"}
+                </span>
               </span>
             )
           ) : (
             <button
               type="button"
+              disabled={historyLoading}
               onClick={() => setHistoryRefreshSeq((n) => n + 1)}
-              className="inline-flex items-center gap-1 px-2.5 py-1 rounded-md border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-900/70 text-slate-700 dark:text-slate-200 hover:bg-slate-50 dark:hover:bg-slate-800 transition-colors"
+              className="inline-flex items-center gap-1 px-2.5 py-1 rounded-md border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-900/70 text-slate-700 dark:text-slate-200 hover:bg-slate-50 dark:hover:bg-slate-800 disabled:opacity-50 transition-colors"
             >
-              <RefreshCw className="w-3.5 h-3.5" aria-hidden="true" />
-              <span>刷新归档</span>
+              <RefreshCw
+                className={`w-3.5 h-3.5 ${historyLoading ? "animate-spin" : ""}`}
+                aria-hidden="true"
+              />
+              <span>{historyLoading ? "查询中..." : "刷新归档"}</span>
             </button>
           )}
         </div>
@@ -740,19 +840,31 @@ export function TelemetryChartsPanel({
               </span>
               <div className="flex flex-wrap items-center gap-3">
                 <span className="inline-flex items-center gap-1">
-                  <span className="w-2 h-2 rounded-xs bg-emerald-500" aria-hidden="true" />
+                  <span
+                    className="w-2 h-2 rounded-xs bg-emerald-500"
+                    aria-hidden="true"
+                  />
                   &lt;40% 空闲
                 </span>
                 <span className="inline-flex items-center gap-1">
-                  <span className="w-2 h-2 rounded-xs bg-sky-500" aria-hidden="true" />
+                  <span
+                    className="w-2 h-2 rounded-xs bg-sky-500"
+                    aria-hidden="true"
+                  />
                   40-70% 中载
                 </span>
                 <span className="inline-flex items-center gap-1">
-                  <span className="w-2 h-2 rounded-xs bg-amber-500" aria-hidden="true" />
+                  <span
+                    className="w-2 h-2 rounded-xs bg-amber-500"
+                    aria-hidden="true"
+                  />
                   70-90% 高载
                 </span>
                 <span className="inline-flex items-center gap-1">
-                  <span className="w-2 h-2 rounded-xs bg-rose-500" aria-hidden="true" />
+                  <span
+                    className="w-2 h-2 rounded-xs bg-rose-500"
+                    aria-hidden="true"
+                  />
                   &gt;=90% 饱和
                 </span>
               </div>
@@ -767,7 +879,46 @@ export function TelemetryChartsPanel({
         )}
       </section>
 
-      {/* 4 High-Density uPlot Bento Charts (2-Column Grid) */}
+      {/* Live Waiting Banner when < 2 points */}
+      {liveWaiting && node.online && (
+        <div className="surface-card rounded-xl px-4 py-3 border border-sky-500/30 bg-sky-500/[0.06] flex flex-wrap items-center justify-between gap-2 text-xs">
+          <div className="flex items-center gap-2 text-sky-800 dark:text-sky-200">
+            <Loader2
+              className="w-4 h-4 animate-spin text-sky-500 shrink-0"
+              aria-hidden="true"
+            />
+            <span>
+              正在接收实时遥测采样点…（当前 {liveArrays.ts.length} / 2 点，通常 2 秒内绘制完整波形）
+            </span>
+          </div>
+          <span className="text-[11px] font-mono-num text-sky-700/80 dark:text-sky-300/80">
+            2s 按需单节点推流已激活
+          </span>
+        </div>
+      )}
+
+      {/* Historical Error Banner */}
+      {chartMode !== "live" && historyError && (
+        <div
+          role="alert"
+          className="surface-card rounded-xl p-4 border border-rose-500/40 bg-rose-500/10 flex flex-wrap items-center justify-between gap-3 text-xs"
+        >
+          <div className="flex items-center gap-2 text-rose-700 dark:text-rose-300">
+            <AlertTriangle className="w-4 h-4 shrink-0" aria-hidden="true" />
+            <span>加载 {rangeMeta.label} 历史遥测失败：{historyError}</span>
+          </div>
+          <button
+            type="button"
+            onClick={() => setHistoryRefreshSeq((n) => n + 1)}
+            className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-rose-600 hover:bg-rose-500 text-white font-semibold transition-colors"
+          >
+            <RefreshCw className="w-3.5 h-3.5" aria-hidden="true" />
+            <span>重试</span>
+          </button>
+        </div>
+      )}
+
+      {/* 4 High-Density uPlot Bento Charts OR Historical Loading/Empty State */}
       {chartMode === "live" ? (
         <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
           {/* 1. Processor Utilization */}
@@ -794,7 +945,9 @@ export function TelemetryChartsPanel({
             footerMeta={
               m && (
                 <>
-                  <span>Load: {m.cpu.load.map((v) => v.toFixed(2)).join(" / ")}</span>
+                  <span>
+                    Load: {m.cpu.load.map((v) => v.toFixed(2)).join(" / ")}
+                  </span>
                   <span>
                     Steal {m.cpu.steal.toFixed(1)}% · I/O Wait{" "}
                     {m.cpu.iowait.toFixed(1)}%
@@ -830,7 +983,8 @@ export function TelemetryChartsPanel({
             resolvedTheme={resolvedTheme}
             yMin={0}
             yMax={100}
-            emptyText="节点离线，暂无实时 CPU 波形"
+            minPoints={2}
+            emptyText={liveEmptyText}
           />
 
           {/* 2. Memory & Swap */}
@@ -890,7 +1044,8 @@ export function TelemetryChartsPanel({
             yMin={0}
             yMax={memTotal > 0 ? memTotal : undefined}
             allowExceedYMax
-            emptyText="节点离线，暂无实时内存波形"
+            minPoints={2}
+            emptyText={liveEmptyText}
           />
 
           {/* 3. Network Throughput */}
@@ -931,7 +1086,8 @@ export function TelemetryChartsPanel({
             formatValue={(v) => formatRate(v)}
             resolvedTheme={resolvedTheme}
             yMin={0}
-            emptyText="节点离线，暂无网络吞吐波形"
+            minPoints={2}
+            emptyText={liveEmptyText}
           />
 
           {/* 4. Disk I/O & TCP Connection State */}
@@ -980,8 +1136,51 @@ export function TelemetryChartsPanel({
             formatValue={(v) => formatRate(v)}
             resolvedTheme={resolvedTheme}
             yMin={0}
-            emptyText="节点离线，暂无磁盘 I/O 波形"
+            minPoints={2}
+            emptyText={liveEmptyText}
           />
+        </div>
+      ) : historyLoading && !isCurrentHistory ? (
+        <div className="surface-card rounded-xl p-10 flex flex-col items-center justify-center gap-2.5 text-xs text-slate-500 dark:text-slate-400 font-mono-num">
+          <Loader2
+            className="w-6 h-6 animate-spin text-[var(--accent-primary)]"
+            aria-hidden="true"
+          />
+          <p className="font-semibold text-slate-700 dark:text-slate-200">
+            正在加载 {rangeMeta.label} 历史遥测归档...
+          </p>
+          <p className="text-[11px] opacity-80">
+            采样方案：{rangeMeta.granularity} · {rangeMeta.description}
+          </p>
+        </div>
+      ) : !isCurrentHistory ? (
+        historyError ? null : (
+          <div className="surface-card rounded-xl p-10 text-center text-xs text-slate-500 dark:text-slate-400">
+            等待查询历史遥测归档...
+          </div>
+        )
+      ) : historyArrays.ts.length === 0 ? (
+        <div className="surface-card rounded-xl p-8 text-center space-y-2.5">
+          <Database
+            className="w-7 h-7 mx-auto text-slate-400"
+            aria-hidden="true"
+          />
+          <p className="text-sm font-medium text-slate-700 dark:text-slate-200">
+            当前 {rangeMeta.label} 时间窗口暂无归档数据
+          </p>
+          <p className="text-xs text-slate-500 dark:text-slate-400 max-w-md mx-auto">
+            新接入节点或刚完成重启后，探针将按 {granularityLabel} 自动聚合写入持久化时序表。
+          </p>
+          <div className="pt-1">
+            <button
+              type="button"
+              onClick={() => setHistoryRefreshSeq((n) => n + 1)}
+              className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-900/70 text-xs font-medium text-slate-700 dark:text-slate-200 hover:bg-slate-50 dark:hover:bg-slate-800 transition-colors"
+            >
+              <RefreshCw className="w-3.5 h-3.5" aria-hidden="true" />
+              <span>重新查询</span>
+            </button>
+          </div>
         </div>
       ) : (
         <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
@@ -1005,7 +1204,7 @@ export function TelemetryChartsPanel({
             }
             footerMeta={
               <span>
-                采样方案：{historyData?.resolution ?? "—"} ·{" "}
+                采样方案：{activeHistory?.resolution ?? "—"} ·{" "}
                 {rangeMeta.description}
               </span>
             }
@@ -1106,7 +1305,9 @@ export function TelemetryChartsPanel({
               <span>
                 {historyArrays.hasMemMax
                   ? "含长周期峰值包络 mem_max"
-                  : "含物理内存与 Swap 使用轨迹"}
+                  : historyArrays.hasSwap
+                    ? "含物理内存与 Swap 使用轨迹"
+                    : "物理内存平均占用趋势"}
               </span>
             }
             timestamps={historyArrays.ts}
@@ -1226,7 +1427,7 @@ export function TelemetryChartsPanel({
             yMin={0}
           />
 
-          {/* 4. History Disk I/O & TCP Established */}
+          {/* 4. History Disk I/O or Disk Usage & TCP Established */}
           <TelemetryUPlotCard
             title={
               historyArrays.hasDiskIo
@@ -1242,7 +1443,9 @@ export function TelemetryChartsPanel({
             headerMeta={
               <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full bg-emerald-500/12 text-emerald-700 dark:text-emerald-300 border border-emerald-500/30 font-semibold">
                 TCP Established:{" "}
-                {historyArrays.lastPt?.tcp_est ?? m?.net.tcp_est ?? "—"}
+                {historyArrays.hasTcp
+                  ? (historyArrays.lastPt?.tcp_est ?? m?.net.tcp_est ?? "—")
+                  : (m?.net.tcp_est ?? "—")}
               </span>
             }
             footerMeta={
@@ -1253,9 +1456,10 @@ export function TelemetryChartsPanel({
                       ? `末点 Read ${formatRate(historyArrays.lastPt.disk_r_bps ?? 0)} · Write ${formatRate(historyArrays.lastPt.disk_w_bps ?? 0)}`
                       : `主磁盘已用 ${formatBytes(historyArrays.lastPt.disk_used)}`}
                   </span>
-                  {historyArrays.lastPt.load1 !== undefined && (
-                    <span>Load1: {historyArrays.lastPt.load1.toFixed(2)}</span>
-                  )}
+                  {historyArrays.hasLoad &&
+                    historyArrays.lastPt.load1 !== undefined && (
+                      <span>Load1: {historyArrays.lastPt.load1.toFixed(2)}</span>
+                    )}
                 </>
               )
             }

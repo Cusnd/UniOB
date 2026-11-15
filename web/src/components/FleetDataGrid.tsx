@@ -14,9 +14,10 @@ import {
   Terminal,
   WifiOff,
 } from "lucide-react";
-import type { DensityMode, InspectorTab, PrototypeNode } from "../types";
+import type { DensityMode, HorizonNode, InspectorTab } from "../types";
 import {
   formatBytes,
+  formatNodeMetaLine,
   formatRate,
   formatRelativeTime,
   formatUptime,
@@ -32,10 +33,10 @@ import {
 } from "../utils/format";
 
 export interface FleetDataGridProps {
-  nodes: PrototypeNode[];
+  nodes: HorizonNode[];
   density: DensityMode;
-  onSelectNode: (node: PrototypeNode, initialTab?: InspectorTab) => void;
-  onMuteNode: (nodeId: string, seconds: number | null) => void;
+  onSelectNode: (node: HorizonNode, initialTab?: InspectorTab) => void;
+  onMuteNode: (nodeId: string, seconds: number | null) => void | Promise<void>;
 }
 
 type SortKey =
@@ -120,7 +121,7 @@ function InlineMiniSparkline({
   );
 }
 
-function getNumericSortValue(node: PrototypeNode, key: SortKey): number {
+function getNumericSortValue(node: HorizonNode, key: SortKey): number {
   const m = node.metrics;
   switch (key) {
     case "uptime":
@@ -156,9 +157,26 @@ export function FleetDataGrid({
   const [sortKey, setSortKey] = useState<SortKey | null>(null);
   const [sortDir, setSortDir] = useState<SortDir>("desc");
   const [announcement, setAnnouncement] = useState("");
+  const [mutingIds, setMutingIds] = useState<Record<string, boolean>>({});
 
   const isCompact = density === "compact";
   const cellPad = isCompact ? "py-2 px-3" : "py-2.5 px-3.5";
+
+  const handleMuteToggle = async (nodeId: string, seconds: number | null) => {
+    if (mutingIds[nodeId]) return;
+    setMutingIds((prev) => ({ ...prev, [nodeId]: true }));
+    try {
+      await Promise.resolve(onMuteNode(nodeId, seconds));
+    } catch {
+      // Error feedback is handled by caller
+    } finally {
+      setMutingIds((prev) => {
+        const next = { ...prev };
+        delete next[nodeId];
+        return next;
+      });
+    }
+  };
 
   const sortedNodes = useMemo(() => {
     if (!sortKey) return nodes;
@@ -431,8 +449,11 @@ export function FleetDataGrid({
               const diskPct = getDiskUsagePct(rootDisk);
               const osBadge = parseOsBadge(node.os);
               const muted = isNodeMuted(node);
+              const isMuting = Boolean(mutingIds[node.id]);
               const trafficLimit = node.traffic.limit_bytes;
               const trafficPct = getTrafficUsagePct(node.traffic);
+              const metaLine =
+                formatNodeMetaLine(node, { includeHostnameFallback: true }) || "—";
 
               return (
                 <tr
@@ -462,9 +483,11 @@ export function FleetDataGrid({
 
                       <div className="min-w-0">
                         <div className="flex items-center gap-1.5">
-                          <span aria-hidden="true" className="text-xs">
-                            {node.region_flag}
-                          </span>
+                          {node.region_flag && (
+                            <span aria-hidden="true" className="text-xs shrink-0">
+                              {node.region_flag}
+                            </span>
+                          )}
                           <button
                             type="button"
                             onClick={(e) => {
@@ -485,8 +508,8 @@ export function FleetDataGrid({
                             </span>
                           )}
                         </div>
-                        <div className="text-[11px] font-mono-num text-[var(--text-secondary)]">
-                          {node.region_code} · {node.ipv4_masked}
+                        <div className="text-[11px] font-mono-num text-[var(--text-secondary)] truncate max-w-[190px]">
+                          {metaLine}
                         </div>
                       </div>
                     </div>
@@ -696,11 +719,15 @@ export function FleetDataGrid({
                       </button>
                       <button
                         type="button"
-                        onClick={() => onMuteNode(node.id, muted ? null : 3600)}
+                        disabled={isMuting}
+                        aria-busy={isMuting || undefined}
+                        onClick={() =>
+                          void handleMuteToggle(node.id, muted ? null : 3600)
+                        }
                         aria-pressed={muted}
                         title={muted ? "取消静默" : "静默告警 1 小时"}
                         aria-label={`${muted ? "取消静默" : "静默"} ${node.name}`}
-                        className={`p-1.5 rounded-lg border transition-colors ${
+                        className={`p-1.5 rounded-lg border transition-colors disabled:opacity-60 disabled:cursor-not-allowed ${
                           muted
                             ? "border-amber-500/40 bg-amber-500/15 text-amber-600 dark:text-amber-300"
                             : "border-[var(--border-subtle)] bg-[var(--bg-elevated)] text-[var(--text-secondary)] hover:text-[var(--text-primary)]"

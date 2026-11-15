@@ -12,16 +12,19 @@ import {
   X,
 } from "lucide-react";
 import type {
+  HorizonNode,
   InspectorTab,
-  LiveSample,
   MetricsRange,
-  NodeMetricsHistoryResponse,
-  ProcEntry,
-  PrototypeNode,
   RotateTokenResponse,
 } from "../types";
+import type {
+  LiveMetricSample,
+  ProcsPacket,
+  WsConnectionStatus,
+} from "../hooks/useFleetSocket";
 import {
   formatBytes,
+  formatNodeMetaLine,
   formatRelativeTime,
   formatUptime,
   getDiskUsagePct,
@@ -36,18 +39,21 @@ import { ProcessExplorer } from "./ProcessExplorer";
 import { HardwareSecurityPanel } from "./HardwareSecurityPanel";
 
 export interface NodeInspectorSheetProps {
-  node: PrototypeNode | null;
+  node: HorizonNode | null;
   initialTab: InspectorTab;
   resolvedTheme: "dark" | "light";
-  liveSeries: LiveSample[];
-  procs: ProcEntry[];
-  getHistory: (nodeId: string, range: MetricsRange) => NodeMetricsHistoryResponse;
+  liveSeries: LiveMetricSample[];
+  procsPacket: ProcsPacket | null;
+  wsStatus: WsConnectionStatus;
+  subNode: (nodeId: string, proc: boolean) => void;
+  unsubNode: (nodeId: string) => void;
   onClose: () => void;
-  onMuteNode: (nodeId: string, seconds: number | null) => void;
-  onRotateToken: (nodeId: string) => RotateTokenResponse;
-  onDeleteNode: (nodeId: string) => void;
-  onToggleProcPrivacyPreview?: (nodeId: string) => void;
+  onMuteNode: (nodeId: string, seconds: number | null) => Promise<void>;
+  onRotateToken: (nodeId: string) => Promise<RotateTokenResponse>;
+  onDeleteNode: (nodeId: string) => Promise<void>;
 }
+
+type ChartMode = "live" | MetricsRange;
 
 const INSPECTOR_TABS: {
   key: InspectorTab;
@@ -73,45 +79,45 @@ function isOutsideDialogBounds(
 }
 
 interface NodeInspectorContentProps {
-  node: PrototypeNode;
+  node: HorizonNode;
   initialTab: InspectorTab;
   resolvedTheme: "dark" | "light";
-  liveSeries: LiveSample[];
-  procs: ProcEntry[];
-  getHistory: (nodeId: string, range: MetricsRange) => NodeMetricsHistoryResponse;
+  liveSeries: LiveMetricSample[];
+  procsPacket: ProcsPacket | null;
+  wsStatus: WsConnectionStatus;
+  activeTab: InspectorTab;
+  chartMode: ChartMode;
+  onTabChange: (tab: InspectorTab) => void;
+  onChartModeChange: (mode: ChartMode) => void;
   titleId: string;
   onClose: () => void;
-  onMuteNode: (nodeId: string, seconds: number | null) => void;
-  onRotateToken: (nodeId: string) => RotateTokenResponse;
-  onDeleteNode: (nodeId: string) => void;
-  onToggleProcPrivacyPreview?: (nodeId: string) => void;
+  onMuteNode: (nodeId: string, seconds: number | null) => Promise<void>;
+  onRotateToken: (nodeId: string) => Promise<RotateTokenResponse>;
+  onDeleteNode: (nodeId: string) => Promise<void>;
 }
 
 function NodeInspectorContent({
   node,
-  initialTab,
   resolvedTheme,
   liveSeries,
-  procs,
-  getHistory,
+  procsPacket,
+  wsStatus,
+  activeTab,
+  chartMode,
+  onTabChange,
+  onChartModeChange,
   titleId,
   onClose,
   onMuteNode,
   onRotateToken,
   onDeleteNode,
-  onToggleProcPrivacyPreview,
 }: NodeInspectorContentProps): React.JSX.Element {
   const baseId = useId();
-  const [activeTab, setActiveTab] = useState<InspectorTab>(initialTab);
   const tabRefs = useRef<Record<InspectorTab, HTMLButtonElement | null>>({
     charts: null,
     procs: null,
     hardware: null,
   });
-
-  useEffect(() => {
-    setActiveTab(initialTab);
-  }, [initialTab]);
 
   const handleTabKeyDown = (
     e: React.KeyboardEvent<HTMLButtonElement>,
@@ -127,7 +133,7 @@ function NodeInspectorContent({
     if (nextIdx === null) return;
     e.preventDefault();
     const nextTab = order[nextIdx];
-    setActiveTab(nextTab);
+    onTabChange(nextTab);
     tabRefs.current[nextTab]?.focus();
   };
 
@@ -138,6 +144,7 @@ function NodeInspectorContent({
   const memTotal = getMemTotalBytes(node);
   const rootDisk = getRootDisk(m?.disks);
   const diskPct = getDiskUsagePct(rootDisk);
+  const metaLine = formatNodeMetaLine(node, { includeHostnameFallback: true });
 
   return (
     <>
@@ -182,9 +189,11 @@ function NodeInspectorContent({
                 {node.name}
               </h2>
 
-              <span className="px-2 py-0.5 rounded-md text-[11px] font-medium bg-slate-100 dark:bg-slate-800/90 text-slate-700 dark:text-slate-200 border border-slate-200 dark:border-slate-700">
-                {node.group_name}
-              </span>
+              {node.group_name && (
+                <span className="px-2 py-0.5 rounded-md text-[11px] font-medium bg-slate-100 dark:bg-slate-800/90 text-slate-700 dark:text-slate-200 border border-slate-200 dark:border-slate-700">
+                  {node.group_name}
+                </span>
+              )}
 
               <span
                 className={`px-2 py-0.5 rounded-md text-[11px] font-medium border ${osBadge.colorClass}`}
@@ -202,18 +211,21 @@ function NodeInspectorContent({
 
             {/* Geo / Provider / Agent / Uptime / Load Capsules */}
             <div className="flex flex-wrap items-center gap-x-3 gap-y-1.5 text-xs font-mono-num text-slate-600 dark:text-slate-300">
-              <span className="inline-flex items-center gap-1.5">
+              <span className="inline-flex items-center gap-1.5 min-w-0">
                 <Globe
                   className="w-3.5 h-3.5 text-[var(--accent-primary)] shrink-0"
                   aria-hidden="true"
                 />
-                <span>
-                  {node.region_flag} {node.region_code} · {node.provider} ·{" "}
-                  {node.ipv4_masked}
+                <span className="truncate">
+                  {node.region_flag ? `${node.region_flag} ` : ""}
+                  {metaLine || "Linux 节点"}
                 </span>
               </span>
 
-              <span className="text-slate-300 dark:text-slate-700" aria-hidden="true">
+              <span
+                className="text-slate-300 dark:text-slate-700"
+                aria-hidden="true"
+              >
                 |
               </span>
 
@@ -233,19 +245,19 @@ function NodeInspectorContent({
               {m && (
                 <>
                   <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-md bg-slate-100/90 dark:bg-slate-800/80 border border-slate-200 dark:border-slate-700/80 text-[11px]">
-                    <Cpu className="w-3 h-3 text-[var(--accent-primary)]" aria-hidden="true" />
+                    <Cpu
+                      className="w-3 h-3 text-[var(--accent-primary)]"
+                      aria-hidden="true"
+                    />
                     <span>
-                      Load {m.cpu.load[0].toFixed(2)} / {m.cpu.load[1].toFixed(2)} /{" "}
-                      {m.cpu.load[2].toFixed(2)}
+                      Load {m.cpu.load.map((v) => v.toFixed(2)).join(" / ")}
                     </span>
                   </span>
 
                   <span className="text-[11px] text-slate-500 dark:text-slate-400">
                     CPU {m.cpu.all.toFixed(1)}% · 内存 {formatBytes(m.mem.used)}/
                     {formatBytes(memTotal)} ({memPct.toFixed(0)}%)
-                    {rootDisk
-                      ? ` · 根分区 ${diskPct.toFixed(0)}%`
-                      : ""}
+                    {rootDisk ? ` · 根分区 ${diskPct.toFixed(0)}%` : ""}
                   </span>
                 </>
               )}
@@ -262,7 +274,7 @@ function NodeInspectorContent({
           </button>
         </div>
 
-        {/* Single-Row Accessible Tablist (::after underline, zero font-weight/padding shift) */}
+        {/* Single-Row Accessible Tablist */}
         <div
           role="tablist"
           aria-label="节点透视视图"
@@ -283,7 +295,7 @@ function NodeInspectorContent({
                 aria-selected={active}
                 aria-controls={`${baseId}-panel-${tab.key}`}
                 tabIndex={active ? 0 : -1}
-                onClick={() => setActiveTab(tab.key)}
+                onClick={() => onTabChange(tab.key)}
                 onKeyDown={(e) => handleTabKeyDown(e, idx)}
                 className={`inline-flex items-center gap-1.5 px-3.5 py-2.5 text-xs font-semibold transition-colors rounded-t-md ${
                   active
@@ -293,7 +305,7 @@ function NodeInspectorContent({
               >
                 <Icon className="w-3.5 h-3.5 shrink-0" aria-hidden="true" />
                 <span>{tab.label}</span>
-                {tab.key === "procs" && !node.proc_enabled && (
+                {tab.key === "procs" && node.proc_enabled === false && (
                   <Lock
                     className="w-3 h-3 text-amber-500 shrink-0"
                     aria-hidden="true"
@@ -305,7 +317,7 @@ function NodeInspectorContent({
         </div>
       </header>
 
-      {/* Scrollable Body (Tabpanels keep padding & bg on inner container) */}
+      {/* Scrollable Body */}
       <div className="flex-1 min-h-0 overflow-y-auto overscroll-contain">
         <div
           role="tabpanel"
@@ -319,7 +331,9 @@ function NodeInspectorContent({
                 node={node}
                 resolvedTheme={resolvedTheme}
                 liveSeries={liveSeries}
-                getHistory={getHistory}
+                chartMode={chartMode}
+                onChartModeChange={onChartModeChange}
+                wsStatus={wsStatus}
               />
             </div>
           )}
@@ -335,8 +349,8 @@ function NodeInspectorContent({
             <div className="p-4 sm:p-6">
               <ProcessExplorer
                 node={node}
-                procs={procs}
-                onToggleProcPrivacyPreview={onToggleProcPrivacyPreview}
+                procsPacket={procsPacket}
+                wsStatus={wsStatus}
               />
             </div>
           )}
@@ -370,18 +384,59 @@ export function NodeInspectorSheet({
   initialTab,
   resolvedTheme,
   liveSeries,
-  procs,
-  getHistory,
+  procsPacket,
+  wsStatus,
+  subNode,
+  unsubNode,
   onClose,
   onMuteNode,
   onRotateToken,
   onDeleteNode,
-  onToggleProcPrivacyPreview,
 }: NodeInspectorSheetProps): React.JSX.Element {
   const titleId = useId();
   const dialogRef = useRef<HTMLDialogElement | null>(null);
   const pointerDownBackdropRef = useRef(false);
   const syncingCloseRef = useRef(false);
+
+  const [activeTab, setActiveTab] = useState<InspectorTab>(initialTab);
+  const [chartMode, setChartMode] = useState<ChartMode>("live");
+  const prevNodeIdRef = useRef<string | null>(node?.id ?? null);
+
+  const currentNodeId = node?.id ?? null;
+  if (prevNodeIdRef.current !== currentNodeId) {
+    prevNodeIdRef.current = currentNodeId;
+    setChartMode("live");
+    if (currentNodeId !== null) {
+      setActiveTab(initialTab);
+    }
+  }
+
+  useEffect(() => {
+    setActiveTab(initialTab);
+  }, [initialTab]);
+
+  // Strict SCCH Zero-Hot-Path WebSocket Subscription Guardrail
+  const nodeId = node?.id ?? null;
+  const procEnabled = node?.proc_enabled !== false;
+
+  useEffect(() => {
+    if (nodeId === null) return;
+
+    if (activeTab === "procs" && procEnabled) {
+      subNode(nodeId, true);
+    } else if (activeTab === "charts" && chartMode === "live") {
+      subNode(nodeId, false);
+    } else {
+      unsubNode(nodeId);
+    }
+  }, [nodeId, activeTab, chartMode, procEnabled, subNode, unsubNode]);
+
+  useEffect(() => {
+    if (nodeId === null) return;
+    return () => {
+      unsubNode(nodeId);
+    };
+  }, [nodeId, unsubNode]);
 
   useEffect(() => {
     const dialog = dialogRef.current;
@@ -399,19 +454,23 @@ export function NodeInspectorSheet({
   }, [node]);
 
   const handlePointerDown = (e: React.PointerEvent<HTMLDialogElement>) => {
-    const dialog = dialogRef.current;
-    if (!dialog) return;
-    pointerDownBackdropRef.current =
-      e.target === dialog && isOutsideDialogBounds(e, dialog);
+    if (!("closedBy" in HTMLDialogElement.prototype)) {
+      const dialog = dialogRef.current;
+      if (!dialog) return;
+      pointerDownBackdropRef.current =
+        e.target === dialog && isOutsideDialogBounds(e, dialog);
+    }
   };
 
   const handlePointerUp = (e: React.PointerEvent<HTMLDialogElement>) => {
-    const dialog = dialogRef.current;
-    const startedOnBackdrop = pointerDownBackdropRef.current;
-    pointerDownBackdropRef.current = false;
-    if (!dialog || !startedOnBackdrop) return;
-    if (e.target === dialog && isOutsideDialogBounds(e, dialog)) {
-      onClose();
+    if (!("closedBy" in HTMLDialogElement.prototype)) {
+      const dialog = dialogRef.current;
+      const startedOnBackdrop = pointerDownBackdropRef.current;
+      pointerDownBackdropRef.current = false;
+      if (!dialog || !startedOnBackdrop) return;
+      if (e.target === dialog && isOutsideDialogBounds(e, dialog)) {
+        onClose();
+      }
     }
   };
 
@@ -447,14 +506,17 @@ export function NodeInspectorSheet({
             initialTab={initialTab}
             resolvedTheme={resolvedTheme}
             liveSeries={liveSeries}
-            procs={procs}
-            getHistory={getHistory}
+            procsPacket={procsPacket}
+            wsStatus={wsStatus}
+            activeTab={activeTab}
+            chartMode={chartMode}
+            onTabChange={setActiveTab}
+            onChartModeChange={setChartMode}
             titleId={titleId}
             onClose={onClose}
             onMuteNode={onMuteNode}
             onRotateToken={onRotateToken}
             onDeleteNode={onDeleteNode}
-            onToggleProcPrivacyPreview={onToggleProcPrivacyPreview}
           />
         )}
       </div>

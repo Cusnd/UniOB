@@ -9,15 +9,18 @@ import {
   Gauge,
   HardDrive,
   KeyRound,
+  Loader2,
   Server,
   ShieldCheck,
   Trash2,
   Volume2,
+  X,
 } from "lucide-react";
-import type { PrototypeNode, RotateTokenResponse } from "../types";
+import type { HorizonNode, RotateTokenResponse } from "../types";
 import {
   formatBytes,
   formatCycleMonth,
+  formatNodeMetaLine,
   formatRate,
   formatRelativeTime,
   formatTimestamp,
@@ -30,10 +33,10 @@ import {
 } from "../utils/format";
 
 export interface HardwareSecurityPanelProps {
-  node: PrototypeNode;
-  onMuteNode: (nodeId: string, seconds: number | null) => void;
-  onRotateToken: (nodeId: string) => RotateTokenResponse;
-  onDeleteNode: (nodeId: string) => void;
+  node: HorizonNode;
+  onMuteNode: (nodeId: string, seconds: number | null) => Promise<void>;
+  onRotateToken: (nodeId: string) => Promise<RotateTokenResponse>;
+  onDeleteNode: (nodeId: string) => Promise<void>;
   onClose: () => void;
 }
 
@@ -141,8 +144,23 @@ export function HardwareSecurityPanel({
   const baseId = useId();
   const diskCaptionId = `${baseId}-disk-caption`;
 
+  const [mutingTarget, setMutingTarget] = useState<
+    "30m" | "2h" | "unmute" | null
+  >(null);
+  const [rotating, setRotating] = useState(false);
+  const [deleting, setDeleting] = useState(false);
+  const [error, setError] = useState<string | null>(null);
   const [rotated, setRotated] = useState<RotateTokenResponse | null>(null);
   const [confirmDelete, setConfirmDelete] = useState(false);
+
+  const muting = mutingTarget !== null;
+  const busy = muting || rotating || deleting;
+
+  useEffect(() => {
+    setRotated(null);
+    setConfirmDelete(false);
+    setError(null);
+  }, [node.id]);
 
   const muted = isNodeMuted(node);
   const disks = node.metrics?.disks ?? [];
@@ -153,18 +171,76 @@ export function HardwareSecurityPanel({
     ? Math.max(0, (traffic.limit_bytes ?? 0) - traffic.counted_bytes)
     : null;
 
-  const handleRotate = () => {
-    const res = onRotateToken(node.id);
-    setRotated(res);
+  const metaLine = formatNodeMetaLine(node);
+  const hostAndIp = [node.hostname || "等待首次握手", node.ipv4_masked]
+    .filter(Boolean)
+    .join(" · ");
+
+  const handleMute = async (
+    seconds: number | null,
+    target: "30m" | "2h" | "unmute",
+  ) => {
+    if (busy) return;
+    setMutingTarget(target);
+    setError(null);
+    try {
+      await onMuteNode(node.id, seconds);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "告警静默设置失败");
+    } finally {
+      setMutingTarget(null);
+    }
   };
 
-  const handleConfirmDelete = () => {
-    onDeleteNode(node.id);
-    onClose();
+  const handleRotate = async () => {
+    if (busy) return;
+    setRotating(true);
+    setError(null);
+    try {
+      const res = await onRotateToken(node.id);
+      setRotated(res);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "轮换连接密钥失败");
+    } finally {
+      setRotating(false);
+    }
+  };
+
+  const handleConfirmDelete = async () => {
+    if (busy) return;
+    setDeleting(true);
+    setError(null);
+    try {
+      await onDeleteNode(node.id);
+      onClose();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "移除服务器失败");
+      setDeleting(false);
+    }
   };
 
   return (
     <div className="space-y-4">
+      {error && (
+        <div
+          role="alert"
+          className="surface-card rounded-xl px-4 py-3 border border-rose-500/40 bg-rose-500/10 flex items-center justify-between gap-3 text-xs text-rose-700 dark:text-rose-300"
+        >
+          <div className="flex items-center gap-2 min-w-0">
+            <AlertTriangle className="w-4 h-4 shrink-0" aria-hidden="true" />
+            <span className="break-words">{error}</span>
+          </div>
+          <button
+            type="button"
+            onClick={() => setError(null)}
+            aria-label="关闭错误提示"
+            className="p-1 rounded-md text-rose-600 dark:text-rose-300 hover:bg-rose-500/15 shrink-0"
+          >
+            <X className="w-3.5 h-3.5" aria-hidden="true" />
+          </button>
+        </div>
+      )}
+
       {/* Bento 2-Column Hardware Specs & Traffic Billing Ledger */}
       <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
         {/* Column 1: Hardware & System Spec Sheet */}
@@ -177,18 +253,19 @@ export function HardwareSecurityPanel({
               />
               <span>硬件与系统规格清单</span>
             </h3>
-            <span className="text-[11px] font-mono-num text-slate-500 dark:text-slate-400">
-              {node.region_flag} {node.region_code} · {node.provider}
+            <span className="text-[11px] font-mono-num text-slate-500 dark:text-slate-400 truncate">
+              {node.region_flag ? `${node.region_flag} ` : ""}
+              {metaLine || node.region_code}
             </span>
           </div>
 
           <dl className="grid grid-cols-1 gap-y-2 text-xs">
             <div className="flex items-center justify-between gap-3 py-1 border-b border-slate-200/70 dark:border-slate-800/80">
               <dt className="text-slate-500 dark:text-slate-400 shrink-0">
-                主机名 / 掩码 IP
+                {node.ipv4_masked ? "主机名 / 掩码 IP" : "主机名"}
               </dt>
               <dd className="font-mono-num text-slate-800 dark:text-slate-200 text-right truncate">
-                {node.hostname || "等待首次握手"} · {node.ipv4_masked}
+                {hostAndIp}
               </dd>
             </div>
             <div className="flex items-center justify-between gap-3 py-1 border-b border-slate-200/70 dark:border-slate-800/80">
@@ -236,12 +313,12 @@ export function HardwareSecurityPanel({
                 {node.agent_version ? `v${node.agent_version}` : "未安装"} ·{" "}
                 <span
                   className={
-                    node.proc_enabled
+                    node.proc_enabled !== false
                       ? "text-emerald-600 dark:text-emerald-400"
                       : "text-amber-600 dark:text-amber-400"
                   }
                 >
-                  {node.proc_enabled ? "允许进程透视" : "隐私锁定已禁用"}
+                  {node.proc_enabled !== false ? "允许进程透视" : "隐私锁定已禁用"}
                 </span>
               </dd>
             </div>
@@ -256,7 +333,7 @@ export function HardwareSecurityPanel({
             </div>
           </dl>
 
-          {node.tags.length > 0 && (
+          {Array.isArray(node.tags) && node.tags.length > 0 && (
             <div className="pt-1 flex flex-wrap items-center gap-1.5">
               {node.tags.map((tag) => (
                 <span
@@ -436,11 +513,11 @@ export function HardwareSecurityPanel({
                 </tr>
               </thead>
               <tbody className="divide-y divide-slate-200/70 dark:divide-slate-800/80 font-mono-num">
-                {disks.map((d) => {
+                {disks.map((d, idx) => {
                   const pct = getDiskUsagePct(d);
                   return (
                     <tr
-                      key={`${d.mp}-${d.fs}`}
+                      key={`${d.mp}-${d.fs}-${idx}`}
                       className="hover:bg-slate-500/[0.04]"
                     >
                       <td className="py-2.5 px-3 font-semibold text-slate-900 dark:text-slate-100 whitespace-nowrap">
@@ -510,25 +587,36 @@ export function HardwareSecurityPanel({
           <div className="flex flex-wrap items-center gap-2">
             <button
               type="button"
-              onClick={() => onMuteNode(node.id, 1800)}
-              className="px-3 py-1.5 rounded-lg text-xs font-medium border border-amber-500/40 bg-amber-500/10 text-amber-700 dark:text-amber-300 hover:bg-amber-500/20 transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-amber-500"
+              disabled={busy}
+              onClick={() => void handleMute(1800, "30m")}
+              className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-medium border border-amber-500/40 bg-amber-500/10 text-amber-700 dark:text-amber-300 hover:bg-amber-500/20 disabled:opacity-50 disabled:cursor-not-allowed transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-amber-500"
             >
-              静默 30 分钟
+              {mutingTarget === "30m" && (
+                <Loader2 className="w-3.5 h-3.5 animate-spin" aria-hidden="true" />
+              )}
+              <span>静默 30 分钟</span>
             </button>
             <button
               type="button"
-              onClick={() => onMuteNode(node.id, 7200)}
-              className="px-3 py-1.5 rounded-lg text-xs font-medium border border-amber-500/40 bg-amber-500/10 text-amber-700 dark:text-amber-300 hover:bg-amber-500/20 transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-amber-500"
+              disabled={busy}
+              onClick={() => void handleMute(7200, "2h")}
+              className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-medium border border-amber-500/40 bg-amber-500/10 text-amber-700 dark:text-amber-300 hover:bg-amber-500/20 disabled:opacity-50 disabled:cursor-not-allowed transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-amber-500"
             >
-              静默 2 小时
+              {mutingTarget === "2h" && (
+                <Loader2 className="w-3.5 h-3.5 animate-spin" aria-hidden="true" />
+              )}
+              <span>静默 2 小时</span>
             </button>
             <button
               type="button"
-              disabled={!muted}
-              onClick={() => onMuteNode(node.id, null)}
-              className="px-3 py-1.5 rounded-lg text-xs font-medium border border-emerald-500/40 bg-emerald-500/10 text-emerald-700 dark:text-emerald-300 hover:bg-emerald-500/20 disabled:opacity-40 disabled:cursor-not-allowed transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-500"
+              disabled={!muted || busy}
+              onClick={() => void handleMute(null, "unmute")}
+              className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-medium border border-emerald-500/40 bg-emerald-500/10 text-emerald-700 dark:text-emerald-300 hover:bg-emerald-500/20 disabled:opacity-40 disabled:cursor-not-allowed transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-500"
             >
-              取消静默
+              {mutingTarget === "unmute" && (
+                <Loader2 className="w-3.5 h-3.5 animate-spin" aria-hidden="true" />
+              )}
+              <span>取消静默</span>
             </button>
           </div>
         </div>
@@ -552,14 +640,22 @@ export function HardwareSecurityPanel({
 
           <button
             type="button"
-            onClick={handleRotate}
-            className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-semibold border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-800/80 text-slate-800 dark:text-slate-100 hover:bg-slate-50 dark:hover:bg-slate-700/80 transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--accent-primary)]"
+            disabled={busy}
+            onClick={() => void handleRotate()}
+            className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-semibold border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-800/80 text-slate-800 dark:text-slate-100 hover:bg-slate-50 dark:hover:bg-slate-700/80 disabled:opacity-50 disabled:cursor-not-allowed transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--accent-primary)]"
           >
-            <KeyRound
-              className="w-3.5 h-3.5 text-[var(--accent-primary)]"
-              aria-hidden="true"
-            />
-            <span>轮换连接密钥</span>
+            {rotating ? (
+              <Loader2
+                className="w-3.5 h-3.5 animate-spin text-[var(--accent-primary)]"
+                aria-hidden="true"
+              />
+            ) : (
+              <KeyRound
+                className="w-3.5 h-3.5 text-[var(--accent-primary)]"
+                aria-hidden="true"
+              />
+            )}
+            <span>{rotating ? "轮换中..." : "轮换连接密钥"}</span>
           </button>
         </div>
 
@@ -612,10 +708,9 @@ export function HardwareSecurityPanel({
             </p>
           </div>
 
-          {/* Primary trigger stays anchored in the exact same position without jumping */}
           <button
             type="button"
-            disabled={confirmDelete}
+            disabled={confirmDelete || busy}
             onClick={() => setConfirmDelete(true)}
             className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-semibold border border-rose-500/45 bg-rose-500/10 text-rose-700 dark:text-rose-300 hover:bg-rose-500/20 disabled:opacity-50 disabled:cursor-not-allowed transition-colors shrink-0 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-rose-500"
           >
@@ -624,7 +719,6 @@ export function HardwareSecurityPanel({
           </button>
         </div>
 
-        {/* Dedicated confirmation slot below; never replaces or moves the primary trigger */}
         {confirmDelete && (
           <div className="rounded-lg border border-rose-500/40 bg-rose-500/10 px-3.5 py-2.5 flex flex-wrap items-center justify-between gap-3">
             <span className="text-xs font-medium text-rose-800 dark:text-rose-200">
@@ -635,17 +729,25 @@ export function HardwareSecurityPanel({
             <div className="flex items-center gap-2 ml-auto">
               <button
                 type="button"
+                disabled={deleting}
                 onClick={() => setConfirmDelete(false)}
-                className="px-3 py-1 rounded-md text-xs font-medium border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-900 text-slate-700 dark:text-slate-200 hover:bg-slate-50 dark:hover:bg-slate-800"
+                className="px-3 py-1 rounded-md text-xs font-medium border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-900 text-slate-700 dark:text-slate-200 hover:bg-slate-50 dark:hover:bg-slate-800 disabled:opacity-50"
               >
                 取消操作
               </button>
               <button
                 type="button"
-                onClick={handleConfirmDelete}
-                className="px-3 py-1 rounded-md text-xs font-semibold bg-rose-600 text-white hover:bg-rose-500 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-rose-500"
+                disabled={deleting}
+                onClick={() => void handleConfirmDelete()}
+                className="inline-flex items-center gap-1.5 px-3 py-1 rounded-md text-xs font-semibold bg-rose-600 text-white hover:bg-rose-500 disabled:opacity-60 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-rose-500"
               >
-                确认永久移除
+                {deleting && (
+                  <Loader2
+                    className="w-3.5 h-3.5 animate-spin"
+                    aria-hidden="true"
+                  />
+                )}
+                <span>{deleting ? "正在移除..." : "确认永久移除"}</span>
               </button>
             </div>
           </div>

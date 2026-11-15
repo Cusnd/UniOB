@@ -9,13 +9,13 @@ import {
   Cloud,
   CornerDownLeft,
   LayoutDashboard,
+  Lock,
+  LogOut,
   Menu,
   Monitor,
   Moon,
   PanelLeftClose,
   PanelLeftOpen,
-  Pause,
-  Play,
   Plus,
   Search,
   Server,
@@ -30,23 +30,26 @@ import {
 import type {
   AccentPreset,
   AppRoute,
+  AuthStatus,
   DensityMode,
-  HubMode,
+  HorizonNode,
+  HubStatusResponse,
   InspectorTab,
-  PrototypeNode,
-  SimSpeed,
   ThemeMode,
 } from "../types";
-import { formatRate } from "../utils/format";
+import type { WsConnectionStatus } from "../hooks/useFleetSocket";
+import { formatNodeMetaLine, formatRate } from "../utils/format";
 
 export interface AppShellProps {
   route: AppRoute;
   onRouteChange: (route: AppRoute) => void;
-  nodes: PrototypeNode[];
+  nodes: HorizonNode[];
   activeAlertsCount: number;
-  wsConnected: boolean;
-  hubMode: HubMode;
-  onToggleHubMode: () => void;
+  wsStatus: WsConnectionStatus;
+  onReconnectWs?: () => void;
+  hubStatus: HubStatusResponse | null;
+  auth: AuthStatus;
+  onLogout: () => Promise<void> | void;
   themeMode: ThemeMode;
   resolvedTheme: "dark" | "light";
   onCycleTheme: () => void;
@@ -54,11 +57,8 @@ export interface AppShellProps {
   onAccentChange: (a: AccentPreset) => void;
   density: DensityMode;
   onDensityChange: (d: DensityMode) => void;
-  simSpeed: SimSpeed;
-  onSimSpeedChange: (s: SimSpeed) => void;
   onOpenAddServer: () => void;
-  onOpenAuthPreview: () => void;
-  onSelectNode: (node: PrototypeNode, initialTab?: InspectorTab) => void;
+  onSelectNode: (node: HorizonNode, initialTab?: InspectorTab) => void;
   children: React.ReactNode;
 }
 
@@ -68,7 +68,7 @@ interface CommandItem {
   title: string;
   subtitle: string;
   keywords: string;
-  node?: PrototypeNode;
+  node?: HorizonNode;
   run: () => void;
 }
 
@@ -129,16 +129,18 @@ function isPointerOutsideElement(
 }
 
 /**
- * UniOB Horizon 2026 应用壳层：可折叠导航轨、原型工作台、52px 玻璃顶栏与 ⌘K 命令中心。
+ * UniOB Horizon 2026 应用壳层：可折叠导航轨、界面外观设置、52px 玻璃顶栏与 ⌘K 命令中心。
  */
 export function AppShell({
   route,
   onRouteChange,
   nodes,
   activeAlertsCount,
-  wsConnected,
-  hubMode,
-  onToggleHubMode,
+  wsStatus,
+  onReconnectWs,
+  hubStatus,
+  auth,
+  onLogout,
   themeMode,
   resolvedTheme,
   onCycleTheme,
@@ -146,10 +148,7 @@ export function AppShell({
   onAccentChange,
   density,
   onDensityChange,
-  simSpeed,
-  onSimSpeedChange,
   onOpenAddServer,
-  onOpenAuthPreview,
   onSelectNode,
   children,
 }: AppShellProps): React.JSX.Element {
@@ -162,6 +161,7 @@ export function AppShell({
   const [cmdOpen, setCmdOpen] = useState(false);
   const [cmdQuery, setCmdQuery] = useState("");
   const [cmdActiveIdx, setCmdActiveIdx] = useState(0);
+  const [loggingOut, setLoggingOut] = useState(false);
 
   const mobileDialogRef = useRef<HTMLDialogElement | null>(null);
   const mobilePanelRef = useRef<HTMLDivElement | null>(null);
@@ -222,6 +222,16 @@ export function AppShell({
     setCmdOpen(true);
   }, []);
 
+  const handleLogoutClick = useCallback(async () => {
+    if (loggingOut) return;
+    setLoggingOut(true);
+    try {
+      await onLogout();
+    } finally {
+      setLoggingOut(false);
+    }
+  }, [loggingOut, onLogout]);
+
   const fleetStats = useMemo(() => {
     let onlineCount = 0;
     let totalTxBps = 0;
@@ -248,34 +258,69 @@ export function AppShell({
   const currentRouteMeta =
     ROUTE_ITEMS.find((r) => r.key === route) ?? ROUTE_ITEMS[0];
 
+  const wsBadge =
+    wsStatus === "connected"
+      ? {
+          cls: "border-emerald-500/35 bg-emerald-500/12 text-emerald-700 dark:text-emerald-300",
+          dot: "bg-emerald-500",
+          ring: true,
+          label: "实时流已连接",
+        }
+      : wsStatus === "connecting" || wsStatus === "reconnecting"
+        ? {
+            cls: "border-amber-500/35 bg-amber-500/12 text-amber-700 dark:text-amber-300",
+            dot: "bg-amber-500",
+            ring: false,
+            label: wsStatus === "connecting" ? "正在连接…" : "重连中…",
+          }
+        : {
+            cls: "border-rose-500/35 bg-rose-500/12 text-rose-700 dark:text-rose-300",
+            dot: "bg-rose-500",
+            ring: false,
+            label: "连接已断开",
+          };
+
+  const authAccountLabel =
+    auth.mode === "cf_access"
+      ? auth.email || "Cloudflare Access"
+      : "管理员已认证";
+
   const commandItems = useMemo<CommandItem[]>(() => {
-    const nodeItems: CommandItem[] = nodes.map((node) => ({
-      id: `node-${node.id}`,
-      group: "node",
-      title: `${node.region_flag} ${node.name}`,
-      subtitle: `${node.group_name} · ${node.provider} · ${
-        node.online
-          ? `CPU ${(node.metrics?.cpu.all ?? 0).toFixed(1)}%`
-          : "离线"
-      }`,
-      keywords: [
-        node.name,
-        node.hostname ?? "",
-        node.group_name,
-        node.region_code,
-        node.provider,
-        node.ipv4_masked,
-        node.os ?? "",
-        ...node.tags,
-      ]
-        .join(" ")
-        .toLowerCase(),
-      node,
-      run: () => {
-        onSelectNode(node, "charts");
-        setCmdOpen(false);
-      },
-    }));
+    const nodeItems: CommandItem[] = nodes.map((node) => {
+      const metaLine = formatNodeMetaLine(node, {
+        includeHostnameFallback: true,
+      });
+      const statusText = node.online
+        ? `CPU ${(node.metrics?.cpu.all ?? 0).toFixed(1)}%`
+        : "离线";
+      const subtitle = [node.group_name, metaLine, statusText]
+        .filter(Boolean)
+        .join(" · ");
+
+      return {
+        id: `node-${node.id}`,
+        group: "node",
+        title: `${node.region_flag} ${node.name}`,
+        subtitle,
+        keywords: [
+          node.name,
+          node.hostname ?? "",
+          node.group_name,
+          node.region_code,
+          node.provider,
+          node.ipv4_masked,
+          node.os ?? "",
+          ...node.tags,
+        ]
+          .join(" ")
+          .toLowerCase(),
+        node,
+        run: () => {
+          onSelectNode(node, "charts");
+          setCmdOpen(false);
+        },
+      };
+    });
 
     const routeItems: CommandItem[] = ROUTE_ITEMS.map((item) => ({
       id: `route-${item.key}`,
@@ -302,19 +347,6 @@ export function AppShell({
         },
       },
       {
-        id: "action-toggle-hub",
-        group: "action",
-        title: `切换运行模式（当前：${
-          hubMode === "cloudflare-worker" ? "Cloudflare SCCH" : "Rust uniob-hub"
-        }）`,
-        subtitle: "在边缘零热路径与自建 SQLite WAL 模式间切换预览",
-        keywords: "模式 cloudflare scch rust uniob-hub 迁移".toLowerCase(),
-        run: () => {
-          onToggleHubMode();
-          setCmdOpen(false);
-        },
-      },
-      {
         id: "action-theme",
         group: "action",
         title: `切换外观主题（当前：${themeText}）`,
@@ -324,22 +356,11 @@ export function AppShell({
           onCycleTheme();
         },
       },
-      {
-        id: "action-auth-preview",
-        group: "action",
-        title: "预览登录与 Cloudflare Zero Trust 页面",
-        subtitle: "体验密码登录、首次初始化、SSO 与 403 拦截态",
-        keywords: "登录 zero trust sso 403 鉴权 auth".toLowerCase(),
-        run: () => {
-          setCmdOpen(false);
-          onOpenAuthPreview();
-        },
-      },
       ...ACCENT_PRESETS.map((preset) => ({
         id: `action-accent-${preset.key}`,
         group: "action" as const,
         title: `切换强调色：${preset.label}`,
-        subtitle: `设置 Horizon 商业主色为 ${preset.key}`,
+        subtitle: `设置 Horizon 主题强调色为 ${preset.key}`,
         keywords: `强调色 accent color ${preset.label} ${preset.key}`.toLowerCase(),
         run: () => {
           onAccentChange(preset.key);
@@ -353,6 +374,17 @@ export function AppShell({
         keywords: "密度 紧凑 舒适 density compact comfortable".toLowerCase(),
         run: () => {
           onDensityChange(density === "comfortable" ? "compact" : "comfortable");
+        },
+      },
+      {
+        id: "action-logout",
+        group: "action",
+        title: "退出当前管理员会话",
+        subtitle: `当前账号：${authAccountLabel}`,
+        keywords: "退出 登录 注销 logout signout".toLowerCase(),
+        run: () => {
+          setCmdOpen(false);
+          void handleLogoutClick();
         },
       },
     ];
@@ -369,17 +401,16 @@ export function AppShell({
   }, [
     nodes,
     cmdQuery,
-    hubMode,
     themeText,
     density,
+    authAccountLabel,
     onSelectNode,
     onRouteChange,
     onOpenAddServer,
-    onToggleHubMode,
     onCycleTheme,
     onAccentChange,
     onDensityChange,
-    onOpenAuthPreview,
+    handleLogoutClick,
   ]);
 
   const safeActiveIdx =
@@ -539,7 +570,11 @@ export function AppShell({
 
               {!isCollapsed && key === "migration" && (
                 <span className="px-1.5 py-0.5 rounded-md text-[10px] font-mono-num bg-[var(--bg-elevated)] text-[var(--text-secondary)] border border-[var(--border-subtle)]">
-                  {hubMode === "cloudflare-worker" ? "SCCH" : "HUB"}
+                  {hubStatus
+                    ? hubStatus.mode === "cloudflare-worker"
+                      ? "SCCH"
+                      : "HUB"
+                    : "…"}
                 </span>
               )}
 
@@ -553,7 +588,7 @@ export function AppShell({
         })}
       </nav>
 
-      {/* Bottom Prototype Studio Panel */}
+      {/* Bottom Appearance & Session Panel */}
       <div
         className={`shrink-0 border-t border-[var(--border-subtle)] ${
           isCollapsed ? "p-2 space-y-1.5" : "p-3"
@@ -588,29 +623,13 @@ export function AppShell({
             </button>
             <button
               type="button"
-              onClick={() =>
-                onSimSpeedChange(
-                  simSpeed === "1s" ? "2s" : simSpeed === "2s" ? "paused" : "1s",
-                )
-              }
-              title={`仿真流速率：${simSpeed}`}
-              aria-label={`切换仿真速度，当前 ${simSpeed}`}
-              className="w-10 h-9 rounded-xl border border-[var(--border-subtle)] bg-[var(--bg-elevated)] flex items-center justify-center text-[var(--text-secondary)] hover:text-[var(--text-primary)]"
+              onClick={() => void handleLogoutClick()}
+              disabled={loggingOut}
+              title={`退出登录（${authAccountLabel}）`}
+              aria-label="退出登录"
+              className="w-10 h-9 rounded-xl border border-[var(--border-subtle)] bg-[var(--bg-elevated)] flex items-center justify-center text-[var(--text-secondary)] hover:text-rose-500 disabled:opacity-50"
             >
-              {simSpeed === "paused" ? (
-                <Pause className="w-3.5 h-3.5 text-amber-500" aria-hidden="true" />
-              ) : (
-                <Play className="w-3.5 h-3.5 text-[var(--accent-primary)]" aria-hidden="true" />
-              )}
-            </button>
-            <button
-              type="button"
-              onClick={onOpenAuthPreview}
-              title="预览登录 / Zero Trust 页面"
-              aria-label="预览登录与 Zero Trust 页面"
-              className="w-10 h-9 rounded-xl border border-[var(--border-subtle)] bg-[var(--bg-elevated)] flex items-center justify-center text-[var(--text-secondary)] hover:text-[var(--accent-primary)]"
-            >
-              <ShieldCheck className="w-4 h-4" aria-hidden="true" />
+              <LogOut className="w-4 h-4" aria-hidden="true" />
             </button>
           </div>
         ) : (
@@ -621,10 +640,10 @@ export function AppShell({
                   className="w-3.5 h-3.5 text-[var(--accent-primary)]"
                   aria-hidden="true"
                 />
-                原型工作台
+                界面外观设置
               </span>
               <span className="text-[9px] font-mono-num uppercase tracking-wider px-1.5 py-0.5 rounded bg-[var(--bg-surface)] text-[var(--text-secondary)] border border-[var(--border-subtle)]">
-                Studio
+                Horizon
               </span>
             </div>
 
@@ -705,50 +724,38 @@ export function AppShell({
               </div>
             </div>
 
-            {/* Simulation Speed */}
-            <div className="flex items-center justify-between gap-2 text-[11px]">
-              <span className="text-[var(--text-secondary)]">仿真流</span>
+            {/* Authenticated Account Badge & Logout */}
+            <div className="pt-2 border-t border-[var(--border-subtle)] flex items-center justify-between gap-2">
               <div
-                className="inline-flex rounded-lg border border-[var(--border-subtle)] bg-[var(--bg-surface)] p-0.5 font-mono-num"
-                role="group"
-                aria-label="切换遥测仿真流速度"
+                className="flex items-center gap-1.5 min-w-0 text-[11px] text-[var(--text-secondary)]"
+                title={authAccountLabel}
               >
-                {(
-                  [
-                    { key: "1s", label: "1s" },
-                    { key: "2s", label: "2s" },
-                    { key: "paused", label: "暂停" },
-                  ] as const
-                ).map((opt) => (
-                  <button
-                    key={opt.key}
-                    type="button"
-                    onClick={() => onSimSpeedChange(opt.key)}
-                    aria-pressed={simSpeed === opt.key}
-                    className={`px-1.5 py-0.5 rounded-md text-[10px] font-medium transition-colors ${
-                      simSpeed === opt.key
-                        ? "bg-[var(--accent-solid)] text-white"
-                        : "text-[var(--text-secondary)] hover:text-[var(--text-primary)]"
-                    }`}
-                  >
-                    {opt.label}
-                  </button>
-                ))}
+                {auth.mode === "cf_access" ? (
+                  <ShieldCheck
+                    className="w-3.5 h-3.5 text-[var(--accent-primary)] shrink-0"
+                    aria-hidden="true"
+                  />
+                ) : (
+                  <Lock
+                    className="w-3.5 h-3.5 text-[var(--accent-primary)] shrink-0"
+                    aria-hidden="true"
+                  />
+                )}
+                <span className="truncate font-mono-num">{authAccountLabel}</span>
               </div>
-            </div>
 
-            {/* Auth / Zero Trust Preview Trigger */}
-            <button
-              type="button"
-              onClick={() => {
-                if (isMobile) setMobileOpen(false);
-                onOpenAuthPreview();
-              }}
-              className="w-full inline-flex items-center justify-center gap-1.5 px-2.5 py-1.5 rounded-xl border border-[var(--border-subtle)] bg-[var(--bg-surface)] text-[11px] font-medium text-[var(--text-primary)] hover:border-[var(--accent-ring)] hover:text-[var(--accent-primary)] transition-colors"
-            >
-              <ShieldCheck className="w-3.5 h-3.5 text-[var(--accent-primary)]" aria-hidden="true" />
-              <span>预览登录 / Zero Trust 页面</span>
-            </button>
+              <button
+                type="button"
+                onClick={() => void handleLogoutClick()}
+                disabled={loggingOut}
+                aria-label="退出登录"
+                title="退出当前登录会话"
+                className="inline-flex items-center gap-1 px-2 py-1 rounded-lg border border-[var(--border-subtle)] bg-[var(--bg-surface)] text-[11px] font-medium text-[var(--text-secondary)] hover:text-rose-600 dark:hover:text-rose-400 hover:border-rose-500/40 whitespace-nowrap shrink-0 transition-colors disabled:opacity-50"
+              >
+                <LogOut className="w-3 h-3 shrink-0" aria-hidden="true" />
+                <span>退出</span>
+              </button>
+            </div>
           </div>
         )}
       </div>
@@ -784,68 +791,66 @@ export function AppShell({
               </button>
 
               <div className="flex items-center gap-2 min-w-0">
-                <h1 className="text-sm font-bold tracking-tight text-[var(--text-primary)] truncate">
+                <h1 className="text-sm font-bold tracking-tight text-[var(--text-primary)] whitespace-nowrap shrink-0">
                   {currentRouteMeta.label}
                 </h1>
-                <span className="hidden md:inline text-xs text-[var(--text-muted,var(--text-secondary))] truncate">
+                <span className="hidden xl:inline text-xs text-[var(--text-muted,var(--text-secondary))] truncate">
                   / {currentRouteMeta.shortDesc}
                 </span>
               </div>
 
-              <div
-                className={`hidden sm:inline-flex items-center gap-1.5 px-2 py-0.5 rounded-full border text-[10px] font-mono-num font-medium shrink-0 ${
-                  simSpeed === "paused"
-                    ? "border-amber-500/35 bg-amber-500/12 text-amber-700 dark:text-amber-300"
-                    : !wsConnected
-                      ? "border-rose-500/35 bg-rose-500/12 text-rose-700 dark:text-rose-300"
-                      : "border-emerald-500/35 bg-emerald-500/12 text-emerald-700 dark:text-emerald-300"
-                }`}
-              >
-                <span className="relative flex h-2 w-2" aria-hidden="true">
-                  {wsConnected && simSpeed !== "paused" && (
-                    <span className="animate-status-ring absolute inline-flex h-full w-full rounded-full bg-emerald-400" />
-                  )}
-                  <span
-                    className={`relative inline-flex rounded-full h-2 w-2 ${
-                      simSpeed === "paused"
-                        ? "bg-amber-500"
-                        : !wsConnected
-                          ? "bg-rose-500"
-                          : "bg-emerald-500"
-                    }`}
-                  />
-                </span>
-                <span>
-                  {simSpeed === "paused"
-                    ? "流已暂停"
-                    : !wsConnected
-                      ? "连接中断"
-                      : `${simSpeed} 实时流`}
-                </span>
-              </div>
+              {wsStatus === "disconnected" && onReconnectWs ? (
+                <button
+                  type="button"
+                  onClick={onReconnectWs}
+                  title="点击重连实时遥测流"
+                  className={`hidden sm:inline-flex items-center gap-1.5 px-2 py-0.5 rounded-full border text-[10px] font-mono-num font-medium whitespace-nowrap shrink-0 hover:opacity-85 transition-opacity ${wsBadge.cls}`}
+                >
+                  <span className="relative flex h-2 w-2" aria-hidden="true">
+                    <span
+                      className={`relative inline-flex rounded-full h-2 w-2 ${wsBadge.dot}`}
+                    />
+                  </span>
+                  <span>{wsBadge.label}</span>
+                </button>
+              ) : (
+                <div
+                  className={`hidden sm:inline-flex items-center gap-1.5 px-2 py-0.5 rounded-full border text-[10px] font-mono-num font-medium whitespace-nowrap shrink-0 ${wsBadge.cls}`}
+                >
+                  <span className="relative flex h-2 w-2" aria-hidden="true">
+                    {wsBadge.ring && (
+                      <span className="animate-status-ring absolute inline-flex h-full w-full rounded-full bg-emerald-400" />
+                    )}
+                    <span
+                      className={`relative inline-flex rounded-full h-2 w-2 ${wsBadge.dot}`}
+                    />
+                  </span>
+                  <span>{wsBadge.label}</span>
+                </div>
+              )}
             </div>
 
-            {/* Right: Telemetry Capsules + Mode Toggle + Command Center + CTA */}
+            {/* Right: Telemetry Capsules + Hub Mode Badge + Command Center + CTA */}
             <div className="flex items-center gap-1.5 sm:gap-2 shrink-0">
               {/* Aggregate TX / RX Capsule */}
               <div
-                className="hidden xl:inline-flex items-center gap-2 px-2.5 py-1 rounded-xl border border-[var(--border-subtle)] bg-[var(--bg-surface)] text-[11px] font-mono-num"
+                className="hidden xl:inline-flex items-center gap-2 px-2.5 py-1 rounded-xl border border-[var(--border-subtle)] bg-[var(--bg-surface)] text-[11px] font-mono-num whitespace-nowrap shrink-0"
                 title="全网在线节点实时聚合吞吐"
               >
                 <span className="inline-flex items-center gap-1 text-indigo-600 dark:text-indigo-400">
-                  <ArrowUp className="w-3 h-3" aria-hidden="true" />
+                  <ArrowUp className="w-3 h-3 shrink-0" aria-hidden="true" />
                   {formatRate(fleetStats.totalTxBps)}
                 </span>
                 <span className="text-[var(--border-strong)]">|</span>
                 <span className="inline-flex items-center gap-1 text-cyan-600 dark:text-cyan-400">
-                  <ArrowDown className="w-3 h-3" aria-hidden="true" />
+                  <ArrowDown className="w-3 h-3 shrink-0" aria-hidden="true" />
                   {formatRate(fleetStats.totalRxBps)}
                 </span>
               </div>
 
               {/* Online Rate Capsule */}
               <div
-                className="hidden md:inline-flex items-center gap-1.5 px-2.5 py-1 rounded-xl border border-[var(--border-subtle)] bg-[var(--bg-surface)] text-[11px] font-mono-num"
+                className="hidden md:inline-flex items-center gap-1.5 px-2.5 py-1 rounded-xl border border-[var(--border-subtle)] bg-[var(--bg-surface)] text-[11px] font-mono-num whitespace-nowrap shrink-0"
                 title={`在线 ${fleetStats.onlineCount} / ${nodes.length} 台`}
               >
                 <span className="font-semibold text-emerald-600 dark:text-emerald-400">
@@ -862,7 +867,7 @@ export function AppShell({
                 type="button"
                 onClick={() => onRouteChange("alerts")}
                 aria-label={`当前活跃告警 ${activeAlertsCount} 条，点击进入告警中心`}
-                className={`inline-flex items-center gap-1.5 px-2.5 py-1 rounded-xl border text-[11px] font-mono-num font-semibold transition-colors ${
+                className={`inline-flex items-center gap-1.5 px-2.5 py-1 rounded-xl border text-[11px] font-mono-num font-semibold whitespace-nowrap shrink-0 transition-colors ${
                   activeAlertsCount > 0
                     ? "border-rose-500/40 bg-rose-500/15 text-rose-700 dark:text-rose-300 hover:bg-rose-500/25"
                     : "border-[var(--border-subtle)] bg-[var(--bg-surface)] text-[var(--text-secondary)] hover:text-[var(--text-primary)]"
@@ -878,37 +883,48 @@ export function AppShell({
                     }`}
                   />
                 </span>
-                <Bell className="w-3.5 h-3.5" aria-hidden="true" />
-                <span className="hidden sm:inline">告警</span>
+                <Bell className="w-3.5 h-3.5 shrink-0" aria-hidden="true" />
+                <span className="hidden sm:inline whitespace-nowrap">告警</span>
                 <span>{activeAlertsCount}</span>
               </button>
 
-              {/* Hub Mode Switch Capsule */}
+              {/* Real Hub Mode Capsule (click navigates to migration studio) */}
               <button
                 type="button"
-                onClick={onToggleHubMode}
-                title="点击切换运行模式预览（Cloudflare SCCH ⇄ Rust uniob-hub）"
-                className="hidden sm:inline-flex items-center gap-1.5 px-2.5 py-1 rounded-xl border border-[var(--border-subtle)] bg-[var(--bg-surface)] text-[11px] font-medium text-[var(--text-primary)] hover:border-[var(--accent-ring)] transition-colors"
+                onClick={() => onRouteChange("migration")}
+                title="点击打开双模热迁移控制面"
+                className="hidden sm:inline-flex items-center gap-1.5 px-2.5 py-1 rounded-xl border border-[var(--border-subtle)] bg-[var(--bg-surface)] text-[11px] font-medium text-[var(--text-primary)] whitespace-nowrap shrink-0 hover:border-[var(--accent-ring)] transition-colors"
               >
-                {hubMode === "cloudflare-worker" ? (
+                {hubStatus?.mode === "cloudflare-worker" ? (
                   <>
-                    <Cloud className="w-3.5 h-3.5 text-sky-500" aria-hidden="true" />
-                    <span className="hidden lg:inline">Cloudflare SCCH</span>
-                    <span className="font-mono-num text-[10px] px-1 rounded bg-sky-500/12 text-sky-700 dark:text-sky-300">
+                    <Cloud className="w-3.5 h-3.5 text-sky-500 shrink-0" aria-hidden="true" />
+                    <span className="hidden lg:inline whitespace-nowrap">
+                      Cloudflare SCCH
+                    </span>
+                    <span className="font-mono-num text-[10px] px-1 rounded bg-sky-500/12 text-sky-700 dark:text-sky-300 whitespace-nowrap shrink-0">
                       $0/月
+                    </span>
+                  </>
+                ) : hubStatus?.mode === "self-hosted-hub" ? (
+                  <>
+                    <Server className="w-3.5 h-3.5 text-emerald-500 shrink-0" aria-hidden="true" />
+                    <span className="hidden lg:inline whitespace-nowrap">
+                      Rust uniob-hub
+                    </span>
+                    <span className="font-mono-num text-[10px] px-1 rounded bg-emerald-500/12 text-emerald-700 dark:text-emerald-300 whitespace-nowrap shrink-0">
+                      WAL
                     </span>
                   </>
                 ) : (
                   <>
-                    <Server className="w-3.5 h-3.5 text-emerald-500" aria-hidden="true" />
-                    <span className="hidden lg:inline">Rust uniob-hub</span>
-                    <span className="font-mono-num text-[10px] px-1 rounded bg-emerald-500/12 text-emerald-700 dark:text-emerald-300">
-                      WAL
+                    <Activity className="w-3.5 h-3.5 text-[var(--text-muted)] shrink-0" aria-hidden="true" />
+                    <span className="hidden lg:inline whitespace-nowrap text-[var(--text-secondary)]">
+                      双模控制面
                     </span>
                   </>
                 )}
                 <ArrowLeftRight
-                  className="w-3 h-3 text-[var(--text-secondary)]"
+                  className="w-3 h-3 text-[var(--text-secondary)] shrink-0"
                   aria-hidden="true"
                 />
               </button>
@@ -918,10 +934,10 @@ export function AppShell({
                 type="button"
                 onClick={openCommandCenter}
                 aria-label="打开全局命令中心 (Cmd+K / Ctrl+K)"
-                className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-xl border border-[var(--border-subtle)] bg-[var(--bg-surface)] text-xs text-[var(--text-secondary)] hover:text-[var(--text-primary)] hover:border-[var(--border-strong)] transition-colors"
+                className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-xl border border-[var(--border-subtle)] bg-[var(--bg-surface)] text-xs text-[var(--text-secondary)] whitespace-nowrap shrink-0 hover:text-[var(--text-primary)] hover:border-[var(--border-strong)] transition-colors"
               >
-                <Search className="w-3.5 h-3.5" aria-hidden="true" />
-                <span className="hidden md:inline">命令中心</span>
+                <Search className="w-3.5 h-3.5 shrink-0" aria-hidden="true" />
+                <span className="hidden md:inline whitespace-nowrap">命令中心</span>
                 <kbd className="hidden sm:inline-block px-1.5 py-0.5 rounded border border-[var(--border-subtle)] bg-[var(--bg-elevated)] text-[10px] font-mono-num text-[var(--text-primary)]">
                   ⌘K
                 </kbd>
@@ -931,9 +947,9 @@ export function AppShell({
               <button
                 type="button"
                 onClick={onOpenAddServer}
-                className="inline-flex items-center gap-1 px-3 py-1.5 rounded-xl text-xs font-semibold bg-[var(--accent-solid)] hover:bg-[var(--accent-primary)] text-white shadow-xs transition-colors"
+                className="inline-flex items-center gap-1 px-3 py-1.5 rounded-xl text-xs font-semibold bg-[var(--accent-solid)] hover:bg-[var(--accent-primary)] text-white shadow-xs whitespace-nowrap shrink-0 transition-colors"
               >
-                <Plus className="w-3.5 h-3.5" aria-hidden="true" />
+                <Plus className="w-3.5 h-3.5 shrink-0" aria-hidden="true" />
                 <span>部署探针</span>
               </button>
             </div>
@@ -961,19 +977,23 @@ export function AppShell({
         }}
         onClose={() => setMobileOpen(false)}
         onPointerDown={(e) => {
-          mobilePointerDownOutRef.current = isPointerOutsideElement(
-            e,
-            mobilePanelRef.current,
-          );
+          if (!("closedBy" in HTMLDialogElement.prototype)) {
+            mobilePointerDownOutRef.current = isPointerOutsideElement(
+              e,
+              mobilePanelRef.current,
+            );
+          }
         }}
         onPointerUp={(e) => {
-          if (
-            mobilePointerDownOutRef.current &&
-            isPointerOutsideElement(e, mobilePanelRef.current)
-          ) {
-            setMobileOpen(false);
+          if (!("closedBy" in HTMLDialogElement.prototype)) {
+            if (
+              mobilePointerDownOutRef.current &&
+              isPointerOutsideElement(e, mobilePanelRef.current)
+            ) {
+              setMobileOpen(false);
+            }
+            mobilePointerDownOutRef.current = false;
           }
-          mobilePointerDownOutRef.current = false;
         }}
         className="m-0 h-dvh max-h-dvh w-fit bg-transparent p-0"
       >
@@ -982,7 +1002,7 @@ export function AppShell({
           className="flex flex-col h-full w-[276px] max-w-[85vw] bg-[var(--bg-surface)] border-r border-[var(--border-subtle)] shadow-2xl"
         >
           <span id={mobileTitleId} className="sr-only">
-            UniOB 导航菜单与工作台
+            UniOB 导航菜单与外观设置
           </span>
           {renderSidebarBody(false, true)}
         </div>
@@ -999,19 +1019,23 @@ export function AppShell({
         }}
         onClose={() => setCmdOpen(false)}
         onPointerDown={(e) => {
-          cmdPointerDownOutRef.current = isPointerOutsideElement(
-            e,
-            cmdPanelRef.current,
-          );
+          if (!("closedBy" in HTMLDialogElement.prototype)) {
+            cmdPointerDownOutRef.current = isPointerOutsideElement(
+              e,
+              cmdPanelRef.current,
+            );
+          }
         }}
         onPointerUp={(e) => {
-          if (
-            cmdPointerDownOutRef.current &&
-            isPointerOutsideElement(e, cmdPanelRef.current)
-          ) {
-            setCmdOpen(false);
+          if (!("closedBy" in HTMLDialogElement.prototype)) {
+            if (
+              cmdPointerDownOutRef.current &&
+              isPointerOutsideElement(e, cmdPanelRef.current)
+            ) {
+              setCmdOpen(false);
+            }
+            cmdPointerDownOutRef.current = false;
           }
-          cmdPointerDownOutRef.current = false;
         }}
         className="m-auto w-[min(660px,calc(100vw-1.5rem))] max-h-[min(560px,84dvh)] bg-transparent p-0"
       >

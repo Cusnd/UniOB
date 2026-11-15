@@ -1,4 +1,4 @@
-import { useId, useMemo, useState } from "react";
+import { useEffect, useId, useMemo, useState } from "react";
 import {
   Activity,
   AlertTriangle,
@@ -6,8 +6,7 @@ import {
   ArrowUp,
   ArrowUpDown,
   Cpu,
-  Eye,
-  EyeOff,
+  Loader2,
   Moon,
   Pause,
   PauseCircle,
@@ -17,13 +16,14 @@ import {
   Terminal,
   X,
 } from "lucide-react";
-import type { ProcEntry, PrototypeNode } from "../types";
+import type { HorizonNode, ProcEntry } from "../types";
+import type { ProcsPacket, WsConnectionStatus } from "../hooks/useFleetSocket";
 import { formatBytes, getMemTotalBytes } from "../utils/format";
 
 export interface ProcessExplorerProps {
-  node: PrototypeNode;
-  procs: ProcEntry[];
-  onToggleProcPrivacyPreview?: (nodeId: string) => void;
+  node: HorizonNode;
+  procsPacket: ProcsPacket | null;
+  wsStatus: WsConnectionStatus;
 }
 
 type SortKey = "pid" | "user" | "st" | "cpu" | "rss" | "thr" | "comm";
@@ -102,8 +102,8 @@ function renderStateBadge(state: string): React.JSX.Element {
 
 export function ProcessExplorer({
   node,
-  procs,
-  onToggleProcPrivacyPreview,
+  procsPacket,
+  wsStatus,
 }: ProcessExplorerProps): React.JSX.Element {
   const baseId = useId();
   const captionId = `${baseId}-proc-caption`;
@@ -119,13 +119,26 @@ export function ProcessExplorer({
   } | null>(null);
   const [sortAnnouncement, setSortAnnouncement] = useState("");
 
+  useEffect(() => {
+    setPaused(false);
+    setFrozenSnapshot(null);
+    setSearch("");
+  }, [node.id]);
+
+  const hasMatchedPacket = procsPacket?.nodeId === node.id;
+  const procs = useMemo(
+    () => (procsPacket?.nodeId === node.id ? procsPacket.procs : []),
+    [procsPacket, node.id],
+  );
+  const packetTs = procsPacket?.nodeId === node.id ? procsPacket.ts : null;
+
   const activeProcs = paused && frozenSnapshot ? frozenSnapshot.procs : procs;
   const memTotal = getMemTotalBytes(node);
 
   const togglePause = () => {
     if (!paused) {
       setFrozenSnapshot({
-        capturedAt: Math.floor(Date.now() / 1000),
+        capturedAt: packetTs ?? Math.floor(Date.now() / 1000),
         procs: [...procs],
       });
       setPaused(true);
@@ -211,7 +224,7 @@ export function ProcessExplorer({
     return { zombie, diskSleep, running, maxRss, maxCpu };
   }, [activeProcs]);
 
-  if (!node.proc_enabled) {
+  if (node.proc_enabled === false) {
     return (
       <div className="surface-card rounded-xl p-6 border border-amber-500/35 bg-amber-500/[0.06] space-y-4">
         <div className="flex flex-wrap items-start gap-4">
@@ -238,36 +251,19 @@ export function ProcessExplorer({
               已配置禁用进程列表与命令行透视。遵循「默认隐私最小化」安全基线，控制面不会拉取或缓存该服务器的{" "}
               <code className="font-mono-num">/proc</code> 运行态快照。
             </p>
-            <div className="pt-1 flex flex-wrap items-center gap-2.5">
-              {onToggleProcPrivacyPreview && (
-                <button
-                  type="button"
-                  onClick={() => onToggleProcPrivacyPreview(node.id)}
-                  className="inline-flex items-center gap-1.5 px-3.5 py-1.5 rounded-lg text-xs font-semibold bg-[var(--accent-primary)] text-white hover:opacity-95 transition-opacity shadow-xs focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--accent-primary)]"
-                >
-                  <Eye className="w-3.5 h-3.5" aria-hidden="true" />
-                  <span>预览启用进程表效果</span>
-                </button>
-              )}
-              <span className="text-[11px] font-mono-num text-slate-500 dark:text-slate-400">
-                如需真实开启：在探针移除 --disable-proc 并重启 uniob-agent
-              </span>
-            </div>
+            <p className="text-[11px] font-mono-num text-slate-500 dark:text-slate-400">
+              如需开启：在探针移除 --disable-proc 并重启 uniob-agent 服务
+            </p>
           </div>
         </div>
       </div>
     );
   }
 
-  const snapTimeText = paused && frozenSnapshot
-    ? new Date(frozenSnapshot.capturedAt * 1000).toLocaleTimeString([], {
-        hour12: false,
-      })
-    : node.metrics?.ts
-      ? new Date(node.metrics.ts * 1000).toLocaleTimeString([], {
-          hour12: false,
-        })
-      : "实时推流";
+  const snapTs = paused && frozenSnapshot ? frozenSnapshot.capturedAt : packetTs;
+  const snapTimeText = snapTs
+    ? new Date(snapTs * 1000).toLocaleTimeString([], { hour12: false })
+    : "等待快照...";
 
   const renderSortIcon = (key: SortKey) => {
     if (sortBy !== key) {
@@ -290,6 +286,8 @@ export function ProcessExplorer({
       />
     );
   };
+
+  const waitingForSnapshot = !paused && !hasMatchedPacket;
 
   return (
     <div className="space-y-3">
@@ -365,9 +363,10 @@ export function ProcessExplorer({
           {/* Pause / Resume Freeze */}
           <button
             type="button"
+            disabled={!paused && !hasMatchedPacket}
             aria-pressed={paused}
             onClick={togglePause}
-            className={`inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-medium border transition-colors ${
+            className={`inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-medium border transition-colors disabled:opacity-45 disabled:cursor-not-allowed ${
               paused
                 ? "border-amber-500/40 bg-amber-500/15 text-amber-700 dark:text-amber-300 hover:bg-amber-500/20"
                 : "border-slate-200 dark:border-slate-700/80 bg-white dark:bg-slate-900/70 text-slate-700 dark:text-slate-200 hover:bg-slate-50 dark:hover:bg-slate-800"
@@ -385,19 +384,6 @@ export function ProcessExplorer({
               </>
             )}
           </button>
-
-          {/* Privacy Preview Toggle */}
-          {onToggleProcPrivacyPreview && (
-            <button
-              type="button"
-              onClick={() => onToggleProcPrivacyPreview(node.id)}
-              className="inline-flex items-center gap-1 px-2.5 py-1.5 rounded-lg text-xs font-medium border border-slate-200 dark:border-slate-700/80 bg-slate-50 dark:bg-slate-900/60 text-slate-600 dark:text-slate-300 hover:text-slate-900 dark:hover:text-slate-100 hover:bg-slate-100 dark:hover:bg-slate-800 transition-colors"
-              title="切换模拟 agent.toml 关闭进程上报的隐私保护效果"
-            >
-              <EyeOff className="w-3.5 h-3.5" aria-hidden="true" />
-              <span>演示隐私保护禁用态</span>
-            </button>
-          )}
         </div>
       </div>
 
@@ -427,6 +413,15 @@ export function ProcessExplorer({
             </strong>{" "}
             / {activeProcs.length}
           </span>
+          {wsStatus !== "connected" && (
+            <span className="px-2 py-0.5 rounded-md bg-amber-500/12 text-amber-700 dark:text-amber-300 border border-amber-500/30 text-[11px]">
+              {wsStatus === "reconnecting"
+                ? "WS 重连中"
+                : wsStatus === "connecting"
+                  ? "WS 连接中"
+                  : "WS 已断开"}
+            </span>
+          )}
         </div>
 
         <div className="flex flex-wrap items-center gap-2 font-mono-num">
@@ -468,8 +463,8 @@ export function ProcessExplorer({
         {sortAnnouncement}
       </div>
 
-      {/* Process Table */}
-      {!node.online && activeProcs.length === 0 ? (
+      {/* Offline / Waiting / Process Table */}
+      {!node.online && waitingForSnapshot ? (
         <div className="surface-card rounded-xl p-8 text-center space-y-2">
           <Terminal
             className="w-7 h-7 mx-auto text-slate-400"
@@ -480,6 +475,21 @@ export function ProcessExplorer({
           </p>
           <p className="text-xs text-slate-500 dark:text-slate-400">
             探针恢复连接后将自动恢复每 2 秒按需进程推流。
+          </p>
+        </div>
+      ) : waitingForSnapshot ? (
+        <div className="surface-card rounded-xl p-10 text-center space-y-2.5">
+          <Loader2
+            className="w-6 h-6 mx-auto text-[var(--accent-primary)] animate-spin"
+            aria-hidden="true"
+          />
+          <p className="text-sm font-medium text-slate-700 dark:text-slate-200">
+            正在按需拉取 Top 进程快照…
+          </p>
+          <p className="text-xs text-slate-500 dark:text-slate-400">
+            {wsStatus === "connected"
+              ? "控制面已向探针下发按需采集指令，通常在 2 秒内返回首帧快照。"
+              : "WebSocket 通道连接中，就绪后将自动接收实时进程列表。"}
           </p>
         </div>
       ) : (
@@ -647,7 +657,9 @@ export function ProcessExplorer({
                       colSpan={7}
                       className="py-10 text-center text-xs text-slate-500 dark:text-slate-400"
                     >
-                      没有匹配当前过滤条件的运行进程
+                      {activeProcs.length === 0
+                        ? "当前快照进程列表为空"
+                        : "没有匹配当前过滤条件的运行进程"}
                     </td>
                   </tr>
                 ) : (
@@ -662,7 +674,10 @@ export function ProcessExplorer({
 
                     const cpuBarPct = Math.min(
                       100,
-                      Math.max(0, (proc.cpu / Math.max(100, stats.maxCpu)) * 100),
+                      Math.max(
+                        0,
+                        (proc.cpu / Math.max(100, stats.maxCpu)) * 100,
+                      ),
                     );
                     const cpuBarColor =
                       proc.cpu >= 50

@@ -1,4 +1,4 @@
-import { useId } from "react";
+import { useId, useState } from "react";
 import {
   Activity,
   ArrowDown,
@@ -12,9 +12,11 @@ import {
   Terminal,
   WifiOff,
 } from "lucide-react";
-import type { DensityMode, InspectorTab, PrototypeNode } from "../types";
+import type { DensityMode, HorizonNode, InspectorTab } from "../types";
 import {
   formatBytes,
+  formatBytesCompact,
+  formatNodeMetaLine,
   formatRate,
   formatRelativeTime,
   formatUptime,
@@ -30,10 +32,10 @@ import {
 } from "../utils/format";
 
 export interface FleetBentoGridProps {
-  nodes: PrototypeNode[];
+  nodes: HorizonNode[];
   density: DensityMode;
-  onSelectNode: (node: PrototypeNode, initialTab?: InspectorTab) => void;
-  onMuteNode: (nodeId: string, seconds: number | null) => void;
+  onSelectNode: (node: HorizonNode, initialTab?: InspectorTab) => void;
+  onMuteNode: (nodeId: string, seconds: number | null) => void | Promise<void>;
 }
 
 interface CpuSparklineProps {
@@ -131,6 +133,23 @@ export function FleetBentoGrid({
   onMuteNode,
 }: FleetBentoGridProps): React.JSX.Element {
   const isCompact = density === "compact";
+  const [mutingIds, setMutingIds] = useState<Record<string, boolean>>({});
+
+  const handleMuteToggle = async (nodeId: string, seconds: number | null) => {
+    if (mutingIds[nodeId]) return;
+    setMutingIds((prev) => ({ ...prev, [nodeId]: true }));
+    try {
+      await Promise.resolve(onMuteNode(nodeId, seconds));
+    } catch {
+      // Error feedback is handled by caller
+    } finally {
+      setMutingIds((prev) => {
+        const next = { ...prev };
+        delete next[nodeId];
+        return next;
+      });
+    }
+  };
 
   if (nodes.length === 0) {
     return (
@@ -169,8 +188,12 @@ export function FleetBentoGrid({
         const diskPct = getDiskUsagePct(rootDisk);
         const osBadge = parseOsBadge(node.os);
         const muted = isNodeMuted(node);
+        const isMuting = Boolean(mutingIds[node.id]);
         const trafficLimit = node.traffic.limit_bytes;
         const trafficPct = getTrafficUsagePct(node.traffic);
+        const metaLine =
+          formatNodeMetaLine(node, { includeHostnameFallback: true }) ||
+          "Linux 节点";
 
         const isHot =
           !node.online ||
@@ -196,14 +219,14 @@ export function FleetBentoGrid({
             <div className="min-w-0 space-y-2">
               <div className="flex items-center justify-between gap-2 text-[11px] font-mono-num text-[var(--text-secondary)]">
                 <div className="flex items-center gap-1.5 min-w-0 truncate">
-                  <span aria-hidden="true">{node.region_flag}</span>
-                  <span className="font-semibold text-[var(--text-primary)]">
-                    {node.region_code}
+                  {node.region_flag && (
+                    <span aria-hidden="true" className="shrink-0">
+                      {node.region_flag}
+                    </span>
+                  )}
+                  <span className="truncate font-medium text-[var(--text-secondary)]">
+                    {metaLine}
                   </span>
-                  <span aria-hidden="true">·</span>
-                  <span className="truncate">{node.provider}</span>
-                  <span aria-hidden="true">·</span>
-                  <span className="truncate">{node.ipv4_masked}</span>
                 </div>
                 <div className="flex items-center gap-1 shrink-0">
                   <span className="px-1.5 py-0.5 rounded-md text-[10px] font-medium bg-[var(--bg-elevated)] text-[var(--text-secondary)] border border-[var(--border-subtle)]">
@@ -341,18 +364,18 @@ export function FleetBentoGrid({
             <div className="space-y-2.5 text-xs self-start">
               {/* Memory Segmented Bar */}
               <div>
-                <div className="flex items-center justify-between gap-2 mb-1">
-                  <div className="flex items-center gap-1.5">
-                    <span className="text-[var(--text-secondary)] font-medium">
+                <div className="flex flex-wrap items-center justify-between gap-x-2 gap-y-1 mb-1">
+                  <div className="flex items-center gap-1.5 shrink-0">
+                    <span className="text-[var(--text-secondary)] font-medium whitespace-nowrap shrink-0">
                       内存
                     </span>
                     {m && node.online && m.mem.swap_used > 0 && (
-                      <span className="px-1 py-0.5 rounded text-[10px] font-mono-num bg-indigo-500/10 text-indigo-600 dark:text-indigo-300 border border-indigo-500/25">
-                        Swap {formatBytes(m.mem.swap_used)}
+                      <span className="px-1.5 py-0.5 rounded text-[10px] font-mono-num bg-indigo-500/10 text-indigo-600 dark:text-indigo-300 border border-indigo-500/25 whitespace-nowrap shrink-0">
+                        Swap {formatBytesCompact(m.mem.swap_used)}
                       </span>
                     )}
                   </div>
-                  <span className="font-mono-num text-[var(--text-primary)]">
+                  <span className="font-mono-num text-[var(--text-primary)] whitespace-nowrap shrink-0">
                     {m && node.online ? (
                       <>
                         {formatBytes(m.mem.used)} / {formatBytes(memTotal)}{" "}
@@ -394,12 +417,12 @@ export function FleetBentoGrid({
 
               {/* Root Disk */}
               <div>
-                <div className="flex items-center justify-between gap-2 mb-1">
-                  <span className="text-[var(--text-secondary)] font-medium inline-flex items-center gap-1">
-                    <HardDrive className="w-3 h-3" aria-hidden="true" />
+                <div className="flex flex-wrap items-center justify-between gap-x-2 gap-y-1 mb-1">
+                  <span className="text-[var(--text-secondary)] font-medium inline-flex items-center gap-1 whitespace-nowrap shrink-0">
+                    <HardDrive className="w-3 h-3 shrink-0" aria-hidden="true" />
                     磁盘 {rootDisk?.mp ?? "/"}
                   </span>
-                  <span className="font-mono-num text-[var(--text-primary)]">
+                  <span className="font-mono-num text-[var(--text-primary)] whitespace-nowrap shrink-0">
                     {rootDisk && node.online ? (
                       <>
                         {formatBytes(rootDisk.used)} / {formatBytes(rootDisk.total)}{" "}
@@ -512,9 +535,11 @@ export function FleetBentoGrid({
 
                 <button
                   type="button"
-                  onClick={() => onMuteNode(node.id, muted ? null : 3600)}
+                  disabled={isMuting}
+                  aria-busy={isMuting || undefined}
+                  onClick={() => void handleMuteToggle(node.id, muted ? null : 3600)}
                   aria-pressed={muted}
-                  className={`inline-flex items-center gap-1 px-2.5 py-1 rounded-full text-[11px] font-medium border transition-colors ${
+                  className={`inline-flex items-center gap-1 px-2.5 py-1 rounded-full text-[11px] font-medium border transition-colors disabled:opacity-60 disabled:cursor-not-allowed ${
                     muted
                       ? "border-amber-500/40 bg-amber-500/15 text-amber-700 dark:text-amber-300 hover:bg-amber-500/25"
                       : "border-[var(--border-subtle)] bg-[var(--bg-elevated)] text-[var(--text-secondary)] hover:text-[var(--text-primary)]"
