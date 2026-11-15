@@ -9,6 +9,7 @@ import {
   formatBytesPerSec,
 } from "./ui/Primitives";
 import type { HorizonNode, RotateTokenResponse } from "../types";
+import { formatAgentUpdateState, formatVersionTag } from "../utils/autoUpdate";
 import {
   formatBytes,
   formatRelativeTime,
@@ -236,6 +237,44 @@ export function HardwareSecurityPanel({
                 ? formatUptime(node.metrics?.up)
                 : `离线 · ${formatRelativeTime(node.last_seen_ts)}`}
             </div>
+          </div>
+
+          <div className="space-y-1 sm:col-span-2">
+            <div
+              style={{ color: "var(--text-tertiary)" }}
+              className="text-[12px]"
+            >
+              Agent 版本与更新状态
+            </div>
+            {(() => {
+              const upd = formatAgentUpdateState(
+                node.update_status,
+                node.agent_version,
+              );
+              return (
+                <div className="flex flex-wrap items-center gap-2">
+                  <span className="font-mono-num text-[13.5px] font-medium">
+                    {formatVersionTag(node.agent_version)}
+                  </span>
+                  {node.update_status && node.update_status.state !== "idle" && (
+                    <Badge tone={upd.tone}>{upd.label}</Badge>
+                  )}
+                  {upd.detail && (
+                    <span
+                      style={{
+                        color:
+                          node.update_status?.state === "error"
+                            ? "var(--status-danger-ink)"
+                            : "var(--text-tertiary)",
+                      }}
+                      className="text-[12px]"
+                    >
+                      {upd.detail}
+                    </span>
+                  )}
+                </div>
+              );
+            })()}
           </div>
         </div>
       </Card>

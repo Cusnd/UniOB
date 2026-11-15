@@ -11,12 +11,14 @@ import {
 import { Button, Card, SegmentedControl } from "./ui/Primitives";
 import type {
   AppRoute,
+  CardPrimaryMetric,
   DensityMode,
   FleetViewMode,
   HorizonNode,
   HubStatusResponse,
   InspectorTab,
 } from "../types";
+import { CARD_PRIMARY_METRIC_OPTIONS } from "../utils/cardMetrics";
 import { BentoHeroStrip } from "./BentoHeroStrip";
 import { FleetBentoGrid } from "./FleetBentoGrid";
 import { FleetDataGrid } from "./FleetDataGrid";
@@ -31,6 +33,8 @@ export interface FleetOverviewPageProps {
   onSearchChange: (q: string) => void;
   viewMode: FleetViewMode;
   onViewModeChange: (m: FleetViewMode) => void;
+  cardPrimaryMetric: CardPrimaryMetric;
+  onCardPrimaryMetricChange: (m: CardPrimaryMetric) => void;
   activeAlertsCount: number;
   hubStatus: HubStatusResponse | null;
   density: DensityMode;
@@ -49,6 +53,8 @@ export function FleetOverviewPage({
   onSearchChange,
   viewMode,
   onViewModeChange,
+  cardPrimaryMetric,
+  onCardPrimaryMetricChange,
   activeAlertsCount,
   hubStatus,
   density,
@@ -167,8 +173,8 @@ export function FleetOverviewPage({
           })}
         </div>
 
-        <div className="flex flex-wrap items-center gap-2.5 sm:flex-nowrap">
-          <div className="relative min-w-[180px] flex-1 sm:w-[220px] sm:flex-initial">
+        <div className="flex flex-wrap items-center gap-2.5">
+          <div className="relative min-w-[180px] flex-1 sm:w-[210px] sm:flex-initial">
             <label htmlFor={searchInputId} className="sr-only">
               搜索服务器
             </label>
@@ -203,6 +209,16 @@ export function FleetOverviewPage({
               </button>
             )}
           </div>
+
+          {viewMode === "bento" && (
+            <SegmentedControl<CardPrimaryMetric>
+              ariaLabel="卡片主图表指标"
+              value={cardPrimaryMetric}
+              onChange={onCardPrimaryMetricChange}
+              size="sm"
+              options={CARD_PRIMARY_METRIC_OPTIONS}
+            />
+          )}
 
           <SegmentedControl<FleetViewMode>
             ariaLabel="视图布局"
@@ -261,6 +277,7 @@ export function FleetOverviewPage({
         <FleetBentoGrid
           nodes={filteredNodes}
           density={density}
+          primaryMetric={cardPrimaryMetric}
           onSelectNode={onSelectNode}
           onMuteNode={onMuteNode}
         />

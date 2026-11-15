@@ -3,6 +3,7 @@ import {
   ArrowDown,
   ArrowRightLeft,
   ArrowUp,
+  ArrowUpCircle,
   ArrowUpDown,
   KeyRound,
   Loader2,
@@ -14,13 +15,16 @@ import {
   Volume2,
   VolumeX,
 } from "lucide-react";
+import { api } from "../api/client";
 import type {
   HorizonNode,
   InspectorTab,
   RotateTokenResponse,
+  ToastTone,
   TrafficCountMode,
   UpdateNodePayload,
 } from "../types";
+import { formatAgentUpdateState, formatVersionTag } from "../utils/autoUpdate";
 import {
   formatBytes,
   formatBytesCompact,
@@ -42,8 +46,10 @@ import {
   SectionHeader,
   SegmentedControl,
   StatusDot,
+  TabBar,
 } from "./ui/Primitives";
 import { NetworkQualitySettings } from "./NetworkQualitySettings";
+import { AgentUpdateModal } from "./AgentUpdateModal";
 
 export interface NodesOpsViewProps {
   nodes: HorizonNode[];
@@ -55,11 +61,14 @@ export interface NodesOpsViewProps {
   onRotateToken: (id: string) => Promise<RotateTokenResponse>;
   onDeleteNode: (id: string) => Promise<void>;
   onNavigateMigration: () => void;
+  onNotify?: (tone: ToastTone, title: string, description?: string) => void;
 }
 
 type SortColumn = "name" | "group" | "net" | "cpu" | "mem" | "traffic";
 type SortDirection = "ascending" | "descending";
 type QuickStatusFilter = "all" | "online" | "offline" | "muted";
+type EditModalTab = "basic" | "network" | "update";
+type AutoUpdateOverrideChoice = "inherit" | "on" | "off";
 
 const GB_BYTES = 1024 * 1024 * 1024;
 const zhCollator = new Intl.Collator("zh-CN", { numeric: true });
@@ -75,6 +84,7 @@ export function NodesOpsView(props: NodesOpsViewProps): React.JSX.Element {
     onRotateToken,
     onDeleteNode,
     onNavigateMigration,
+    onNotify,
   } = props;
 
   const tableCaptionId = useId();
@@ -84,6 +94,7 @@ export function NodesOpsView(props: NodesOpsViewProps): React.JSX.Element {
   const groupDatalistId = useId();
   const networkTitleId = useId();
   const [networkSettingsOpen, setNetworkSettingsOpen] = useState(false);
+  const [autoUpdateOpen, setAutoUpdateOpen] = useState(false);
 
   // Filter & Sort state
   const [groupFilter, setGroupFilter] = useState<string>("ALL");
@@ -96,6 +107,7 @@ export function NodesOpsView(props: NodesOpsViewProps): React.JSX.Element {
 
   // Edit Server Modal state
   const [editingNode, setEditingNode] = useState<HorizonNode | null>(null);
+  const [editTab, setEditTab] = useState<EditModalTab>("basic");
   const [editName, setEditName] = useState("");
   const [editGroup, setEditGroup] = useState("");
   const [editTagsText, setEditTagsText] = useState("");
@@ -105,6 +117,16 @@ export function NodesOpsView(props: NodesOpsViewProps): React.JSX.Element {
   const [editCountMode, setEditCountMode] = useState<TrafficCountMode>("both");
   const [savingEdit, setSavingEdit] = useState(false);
   const [editError, setEditError] = useState<string | null>(null);
+
+  // Per-node Auto Update tab state inside Edit Server Modal
+  const [editUpdateOverride, setEditUpdateOverride] =
+    useState<AutoUpdateOverrideChoice>("inherit");
+  const [savingNodeUpdate, setSavingNodeUpdate] = useState(false);
+  const [triggeringNodeUpdate, setTriggeringNodeUpdate] = useState(false);
+  const [nodeUpdateFeedback, setNodeUpdateFeedback] = useState<{
+    tone: "ok" | "error";
+    text: string;
+  } | null>(null);
 
   // Rotate Token Modal state
   const [tokenNode, setTokenNode] = useState<HorizonNode | null>(null);
@@ -195,6 +217,7 @@ export function NodesOpsView(props: NodesOpsViewProps): React.JSX.Element {
 
   const openEditModal = (node: HorizonNode) => {
     setEditingNode(node);
+    setEditTab("basic");
     setEditName(node.name);
     setEditGroup(node.group_name);
     setEditTagsText(node.tags.join(", "));
@@ -207,6 +230,67 @@ export function NodesOpsView(props: NodesOpsViewProps): React.JSX.Element {
     setEditResetDay(node.traffic.reset_day || 1);
     setEditCountMode(node.traffic.count_mode || "both");
     setEditError(null);
+    setEditUpdateOverride(
+      node.auto_update_override === true
+        ? "on"
+        : node.auto_update_override === false
+          ? "off"
+          : "inherit",
+    );
+    setNodeUpdateFeedback(null);
+  };
+
+  const liveEditingNode = useMemo(
+    () =>
+      editingNode
+        ? (nodes.find((n) => n.id === editingNode.id) ?? editingNode)
+        : null,
+    [nodes, editingNode],
+  );
+
+  const handleSaveNodeAutoUpdate = async () => {
+    if (!editingNode || savingNodeUpdate) return;
+    setSavingNodeUpdate(true);
+    setNodeUpdateFeedback(null);
+    const nextOverride =
+      editUpdateOverride === "inherit"
+        ? null
+        : editUpdateOverride === "on";
+    try {
+      await onUpdateNode(editingNode.id, { auto_update_override: nextOverride });
+      setNodeUpdateFeedback({ tone: "ok", text: "已保存自动更新策略" });
+    } catch (err) {
+      setNodeUpdateFeedback({
+        tone: "error",
+        text: err instanceof Error ? err.message : "保存自动更新策略失败",
+      });
+    } finally {
+      setSavingNodeUpdate(false);
+    }
+  };
+
+  const handleTriggerSingleNodeUpdate = async () => {
+    if (!editingNode || triggeringNodeUpdate) return;
+    setTriggeringNodeUpdate(true);
+    setNodeUpdateFeedback(null);
+    try {
+      const res = await api.triggerAgentUpdate({
+        node_ids: [editingNode.id],
+        force: true,
+      });
+      const text =
+        res.dispatched > 0
+          ? `已下发更新任务${res.version ? ` (${formatVersionTag(res.version)})` : ""}`
+          : "节点未在线或当前无需更新";
+      setNodeUpdateFeedback({ tone: "ok", text });
+    } catch (err) {
+      setNodeUpdateFeedback({
+        tone: "error",
+        text: err instanceof Error ? err.message : "触发更新失败",
+      });
+    } finally {
+      setTriggeringNodeUpdate(false);
+    }
   };
 
   const handleSaveEdit = async (e: React.FormEvent) => {
@@ -308,16 +392,31 @@ export function NodesOpsView(props: NodesOpsViewProps): React.JSX.Element {
         }
         actions={
           <div className="flex flex-wrap items-center gap-2">
-            <Button size="sm" variant="ghost" icon={<SlidersHorizontal className="h-3.5 w-3.5" aria-hidden="true" />} onClick={() => setNetworkSettingsOpen(true)}>网络检测</Button>
-            {nodes.length > 0 && (
             <Button
               size="sm"
               variant="ghost"
-              icon={<ArrowRightLeft className="h-3.5 w-3.5" aria-hidden="true" />}
-              onClick={onNavigateMigration}
+              icon={<SlidersHorizontal className="h-3.5 w-3.5" aria-hidden="true" />}
+              onClick={() => setNetworkSettingsOpen(true)}
             >
-              服务与迁移
+              网络检测
             </Button>
+            <Button
+              size="sm"
+              variant="ghost"
+              icon={<ArrowUpCircle className="h-3.5 w-3.5" aria-hidden="true" />}
+              onClick={() => setAutoUpdateOpen(true)}
+            >
+              自动更新
+            </Button>
+            {nodes.length > 0 && (
+              <Button
+                size="sm"
+                variant="ghost"
+                icon={<ArrowRightLeft className="h-3.5 w-3.5" aria-hidden="true" />}
+                onClick={onNavigateMigration}
+              >
+                服务与迁移
+              </Button>
             )}
           </div>
         }
@@ -711,6 +810,22 @@ export function NodesOpsView(props: NodesOpsViewProps): React.JSX.Element {
                             {node.ipv4_masked || node.hostname || "—"}
                           </span>
                           <Badge tone="neutral">{specText}</Badge>
+                          {node.agent_version && (
+                            <span
+                              style={{ color: "var(--text-tertiary)" }}
+                              className="font-mono-num text-[11px]"
+                            >
+                              {formatVersionTag(node.agent_version)}
+                            </span>
+                          )}
+                          {node.update_status &&
+                            node.update_status.state !== "idle" && (() => {
+                              const upd = formatAgentUpdateState(
+                                node.update_status,
+                                node.agent_version,
+                              );
+                              return <Badge tone={upd.tone}>{upd.label}</Badge>;
+                            })()}
                         </div>
                       </td>
 
@@ -857,307 +972,457 @@ export function NodesOpsView(props: NodesOpsViewProps): React.JSX.Element {
 
       {/* 1. Edit Server Modal */}
       <NativeDialog
-        open={editingNode !== null}
+        open={liveEditingNode !== null}
         onClose={() => {
-          if (!savingEdit) setEditingNode(null);
+          if (!savingEdit && !savingNodeUpdate) setEditingNode(null);
         }}
         titleId={editTitleId}
-        maxWidthClass="max-w-[460px]"
+        maxWidthClass="max-w-[600px]"
       >
-        {editingNode && (
-          <>
-          <form onSubmit={(e) => void handleSaveEdit(e)} className="space-y-4 p-5">
-            <div className="flex items-center justify-between">
+        {liveEditingNode && (
+          <div className="p-5">
+            <div className="flex items-center justify-between gap-3">
               <h3
                 id={editTitleId}
                 style={{ color: "var(--text-primary)" }}
-                className="text-[15px] font-semibold"
+                className="truncate text-[15px] font-semibold"
               >
-                编辑服务器
+                编辑服务器 · {liveEditingNode.name}
               </h3>
               <IconCloseButton
                 onClick={() => {
-                  if (!savingEdit) setEditingNode(null);
+                  if (!savingEdit && !savingNodeUpdate) setEditingNode(null);
                 }}
               />
             </div>
 
-            {editError && (
-              <div
-                role="alert"
-                style={{
-                  backgroundColor: "var(--status-danger-bg)",
-                  border: "1px solid var(--status-danger-border)",
-                  color: "var(--status-danger-ink)",
-                }}
-                className="rounded-[8px] px-3 py-2 text-[12px]"
-              >
-                {editError}
-              </div>
+            <div className="mt-3 mb-4">
+              <TabBar<EditModalTab>
+                ariaLabel="编辑服务器分区"
+                activeTab={editTab}
+                onChange={setEditTab}
+                tabs={[
+                  { id: "basic", label: "基本信息" },
+                  { id: "network", label: "TCP 延迟探测" },
+                  { id: "update", label: "自动更新" },
+                ]}
+              />
+            </div>
+
+            {editTab === "basic" && (
+              <form onSubmit={(e) => void handleSaveEdit(e)} className="space-y-4">
+                {editError && (
+                  <div
+                    role="alert"
+                    style={{
+                      backgroundColor: "var(--status-danger-bg)",
+                      border: "1px solid var(--status-danger-border)",
+                      color: "var(--status-danger-ink)",
+                    }}
+                    className="rounded-[8px] px-3 py-2 text-[12px]"
+                  >
+                    {editError}
+                  </div>
+                )}
+
+                <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
+                  <div className="space-y-1 sm:col-span-2">
+                    <label
+                      htmlFor="edit-node-name"
+                      style={{ color: "var(--text-secondary)" }}
+                      className="block text-[12px] font-medium"
+                    >
+                      服务器名称
+                    </label>
+                    <input
+                      id="edit-node-name"
+                      type="text"
+                      required
+                      value={editName}
+                      onChange={(e) => setEditName(e.target.value)}
+                      style={{
+                        backgroundColor: "var(--bg-subtle)",
+                        color: "var(--text-primary)",
+                        border: "1px solid var(--border-subtle)",
+                      }}
+                      className="h-9 w-full rounded-[8px] px-3 text-[13px] outline-none"
+                    />
+                  </div>
+
+                  <div className="space-y-1">
+                    <label
+                      htmlFor="edit-node-group"
+                      style={{ color: "var(--text-secondary)" }}
+                      className="block text-[12px] font-medium"
+                    >
+                      分组
+                    </label>
+                    <input
+                      id="edit-node-group"
+                      type="text"
+                      list={groupDatalistId}
+                      value={editGroup}
+                      onChange={(e) => setEditGroup(e.target.value)}
+                      placeholder="例如：亚太生产"
+                      style={{
+                        backgroundColor: "var(--bg-subtle)",
+                        color: "var(--text-primary)",
+                        border: "1px solid var(--border-subtle)",
+                      }}
+                      className="h-9 w-full rounded-[8px] px-3 text-[13px] outline-none"
+                    />
+                    <datalist id={groupDatalistId}>
+                      {groups.map((grp) => (
+                        <option key={grp} value={grp} />
+                      ))}
+                    </datalist>
+                  </div>
+
+                  <div className="space-y-1">
+                    <label
+                      htmlFor="edit-node-sort"
+                      style={{ color: "var(--text-secondary)" }}
+                      className="block text-[12px] font-medium"
+                    >
+                      排序权重
+                    </label>
+                    <input
+                      id="edit-node-sort"
+                      type="number"
+                      value={editSortOrder}
+                      onChange={(e) => setEditSortOrder(Number(e.target.value) || 0)}
+                      style={{
+                        backgroundColor: "var(--bg-subtle)",
+                        color: "var(--text-primary)",
+                        border: "1px solid var(--border-subtle)",
+                      }}
+                      className="font-mono-num h-9 w-full rounded-[8px] px-3 text-[13px] outline-none"
+                    />
+                  </div>
+
+                  <div className="space-y-1 sm:col-span-2">
+                    <label
+                      htmlFor="edit-node-tags"
+                      style={{ color: "var(--text-secondary)" }}
+                      className="block text-[12px] font-medium"
+                    >
+                      标签（逗号分隔）
+                    </label>
+                    <input
+                      id="edit-node-tags"
+                      type="text"
+                      value={editTagsText}
+                      onChange={(e) => setEditTagsText(e.target.value)}
+                      placeholder="边缘, 东京, CN2"
+                      style={{
+                        backgroundColor: "var(--bg-subtle)",
+                        color: "var(--text-primary)",
+                        border: "1px solid var(--border-subtle)",
+                      }}
+                      className="h-9 w-full rounded-[8px] px-3 text-[13px] outline-none"
+                    />
+                  </div>
+
+                  <div className="space-y-1">
+                    <label
+                      htmlFor="edit-node-limit"
+                      style={{ color: "var(--text-secondary)" }}
+                      className="block text-[12px] font-medium"
+                    >
+                      月流量配额（GB，留空不限）
+                    </label>
+                    <input
+                      id="edit-node-limit"
+                      type="number"
+                      min={0}
+                      step="any"
+                      value={editLimitGb}
+                      onChange={(e) => setEditLimitGb(e.target.value)}
+                      placeholder="不限流量"
+                      style={{
+                        backgroundColor: "var(--bg-subtle)",
+                        color: "var(--text-primary)",
+                        border: "1px solid var(--border-subtle)",
+                      }}
+                      className="font-mono-num h-9 w-full rounded-[8px] px-3 text-[13px] outline-none"
+                    />
+                  </div>
+
+                  <div className="space-y-1">
+                    <label
+                      htmlFor="edit-node-reset-day"
+                      style={{ color: "var(--text-secondary)" }}
+                      className="block text-[12px] font-medium"
+                    >
+                      每月重置日（1-28）
+                    </label>
+                    <input
+                      id="edit-node-reset-day"
+                      type="number"
+                      min={1}
+                      max={28}
+                      value={editResetDay}
+                      onChange={(e) =>
+                        setEditResetDay(
+                          Math.min(28, Math.max(1, Number(e.target.value) || 1)),
+                        )
+                      }
+                      style={{
+                        backgroundColor: "var(--bg-subtle)",
+                        color: "var(--text-primary)",
+                        border: "1px solid var(--border-subtle)",
+                      }}
+                      className="font-mono-num h-9 w-full rounded-[8px] px-3 text-[13px] outline-none"
+                    />
+                  </div>
+
+                  <div className="space-y-1 sm:col-span-2">
+                    <label
+                      htmlFor="edit-node-mode"
+                      style={{ color: "var(--text-secondary)" }}
+                      className="block text-[12px] font-medium"
+                    >
+                      流量计费方式
+                    </label>
+                    <select
+                      id="edit-node-mode"
+                      value={editCountMode}
+                      onChange={(e) =>
+                        setEditCountMode(e.target.value as TrafficCountMode)
+                      }
+                      style={{
+                        backgroundColor: "var(--bg-subtle)",
+                        color: "var(--text-primary)",
+                        border: "1px solid var(--border-subtle)",
+                      }}
+                      className="h-9 w-full rounded-[8px] px-3 text-[13px] outline-none"
+                    >
+                      <option value="both">双向计费（上传 + 下载）</option>
+                      <option value="tx_only">仅计上传（出向流量）</option>
+                      <option value="max">双向取大（较高一侧）</option>
+                    </select>
+                  </div>
+                </div>
+
+                {/* Quick Mute Actions */}
+                <div
+                  style={{
+                    backgroundColor: "var(--bg-subtle)",
+                    border: "1px solid var(--border-hairline)",
+                  }}
+                  className="flex flex-wrap items-center justify-between gap-2 rounded-[8px] px-3 py-2.5"
+                >
+                  <span
+                    style={{ color: "var(--text-secondary)" }}
+                    className="text-[12px] font-medium"
+                  >
+                    告警通知静音
+                  </span>
+                  <div className="flex items-center gap-1.5">
+                    <Button
+                      size="xs"
+                      variant="secondary"
+                      onClick={() => void onMuteNode(liveEditingNode.id, 3600)}
+                    >
+                      静音 1 小时
+                    </Button>
+                    <Button
+                      size="xs"
+                      variant="secondary"
+                      onClick={() => void onMuteNode(liveEditingNode.id, 86400)}
+                    >
+                      静音 24 小时
+                    </Button>
+                    {isNodeMuted(liveEditingNode) && (
+                      <Button
+                        size="xs"
+                        variant="ghost"
+                        onClick={() => void onMuteNode(liveEditingNode.id, null)}
+                      >
+                        恢复通知
+                      </Button>
+                    )}
+                  </div>
+                </div>
+
+                <div className="flex justify-end gap-2 pt-1">
+                  <Button
+                    variant="ghost"
+                    size="sm"
+                    disabled={savingEdit}
+                    onClick={() => setEditingNode(null)}
+                  >
+                    取消
+                  </Button>
+                  <Button
+                    type="submit"
+                    variant="primary"
+                    size="sm"
+                    disabled={savingEdit}
+                    icon={
+                      savingEdit ? (
+                        <Loader2
+                          className="h-3.5 w-3.5 animate-spin"
+                          aria-hidden="true"
+                        />
+                      ) : undefined
+                    }
+                  >
+                    {savingEdit ? "保存中..." : "保存基本设置"}
+                  </Button>
+                </div>
+              </form>
             )}
 
-            <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
-              <div className="space-y-1 sm:col-span-2">
-                <label
-                  htmlFor="edit-node-name"
-                  style={{ color: "var(--text-secondary)" }}
-                  className="block text-[12px] font-medium"
-                >
-                  服务器名称
-                </label>
-                <input
-                  id="edit-node-name"
-                  type="text"
-                  required
-                  value={editName}
-                  onChange={(e) => setEditName(e.target.value)}
-                  style={{
-                    backgroundColor: "var(--bg-subtle)",
-                    color: "var(--text-primary)",
-                    border: "1px solid var(--border-subtle)",
-                  }}
-                  className="h-9 w-full rounded-[8px] px-3 text-[13px] outline-none"
-                />
-              </div>
+            {editTab === "network" && (
+              <NetworkQualitySettings
+                key={liveEditingNode.id}
+                nodeId={liveEditingNode.id}
+                state={liveEditingNode.metrics?.network_quality}
+              />
+            )}
 
-              <div className="space-y-1">
-                <label
-                  htmlFor="edit-node-group"
-                  style={{ color: "var(--text-secondary)" }}
-                  className="block text-[12px] font-medium"
-                >
-                  分组
-                </label>
-                <input
-                  id="edit-node-group"
-                  type="text"
-                  list={groupDatalistId}
-                  value={editGroup}
-                  onChange={(e) => setEditGroup(e.target.value)}
-                  placeholder="例如：亚太生产"
-                  style={{
-                    backgroundColor: "var(--bg-subtle)",
-                    color: "var(--text-primary)",
-                    border: "1px solid var(--border-subtle)",
-                  }}
-                  className="h-9 w-full rounded-[8px] px-3 text-[13px] outline-none"
-                />
-                <datalist id={groupDatalistId}>
-                  {groups.map((grp) => (
-                    <option key={grp} value={grp} />
-                  ))}
-                </datalist>
-              </div>
+            {editTab === "update" && (
+              <div className="space-y-4">
+                {(() => {
+                  const upd = formatAgentUpdateState(
+                    liveEditingNode.update_status,
+                    liveEditingNode.agent_version,
+                  );
+                  return (
+                    <div className="flex flex-wrap items-center justify-between gap-3 border-b border-[var(--border-hairline)] pb-3">
+                      <div className="space-y-1">
+                        <div className="flex items-center gap-2">
+                          <span className="text-[12.5px] font-medium">
+                            当前 Agent 版本
+                          </span>
+                          <span className="font-mono-num text-[13px] font-semibold">
+                            {formatVersionTag(liveEditingNode.agent_version)}
+                          </span>
+                          <Badge tone={upd.tone}>{upd.label}</Badge>
+                        </div>
+                        {upd.detail && (
+                          <p
+                            className={`text-[11.5px] ${
+                              liveEditingNode.update_status?.state === "error"
+                                ? "text-[var(--status-danger-ink)]"
+                                : "text-[var(--text-tertiary)]"
+                            }`}
+                          >
+                            {upd.detail}
+                          </p>
+                        )}
+                      </div>
 
-              <div className="space-y-1">
-                <label
-                  htmlFor="edit-node-sort"
-                  style={{ color: "var(--text-secondary)" }}
-                  className="block text-[12px] font-medium"
-                >
-                  排序权重
-                </label>
-                <input
-                  id="edit-node-sort"
-                  type="number"
-                  value={editSortOrder}
-                  onChange={(e) => setEditSortOrder(Number(e.target.value) || 0)}
-                  style={{
-                    backgroundColor: "var(--bg-subtle)",
-                    color: "var(--text-primary)",
-                    border: "1px solid var(--border-subtle)",
-                  }}
-                  className="font-mono-num h-9 w-full rounded-[8px] px-3 text-[13px] outline-none"
-                />
-              </div>
+                      <Button
+                        size="xs"
+                        variant="secondary"
+                        disabled={!liveEditingNode.online || triggeringNodeUpdate}
+                        onClick={() => void handleTriggerSingleNodeUpdate()}
+                        icon={
+                          triggeringNodeUpdate ? (
+                            <Loader2 className="h-3.5 w-3.5 animate-spin" aria-hidden="true" />
+                          ) : (
+                            <ArrowUpCircle className="h-3.5 w-3.5" aria-hidden="true" />
+                          )
+                        }
+                      >
+                        {triggeringNodeUpdate ? "下发中…" : "立即触发更新"}
+                      </Button>
+                    </div>
+                  );
+                })()}
 
-              <div className="space-y-1 sm:col-span-2">
-                <label
-                  htmlFor="edit-node-tags"
-                  style={{ color: "var(--text-secondary)" }}
-                  className="block text-[12px] font-medium"
-                >
-                  标签（逗号分隔）
-                </label>
-                <input
-                  id="edit-node-tags"
-                  type="text"
-                  value={editTagsText}
-                  onChange={(e) => setEditTagsText(e.target.value)}
-                  placeholder="边缘, 东京, CN2"
-                  style={{
-                    backgroundColor: "var(--bg-subtle)",
-                    color: "var(--text-primary)",
-                    border: "1px solid var(--border-subtle)",
-                  }}
-                  className="h-9 w-full rounded-[8px] px-3 text-[13px] outline-none"
-                />
-              </div>
+                <div className="space-y-2">
+                  <span className="block text-[12px] font-medium text-[var(--text-secondary)]">
+                    节点自动更新策略覆盖
+                  </span>
+                  <SegmentedControl<AutoUpdateOverrideChoice>
+                    ariaLabel="节点自动更新策略覆盖"
+                    value={editUpdateOverride}
+                    onChange={(val) => {
+                      setEditUpdateOverride(val);
+                      setNodeUpdateFeedback(null);
+                    }}
+                    options={[
+                      { value: "inherit", label: "跟随全局" },
+                      { value: "on", label: "强制开启" },
+                      { value: "off", label: "禁用" },
+                    ]}
+                  />
+                  <p className="text-[11.5px] text-[var(--text-tertiary)]">
+                    「跟随全局」将遵循全局自动更新开关；设为「禁用」仅可手动触发升级。
+                  </p>
+                </div>
 
-              <div className="space-y-1">
-                <label
-                  htmlFor="edit-node-limit"
-                  style={{ color: "var(--text-secondary)" }}
-                  className="block text-[12px] font-medium"
-                >
-                  月流量配额（GB，留空不限）
-                </label>
-                <input
-                  id="edit-node-limit"
-                  type="number"
-                  min={0}
-                  step="any"
-                  value={editLimitGb}
-                  onChange={(e) => setEditLimitGb(e.target.value)}
-                  placeholder="不限流量"
-                  style={{
-                    backgroundColor: "var(--bg-subtle)",
-                    color: "var(--text-primary)",
-                    border: "1px solid var(--border-subtle)",
-                  }}
-                  className="font-mono-num h-9 w-full rounded-[8px] px-3 text-[13px] outline-none"
-                />
-              </div>
-
-              <div className="space-y-1">
-                <label
-                  htmlFor="edit-node-reset-day"
-                  style={{ color: "var(--text-secondary)" }}
-                  className="block text-[12px] font-medium"
-                >
-                  每月重置日（1-28）
-                </label>
-                <input
-                  id="edit-node-reset-day"
-                  type="number"
-                  min={1}
-                  max={28}
-                  value={editResetDay}
-                  onChange={(e) =>
-                    setEditResetDay(
-                      Math.min(28, Math.max(1, Number(e.target.value) || 1)),
-                    )
-                  }
-                  style={{
-                    backgroundColor: "var(--bg-subtle)",
-                    color: "var(--text-primary)",
-                    border: "1px solid var(--border-subtle)",
-                  }}
-                  className="font-mono-num h-9 w-full rounded-[8px] px-3 text-[13px] outline-none"
-                />
-              </div>
-
-              <div className="space-y-1 sm:col-span-2">
-                <label
-                  htmlFor="edit-node-mode"
-                  style={{ color: "var(--text-secondary)" }}
-                  className="block text-[12px] font-medium"
-                >
-                  流量计费方式
-                </label>
-                <select
-                  id="edit-node-mode"
-                  value={editCountMode}
-                  onChange={(e) =>
-                    setEditCountMode(e.target.value as TrafficCountMode)
-                  }
-                  style={{
-                    backgroundColor: "var(--bg-subtle)",
-                    color: "var(--text-primary)",
-                    border: "1px solid var(--border-subtle)",
-                  }}
-                  className="h-9 w-full rounded-[8px] px-3 text-[13px] outline-none"
-                >
-                  <option value="both">双向计费（上传 + 下载）</option>
-                  <option value="tx_only">仅计上传（出向流量）</option>
-                  <option value="max">双向取大（较高一侧）</option>
-                </select>
-              </div>
-            </div>
-
-            {/* Quick Mute Actions */}
-            <div
-              style={{
-                backgroundColor: "var(--bg-subtle)",
-                border: "1px solid var(--border-hairline)",
-              }}
-              className="flex flex-wrap items-center justify-between gap-2 rounded-[8px] px-3 py-2.5"
-            >
-              <span
-                style={{ color: "var(--text-secondary)" }}
-                className="text-[12px] font-medium"
-              >
-                告警通知静音
-              </span>
-              <div className="flex items-center gap-1.5">
-                <Button
-                  size="xs"
-                  variant="secondary"
-                  onClick={() => void onMuteNode(editingNode.id, 3600)}
-                >
-                  静音 1 小时
-                </Button>
-                <Button
-                  size="xs"
-                  variant="secondary"
-                  onClick={() => void onMuteNode(editingNode.id, 86400)}
-                >
-                  静音 24 小时
-                </Button>
-                {isNodeMuted(editingNode) && (
-                  <Button
-                    size="xs"
-                    variant="ghost"
-                    onClick={() => void onMuteNode(editingNode.id, null)}
+                {nodeUpdateFeedback && (
+                  <p
+                    role={nodeUpdateFeedback.tone === "error" ? "alert" : "status"}
+                    className={`text-[12px] ${
+                      nodeUpdateFeedback.tone === "error"
+                        ? "text-[var(--status-danger-ink)]"
+                        : "text-[var(--status-ok-ink)]"
+                    }`}
                   >
-                    恢复通知
-                  </Button>
+                    {nodeUpdateFeedback.text}
+                  </p>
                 )}
-              </div>
-            </div>
 
-            <div className="flex justify-end gap-2 pt-1">
-              <Button
-                variant="ghost"
-                size="sm"
-                disabled={savingEdit}
-                onClick={() => setEditingNode(null)}
-              >
-                取消
-              </Button>
-              <Button
-                autoFocus
-                type="submit"
-                variant="primary"
-                size="sm"
-                disabled={savingEdit}
-                icon={
-                  savingEdit ? (
-                    <Loader2
-                      className="h-3.5 w-3.5 animate-spin"
-                      aria-hidden="true"
-                    />
-                  ) : undefined
-                }
-              >
-                {savingEdit ? "保存中..." : "保存"}
-              </Button>
-            </div>
-          </form>
-          <div className="border-t border-[var(--border-hairline)] p-5">
-            <NetworkQualitySettings key={editingNode.id} nodeId={editingNode.id}
-              state={nodes.find(node => node.id === editingNode.id)?.metrics?.network_quality} />
+                <div className="flex justify-end gap-2 pt-1">
+                  <Button
+                    variant="ghost"
+                    size="sm"
+                    disabled={savingNodeUpdate}
+                    onClick={() => setEditingNode(null)}
+                  >
+                    关闭
+                  </Button>
+                  <Button
+                    variant="primary"
+                    size="sm"
+                    disabled={savingNodeUpdate}
+                    onClick={() => void handleSaveNodeAutoUpdate()}
+                    icon={
+                      savingNodeUpdate ? (
+                        <Loader2 className="h-3.5 w-3.5 animate-spin" aria-hidden="true" />
+                      ) : undefined
+                    }
+                  >
+                    {savingNodeUpdate ? "保存中…" : "保存更新策略"}
+                  </Button>
+                </div>
+              </div>
+            )}
           </div>
-          </>
         )}
       </NativeDialog>
 
-      <NativeDialog open={networkSettingsOpen} onClose={() => setNetworkSettingsOpen(false)} titleId={networkTitleId} maxWidthClass="max-w-[580px]">
-        {networkSettingsOpen && <div className="space-y-4 p-5">
-          <div className="flex items-center justify-between gap-3"><h2 id={networkTitleId} className="text-[15px] font-semibold">网络检测设置</h2><IconCloseButton onClick={() => setNetworkSettingsOpen(false)} /></div>
-          <NetworkQualitySettings />
-        </div>}
+      <NativeDialog
+        open={networkSettingsOpen}
+        onClose={() => setNetworkSettingsOpen(false)}
+        titleId={networkTitleId}
+        maxWidthClass="max-w-[660px]"
+      >
+        {networkSettingsOpen && (
+          <div className="space-y-4 p-5">
+            <div className="flex items-center justify-between gap-3">
+              <h2 id={networkTitleId} className="text-[15px] font-semibold">
+                TCP 延迟探测设置
+              </h2>
+              <IconCloseButton onClick={() => setNetworkSettingsOpen(false)} />
+            </div>
+            <NetworkQualitySettings />
+          </div>
+        )}
       </NativeDialog>
+
+      <AgentUpdateModal
+        open={autoUpdateOpen}
+        onClose={() => setAutoUpdateOpen(false)}
+        nodes={nodes}
+        onUpdateNode={onUpdateNode}
+        onNotify={onNotify}
+      />
 
       {/* 2. Rotate Connection Key Modal */}
       <NativeDialog
@@ -1355,6 +1620,7 @@ export function NodesOpsView(props: NodesOpsViewProps): React.JSX.Element {
 
             <div className="flex justify-end gap-2 pt-1">
               <Button
+                autoFocus
                 variant="ghost"
                 size="sm"
                 disabled={deletingBusy}
@@ -1363,7 +1629,6 @@ export function NodesOpsView(props: NodesOpsViewProps): React.JSX.Element {
                 取消
               </Button>
               <Button
-                autoFocus
                 variant="danger"
                 size="sm"
                 disabled={deletingBusy}

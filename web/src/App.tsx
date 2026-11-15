@@ -48,6 +48,8 @@ function AppContent() {
     setDensity,
     viewMode,
     setViewMode,
+    cardPrimaryMetric,
+    setCardPrimaryMetric,
   } = useHorizonPrefs();
 
   const [auth, setAuth] = useState<AuthStatus | null>(null);
@@ -492,6 +494,8 @@ function AppContent() {
                 onSearchChange={setSearchQuery}
                 viewMode={viewMode}
                 onViewModeChange={setViewMode}
+                cardPrimaryMetric={cardPrimaryMetric}
+                onCardPrimaryMetricChange={setCardPrimaryMetric}
                 activeAlertsCount={activeAlertsCount}
                 hubStatus={hubStatus}
                 density={density}
@@ -513,6 +517,7 @@ function AppContent() {
                 onRotateToken={handleRotateToken}
                 onDeleteNode={handleDeleteNode}
                 onNavigateMigration={() => setRoute("migration")}
+                onNotify={pushToast}
               />
             )}
 

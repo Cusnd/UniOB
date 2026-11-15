@@ -1,15 +1,18 @@
 import { useCallback, useEffect, useState } from "react";
 import type {
   AccentPreset,
+  CardPrimaryMetric,
   DensityMode,
   FleetViewMode,
   ThemeMode,
 } from "../types";
+import { parseCardPrimaryMetric } from "../utils/cardMetrics";
 
 const COLOR_SCHEME_KEY = "uniob-color-scheme";
 const ACCENT_KEY = "uniob-accent";
 const DENSITY_KEY = "uniob-density";
 const VIEW_MODE_KEY = "uniob-fleet-view";
+const CARD_PRIMARY_METRIC_KEY = "uniob-card-primary-metric";
 
 function getSystemDark(): boolean {
   if (typeof window === "undefined") return false;
@@ -58,6 +61,10 @@ export function useHorizonPrefs() {
   const [viewMode, setViewModeState] = useState<FleetViewMode>(() =>
     parseViewMode(safeGetStorage(VIEW_MODE_KEY)),
   );
+  const [cardPrimaryMetric, setCardPrimaryMetricState] =
+    useState<CardPrimaryMetric>(() =>
+      parseCardPrimaryMetric(safeGetStorage(CARD_PRIMARY_METRIC_KEY)),
+    );
 
   useEffect(() => {
     const mq = window.matchMedia("(prefers-color-scheme: dark)");
@@ -79,6 +86,9 @@ export function useHorizonPrefs() {
       }
       if (e.key === null || e.key === VIEW_MODE_KEY) {
         setViewModeState(parseViewMode(e.newValue));
+      }
+      if (e.key === null || e.key === CARD_PRIMARY_METRIC_KEY) {
+        setCardPrimaryMetricState(parseCardPrimaryMetric(e.newValue));
       }
     };
     window.addEventListener("storage", onStorage);
@@ -168,6 +178,15 @@ export function useHorizonPrefs() {
     }
   }, []);
 
+  const setCardPrimaryMetric = useCallback((next: CardPrimaryMetric) => {
+    setCardPrimaryMetricState(next);
+    try {
+      localStorage.setItem(CARD_PRIMARY_METRIC_KEY, next);
+    } catch {
+      // ignore storage errors
+    }
+  }, []);
+
   return {
     themeMode,
     resolvedTheme,
@@ -179,5 +198,7 @@ export function useHorizonPrefs() {
     setDensity,
     viewMode,
     setViewMode,
+    cardPrimaryMetric,
+    setCardPrimaryMetric,
   };
 }

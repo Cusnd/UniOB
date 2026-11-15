@@ -1214,7 +1214,7 @@ export interface MetricBarProps {
   warnAt?: number;
   dangerAt?: number;
   recoveryMarkerPct?: number;
-  toneOverride?: "accent" | "ok" | "warn" | "danger" | "ink";
+  toneOverride?: "accent" | "ok" | "warn" | "danger" | "ink" | "muted";
   thickness?: 3 | 4 | 6;
   className?: string;
 }
@@ -1230,9 +1230,11 @@ export function MetricBar({
   className = "",
 }: MetricBarProps): React.JSX.Element {
   const clamped = Math.max(0, Math.min(100, valuePct));
+  const isMuted = toneOverride === "muted";
 
   let fillColor = "var(--ink-primary)";
-  if (toneOverride === "accent") fillColor = "var(--accent)";
+  if (toneOverride === "muted") fillColor = "var(--text-muted)";
+  else if (toneOverride === "accent") fillColor = "var(--accent)";
   else if (toneOverride === "ok") fillColor = "var(--status-ok)";
   else if (toneOverride === "warn") fillColor = "var(--status-warn)";
   else if (toneOverride === "danger") fillColor = "var(--status-danger)";
@@ -1246,11 +1248,19 @@ export function MetricBar({
       {(label || valueLabel) && (
         <div className="flex items-center justify-between gap-2 text-[12px] leading-none">
           {label && (
-            <span style={{ color: "var(--text-tertiary)" }}>{label}</span>
+            <span
+              style={{
+                color: isMuted ? "var(--text-muted)" : "var(--text-tertiary)",
+              }}
+            >
+              {label}
+            </span>
           )}
           {valueLabel && (
             <span
-              style={{ color: "var(--text-primary)" }}
+              style={{
+                color: isMuted ? "var(--text-tertiary)" : "var(--text-primary)",
+              }}
               className="font-mono-num font-medium"
             >
               {valueLabel}
@@ -1269,6 +1279,7 @@ export function MetricBar({
           style={{
             width: `${clamped}%`,
             backgroundColor: fillColor,
+            opacity: isMuted ? 0.55 : 1,
           }}
           className="h-full rounded-full transition-[width] duration-300 ease-out"
         />

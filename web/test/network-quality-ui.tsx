@@ -22,7 +22,7 @@ const metrics = { ts: now, up: 12345, cpu: { all: 10, cores: [10], steal: 0, iow
 const node = { id: "fixture", name: "Network quality fixture", group_name: "测试", tags: [], sort_order: 0, hostname: "fixture", os: "Linux", kernel: "6", arch: "x86_64",
   cpu_model: "Fixture", cpu_cores: 2, mem_total: 3072, swap_total: 0, agent_version: "0.2.0", proc_enabled: false, mute_until: null, online: true,
   last_seen_ts: now, created_at: now, updated_at: now, traffic: { limit_bytes: null, reset_day: 1, count_mode: "both", cycle_key: "2026-11", rx_bytes: 0, tx_bytes: 0, counted_bytes: 0, days_remaining: 15 },
-  metrics, region_code: "CN", region_flag: "🇨🇳", provider: "Fixture", ipv4_masked: "1.1.1.*", sparkline_cpu: [], sparkline_rx: [], sparkline_tx: [] } as HorizonNode;
+  metrics, region_code: "CN", region_flag: "🇨🇳", provider: "Fixture", ipv4_masked: "1.1.1.*", sparkline_cpu: [], sparkline_rx: [], sparkline_tx: [], sparkline_mem: [], sparkline_latency: [] } as HorizonNode;
 
 const configReply = (isGlobal: boolean) => {
   const effective = isGlobal || override.mode === "inherit" ? globalConfig : override.mode === "custom" ? override.config! : { ...globalConfig, enabled: false };
