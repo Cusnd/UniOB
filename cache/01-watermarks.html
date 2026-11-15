@@ -1,0 +1,437 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="light">
+  <title>UniOB · 水位阈值交互原型</title>
+  <style>
+    :root {
+      --paper: #f6f6f3;
+      --sheet: #fff;
+      --subtle: #f8f8f6;
+      --ink: #18181b;
+      --muted: #777780;
+      --line: #e8e8e5;
+      --cobalt: #3d5afe;
+      --cobalt-soft: #eef1ff;
+      --red: #e5484d;
+      --red-soft: #f9e9e9;
+      --green: #208154;
+      --amber: #b77718;
+      --mono: "SFMono-Regular", Consolas, "Liberation Mono", monospace;
+      font-family: "Inter", "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif;
+      color: var(--ink);
+      font-synthesis: none;
+      text-rendering: optimizeLegibility;
+      -webkit-font-smoothing: antialiased;
+    }
+    * { box-sizing: border-box; }
+    body { margin: 0; min-width: 300px; padding: 24px; background: var(--paper); }
+    button, select, input { font: inherit; }
+    button, select, input[type="range"], .segmented label { -webkit-tap-highlight-color: transparent; }
+    button, select { cursor: pointer; }
+    button:disabled, select:disabled, input:disabled { cursor: wait; }
+    button:focus-visible, select:focus-visible { outline: 3px solid #b6c1ff; outline-offset: 3px; }
+    .sr-only { position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px; overflow: hidden; clip: rect(0, 0, 0, 0); white-space: nowrap; border: 0; }
+    .panel {
+      max-width: 1720px;
+      margin: 0 auto;
+      padding: 19px 19px 18px;
+      border: 1px solid var(--line);
+      border-radius: 16px;
+      background: var(--sheet);
+      box-shadow: 0 1px 2px #18181b03, 0 8px 24px -16px #18181b10;
+    }
+    .panel-header { display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: center; gap: 24px; margin-bottom: 21px; }
+    .heading { display: flex; align-items: center; gap: 12px; min-width: 0; }
+    .heading-icon { display: grid; place-items: center; width: 32px; height: 32px; flex: 0 0 32px; border-radius: 9px; background: var(--cobalt-soft); color: var(--cobalt); }
+    .heading-icon svg { width: 17px; height: 17px; }
+    .heading-copy { min-width: 0; }
+    .title-row { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; }
+    h1 { margin: 0; font-size: 16px; font-weight: 650; line-height: 1.55; letter-spacing: -.35px; }
+    .protocol { padding: 3px 6px; border: 1px solid #dce1ff; border-radius: 5px; color: #5366cb; background: #f7f8ff; font: 11px/1.2 var(--mono); }
+    .description { margin: 3px 0 0; color: var(--muted); font-size: 12px; line-height: 1.5; }
+    .description .percent { font-variant-numeric: tabular-nums; }
+    .dirty-note { display: inline-flex; align-items: center; gap: 5px; margin-left: 10px; color: var(--cobalt); white-space: nowrap; }
+    .dirty-note::before { content: ""; width: 4px; height: 4px; border-radius: 50%; background: currentColor; }
+    .dirty-note[hidden] { display: none; }
+    .toolbar { display: flex; align-items: center; gap: 10px; }
+    .node-control { display: flex; align-items: center; gap: 9px; }
+    .node-control > label { color: var(--muted); font-size: 12px; white-space: nowrap; }
+    .select-wrap { position: relative; }
+    .select-wrap::after { content: ""; position: absolute; right: 13px; top: 14px; width: 6px; height: 6px; border-right: 1.5px solid #696971; border-bottom: 1.5px solid #696971; transform: rotate(45deg); pointer-events: none; }
+    select { width: 286px; height: 36px; appearance: none; padding: 0 32px 0 12px; border: 1px solid #e3e3df; border-radius: 8px; background: #fafaf8; color: var(--ink); font: 12px/1 var(--mono); transition: border-color 160ms, background 160ms; }
+    select:hover { border-color: #c9c9ca; background: #fff; }
+    .segmented { display: flex; flex: 0 0 auto; padding: 3px; margin: 0; border: 1px solid #e7e7e3; border-radius: 8px; background: #f2f2ef; }
+    .segmented label { position: relative; cursor: pointer; }
+    .segmented input { position: absolute; opacity: 0; width: 1px; height: 1px; }
+    .segmented span { display: block; padding: 5px 8px; border: 1px solid transparent; border-radius: 5px; color: #777780; font-size: 12px; line-height: 16px; white-space: nowrap; transition: background 160ms, color 160ms, box-shadow 160ms; }
+    .segmented input:checked + span { background: #fff; color: var(--ink); border-color: #e7e7e4; box-shadow: 0 1px 3px #18181b09; }
+    .segmented input:focus-visible + span { outline: 3px solid #b6c1ff; outline-offset: 3px; }
+    .segmented label:hover span { color: var(--ink); }
+    .segmented input:disabled + span { cursor: wait; opacity: .6; }
+    .apply-button { display: inline-flex; justify-content: center; align-items: center; gap: 7px; min-width: 133px; height: 36px; padding: 0 13px; border: 1px solid #18181b; border-radius: 8px; background: var(--ink); color: #fff; font-size: 12px; font-weight: 550; white-space: nowrap; box-shadow: inset 0 1px #ffffff16, 0 1px 2px #18181b1a; transition: background 160ms, transform 160ms, opacity 160ms; }
+    .apply-button:hover { background: #35353a; }
+    .apply-button:active { transform: translateY(1px); }
+    .apply-button:disabled { opacity: .68; }
+    .apply-button svg { width: 14px; height: 14px; flex: 0 0 auto; }
+    .apply-button.is-busy svg { animation: spin 800ms linear infinite; }
+    .cards { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 12px; }
+    .metric-card { min-width: 0; padding: 14px 14px 13px; border: 1px solid #e8e8e4; border-radius: 10px; background: var(--subtle); transition: border-color 160ms, background 160ms; }
+    .metric-card.is-edited { border-color: #cdd5ff; background: #fafaff; }
+    .metric-header { display: flex; align-items: center; justify-content: space-between; gap: 8px; min-height: 20px; }
+    .metric-header h2 { margin: 0; font-size: 13px; font-weight: 550; line-height: 20px; white-space: nowrap; }
+    .thresholds { display: flex; align-items: center; gap: 6px; color: var(--muted); font-size: 11px; line-height: 20px; white-space: nowrap; }
+    .thresholds output { font: 11px/20px var(--mono); font-variant-numeric: tabular-nums; }
+    .trigger-label { color: #cc3d46; }
+    .recovery-label { color: var(--green); }
+    .thresholds .separator { color: #b6b6bc; }
+    .meter { position: relative; height: 14px; margin-top: 12px; border-radius: 5px; background: #eaeae7; overflow: hidden; isolation: isolate; }
+    .danger-zone { position: absolute; inset: 0 0 0 var(--trigger); background: #f2e2e3; }
+    .recovery-band { position: absolute; top: 0; bottom: 0; left: var(--recovery); width: var(--band-width); background: #e3ece3; }
+    .meter-fill { position: absolute; top: 4px; bottom: 4px; left: 0; width: var(--measured); border-radius: 0 3px 3px 0; background: var(--cobalt); transition: background 180ms, width 250ms; }
+    .metric-card[data-state="firing"] .meter-fill { background: var(--red); }
+    .metric-card[data-state="recovering"] .meter-fill { background: #cf9636; }
+    .marker { position: absolute; top: 0; bottom: 0; width: 0; z-index: 2; }
+    .marker-trigger { left: var(--trigger); border-left: 1px dashed #d95d62; }
+    .marker-recovery { left: var(--recovery); border-left: 1px dashed #4f936b; }
+    .metric-controls { display: flex; align-items: center; gap: 11px; min-height: 24px; margin-top: 10px; }
+    input[type="range"] { --range-progress: 78%; display: block; flex: 1 1 auto; min-width: 40px; width: 100%; height: 24px; margin: 0; padding: 0; appearance: none; background: transparent; cursor: pointer; accent-color: var(--cobalt); }
+    input[type="range"]::-webkit-slider-runnable-track { height: 4px; border-radius: 5px; background: linear-gradient(to right, var(--cobalt) 0 var(--range-progress), #dddeda var(--range-progress) 100%); }
+    input[type="range"]::-moz-range-track { height: 4px; border-radius: 5px; background: #dddeda; }
+    input[type="range"]::-moz-range-progress { height: 4px; border-radius: 5px; background: var(--cobalt); }
+    input[type="range"]::-webkit-slider-thumb { width: 17px; height: 17px; margin-top: -6.5px; appearance: none; border: 2px solid #fff; border-radius: 50%; background: var(--cobalt); box-shadow: 0 0 0 1px var(--cobalt); transition: box-shadow 160ms; }
+    input[type="range"]::-moz-range-thumb { width: 13px; height: 13px; border: 2px solid #fff; border-radius: 50%; background: var(--cobalt); box-shadow: 0 0 0 1px var(--cobalt); }
+    input[type="range"]:focus-visible { outline: none; }
+    input[type="range"]:focus-visible::-webkit-slider-thumb { box-shadow: 0 0 0 4px #cbd3ff; }
+    input[type="range"]:focus-visible::-moz-range-thumb { box-shadow: 0 0 0 4px #cbd3ff; }
+    input[type="range"]:hover::-webkit-slider-thumb { box-shadow: 0 0 0 4px #e0e5ff; }
+    .reading { display: inline-flex; align-items: baseline; gap: 4px; flex: 0 0 auto; color: var(--muted); font-size: 11px; white-space: nowrap; }
+    .reading output { color: #5e5e69; font: 12px/1 var(--mono); font-variant-numeric: tabular-nums; }
+    .state { display: inline-flex; align-items: center; gap: 4px; min-width: 32px; color: #71717a; font-size: 10px; white-space: nowrap; }
+    .state::before { content: ""; width: 4px; height: 4px; border: 1px solid currentColor; border-radius: 50%; }
+    [data-state="firing"] .state { color: #c8454c; }
+    [data-state="firing"] .state::before { background: currentColor; border-radius: 0; transform: rotate(45deg); }
+    [data-state="recovering"] .state { color: var(--amber); }
+    [data-state="recovering"] .state::before { width: 5px; height: 5px; border-radius: 0; }
+    .toast { position: fixed; left: 50%; bottom: 24px; z-index: 10; display: flex; align-items: center; gap: 10px; max-width: calc(100vw - 32px); padding: 12px 12px 12px 16px; border: 1px solid #dddeda; border-radius: 10px; background: #fff; box-shadow: 0 8px 32px #18181b14; transform: translateX(-50%); font-size: 13px; }
+    .toast[hidden] { display: none; }
+    .toast > svg { width: 17px; height: 17px; color: var(--green); flex: 0 0 auto; }
+    .toast-message { line-height: 1.5; }
+    .toast-close { display: grid; place-items: center; width: 26px; height: 26px; padding: 0; flex: 0 0 auto; border: 0; border-radius: 5px; background: transparent; color: #83838b; }
+    .toast-close:hover { color: var(--ink); background: var(--paper); }
+    .toast-close svg { width: 14px; height: 14px; }
+    @keyframes spin { to { transform: rotate(360deg); } }
+    @media (max-width: 1400px) {
+      .panel-header { grid-template-columns: 1fr; gap: 16px; margin-bottom: 18px; }
+      .toolbar { justify-content: flex-end; }
+      .node-control { margin-right: auto; }
+    }
+    @media (max-width: 1239px) {
+      .cards { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+    }
+    @media (max-width: 760px) {
+      body { padding: 16px; }
+      .panel { padding: 17px; }
+      .toolbar { flex-wrap: wrap; justify-content: space-between; gap: 12px; }
+      .node-control { width: 100%; margin-right: 0; }
+      .select-wrap { flex: 1; }
+      select { width: 100%; }
+      .apply-button { margin-left: auto; }
+      .description { max-width: 42em; }
+    }
+    @media (max-width: 599px) {
+      body { padding: 12px; }
+      .panel { padding: 16px; border-radius: 13px; }
+      .heading { align-items: flex-start; gap: 10px; }
+      .heading-icon { margin-top: 2px; width: 29px; height: 29px; flex-basis: 29px; border-radius: 8px; }
+      h1 { font-size: 15px; letter-spacing: -.2px; }
+      .protocol { font-size: 10px; }
+      .description { margin-top: 5px; font-size: 11px; }
+      .dirty-note { margin-left: 0; margin-right: 8px; }
+      .cards { grid-template-columns: 1fr; gap: 10px; }
+      .metric-card { padding: 14px; }
+      .metric-header h2 { font-size: 13px; }
+      .thresholds { gap: 5px; }
+      .segmented { padding: 3px; }
+      .segmented span { padding: 8px 7px; font-size: 11px; }
+      .apply-button { min-width: 0; height: 40px; padding: 0 10px; font-size: 11px; }
+      select { height: 40px; font-size: 11px; }
+      .select-wrap::after { top: 16px; }
+      .toast { bottom: 16px; width: max-content; font-size: 12px; }
+    }
+    @media (max-width: 369px) {
+      .panel { padding: 12px; }
+      .toolbar { gap: 10px; }
+      .segmented { flex: 1; }
+      .segmented label { flex: 1; text-align: center; }
+      .apply-button { width: 100%; }
+      .thresholds { gap: 4px; font-size: 10px; }
+      .thresholds output { font-size: 10px; }
+      .metric-header h2 { font-size: 12px; }
+    }
+    @media (prefers-reduced-motion: reduce) { *, *::before, *::after { animation: none !important; transition: none !important; } }
+    @media (forced-colors: active) {
+      .panel, .metric-card, .segmented, select, .protocol, .toast { border-color: CanvasText; }
+      .segmented input:checked + span { outline: 2px solid Highlight; }
+      .meter { border: 1px solid CanvasText; }
+      .meter-fill { background: Highlight !important; forced-color-adjust: none; }
+      .marker { border-color: CanvasText; }
+      input[type="range"] { appearance: auto; }
+      .state::before { border-color: CanvasText; }
+    }
+  </style>
+</head>
+<body>
+  <main class="panel" aria-labelledby="panel-title">
+    <form id="watermark-form">
+      <header class="panel-header">
+        <div class="heading">
+          <span class="heading-icon" aria-hidden="true">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M21 4h-7M10 4H3M21 12h-9M8 12H3M21 20h-5M12 20H3M14 2v4M8 10v4M16 18v4"/></svg>
+          </span>
+          <div class="heading-copy">
+            <div class="title-row">
+              <h1 id="panel-title">单节点水位阈值与 <span id="hysteresis-heading">3%</span> 迟滞防抖编辑器</h1>
+              <span class="protocol">ctrl.watermarks</span>
+            </div>
+            <p class="description">越过触发线即告警，回落至恢复线（触发值 − <span class="percent" id="hysteresis-description">3%</span>）后归档。<span class="dirty-note" id="dirty-note" hidden>未应用</span></p>
+          </div>
+        </div>
+        <div class="toolbar">
+          <div class="node-control">
+            <label for="node-select">目标节点</label>
+            <div class="select-wrap">
+              <select id="node-select" name="node">
+                <option value="sgp">sgp-tiny-relay (SG-SIN · 1G)</option>
+                <option value="tokyo">tokyo-edge-01 (JP-NRT · 1G)</option>
+                <option value="fra">fra-core-db01 (DE-FRA · 8G)</option>
+              </select>
+            </div>
+          </div>
+          <fieldset class="segmented">
+            <legend class="sr-only">恢复迟滞</legend>
+            <label><input id="hysteresis-2" type="radio" name="hysteresis" value="2"><span>2% 迟滞</span></label>
+            <label><input id="hysteresis-3" type="radio" name="hysteresis" value="3" checked><span>3% 标准</span></label>
+            <label><input id="hysteresis-5" type="radio" name="hysteresis" value="5"><span>5% 宽松</span></label>
+          </fieldset>
+          <button class="apply-button" id="apply-button" type="submit">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m5 12 4 4L19 6"/></svg>
+            <span id="apply-label">下发水位配置</span>
+          </button>
+        </div>
+      </header>
+      <div class="cards" id="metric-cards"></div>
+      <p id="configuration-announcement" class="sr-only" role="status" aria-live="polite"></p>
+    </form>
+  </main>
+  <div class="toast" id="toast" hidden>
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="9"/><path d="m8 12 3 3 5-6"/></svg>
+    <span class="toast-message" id="toast-message" role="status" aria-live="polite"></span>
+    <button class="toast-close" id="toast-close" type="button" aria-label="关闭提示"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" aria-hidden="true"><path d="m6 6 12 12M18 6 6 18"/></svg></button>
+  </div>
+  <script>
+    (() => {
+      'use strict';
+
+      // All data and configuration stay in this page; no network requests.
+      const metrics = [
+        { key: 'cpu', title: 'CPU 触发水位', name: 'CPU' },
+        { key: 'memory', title: '物理内存水位', name: '物理内存' },
+        { key: 'swap', title: 'Swap / Zram 水位', name: 'Swap / Zram' },
+        { key: 'disk', title: '根分区 statvfs 水位', name: '根分区' }
+      ];
+      const nodes = {
+        sgp: { name: 'sgp-tiny-relay', measured: { cpu: 92, memory: 90, swap: 82, disk: 74 }, triggers: { cpu: 89, memory: 88, swap: 80, disk: 85 } },
+        tokyo: { name: 'tokyo-edge-01', measured: { cpu: 25, memory: 45, swap: 6, disk: 36 }, triggers: { cpu: 90, memory: 88, swap: 80, disk: 85 } },
+        fra: { name: 'fra-core-db01', measured: { cpu: 67, memory: 86, swap: 12, disk: 78 }, triggers: { cpu: 85, memory: 85, swap: 70, disk: 85 } }
+      };
+      const drafts = {};
+      const applied = {};
+      const cardRefs = {};
+      let activeNode = 'sgp';
+      let busy = false;
+      let toastTimer;
+      let announcementTimer;
+
+      for (const [id, node] of Object.entries(nodes)) {
+        drafts[id] = {
+          triggers: { ...node.triggers },
+          hysteresis: 3,
+          alerts: Object.fromEntries(metrics.map(({ key }) => [key, node.measured[key] >= node.triggers[key]]))
+        };
+        applied[id] = { triggers: { ...node.triggers }, hysteresis: 3 };
+      }
+
+      const form = document.getElementById('watermark-form');
+      const cards = document.getElementById('metric-cards');
+      const nodeSelect = document.getElementById('node-select');
+      const applyButton = document.getElementById('apply-button');
+      const applyLabel = document.getElementById('apply-label');
+      const toast = document.getElementById('toast');
+      const toastMessage = document.getElementById('toast-message');
+      const announcement = document.getElementById('configuration-announcement');
+
+      for (const metric of metrics) {
+        const card = document.createElement('section');
+        card.className = 'metric-card';
+        card.dataset.metric = metric.key;
+        card.setAttribute('aria-labelledby', `${metric.key}-title`);
+        card.innerHTML = `
+          <div class="metric-header">
+            <h2 id="${metric.key}-title">${metric.title}</h2>
+            <div class="thresholds">
+              <span class="trigger-label">触发 <output id="${metric.key}-trigger" for="${metric.key}-threshold"></output></span>
+              <span class="separator" aria-hidden="true">/</span>
+              <span class="recovery-label">恢复 <output id="${metric.key}-recovery" for="${metric.key}-threshold hysteresis-2 hysteresis-3 hysteresis-5"></output></span>
+            </div>
+          </div>
+          <div class="meter" role="meter" aria-label="${metric.name}实测水位" aria-valuemin="0" aria-valuemax="100" aria-describedby="${metric.key}-state">
+            <span class="danger-zone" aria-hidden="true"></span>
+            <span class="recovery-band" aria-hidden="true"></span>
+            <span class="meter-fill" aria-hidden="true"></span>
+            <span class="marker marker-recovery" aria-hidden="true"></span>
+            <span class="marker marker-trigger" aria-hidden="true"></span>
+          </div>
+          <div class="metric-controls">
+            <label class="sr-only" for="${metric.key}-threshold">${metric.name}触发阈值</label>
+            <input id="${metric.key}-threshold" name="${metric.key}" type="range" min="50" max="100" step="1" aria-describedby="${metric.key}-state">
+            <span class="reading">实测 <output class="measured-value"></output></span>
+            <span class="state" id="${metric.key}-state"></span>
+          </div>`;
+        cards.appendChild(card);
+        cardRefs[metric.key] = {
+          card,
+          slider: card.querySelector('input'),
+          trigger: card.querySelector(`#${metric.key}-trigger`),
+          recovery: card.querySelector(`#${metric.key}-recovery`),
+          meter: card.querySelector('.meter'),
+          measured: card.querySelector('.measured-value'),
+          state: card.querySelector('.state')
+        };
+      }
+
+      function isDirty() {
+        const draft = drafts[activeNode];
+        const baseline = applied[activeNode];
+        return draft.hysteresis !== baseline.hysteresis || metrics.some(({ key }) => draft.triggers[key] !== baseline.triggers[key]);
+      }
+
+      function render() {
+        const node = nodes[activeNode];
+        const draft = drafts[activeNode];
+        const baseline = applied[activeNode];
+        document.getElementById('hysteresis-heading').textContent = `${draft.hysteresis}%`;
+        document.getElementById('hysteresis-description').textContent = `${draft.hysteresis}%`;
+        document.getElementById('dirty-note').hidden = !isDirty();
+        for (const radio of form.querySelectorAll('input[name="hysteresis"]')) {
+          radio.checked = Number(radio.value) === draft.hysteresis;
+        }
+
+        for (const metric of metrics) {
+          const key = metric.key;
+          const refs = cardRefs[key];
+          const measured = node.measured[key];
+          const trigger = draft.triggers[key];
+          const recovery = trigger - draft.hysteresis;
+
+          // A latched alert clears only after the recovery boundary is reached.
+          if (measured >= trigger) draft.alerts[key] = true;
+          else if (measured <= recovery) draft.alerts[key] = false;
+          const state = draft.alerts[key] ? (measured >= trigger ? 'firing' : 'recovering') : 'normal';
+          const stateText = { firing: '告警', recovering: '待恢复', normal: '正常' }[state];
+          const description = `实测 ${measured}%，${stateText}；触发 ${trigger}%，恢复不高于 ${recovery}%`;
+
+          refs.card.dataset.state = state;
+          refs.card.classList.toggle('is-edited', trigger !== baseline.triggers[key] || draft.hysteresis !== baseline.hysteresis);
+          refs.trigger.textContent = `${trigger}%`;
+          refs.recovery.textContent = `≤${recovery}%`;
+          refs.measured.textContent = `${measured}%`;
+          refs.state.textContent = stateText;
+          refs.state.title = state === 'recovering' ? `读数降至 ${recovery}% 或以下后恢复` : description;
+          refs.slider.value = String(trigger);
+          refs.slider.style.setProperty('--range-progress', `${(trigger - 50) * 2}%`);
+          refs.slider.setAttribute('aria-valuetext', `${trigger}%，恢复阈值 ${recovery}%，${stateText}`);
+          refs.meter.style.setProperty('--trigger', `${trigger}%`);
+          refs.meter.style.setProperty('--recovery', `${recovery}%`);
+          refs.meter.style.setProperty('--band-width', `${draft.hysteresis}%`);
+          refs.meter.style.setProperty('--measured', `${measured}%`);
+          refs.meter.setAttribute('aria-valuenow', String(measured));
+          refs.meter.setAttribute('aria-valuetext', description);
+          refs.meter.title = description;
+        }
+      }
+
+      function announce(text) {
+        clearTimeout(announcementTimer);
+        announcementTimer = setTimeout(() => { announcement.textContent = text; }, 180);
+      }
+
+      function hideToast() {
+        clearTimeout(toastTimer);
+        const closeButtonHadFocus = document.activeElement === document.getElementById('toast-close');
+        toast.hidden = true;
+        if (closeButtonHadFocus) applyButton.focus();
+      }
+
+      nodeSelect.addEventListener('change', () => {
+        if (busy) return;
+        hideToast();
+        activeNode = nodeSelect.value;
+        render();
+        announce(`已切换至 ${nodes[activeNode].name}，恢复迟滞 ${drafts[activeNode].hysteresis}%。`);
+      });
+
+      form.addEventListener('input', event => {
+        if (busy || !(event.target instanceof HTMLInputElement)) return;
+        const input = event.target;
+        const draft = drafts[activeNode];
+        if (input.name === 'hysteresis') {
+          draft.hysteresis = Number(input.value);
+          hideToast();
+          render();
+          announce(`恢复迟滞已调整为 ${draft.hysteresis}%，配置尚未应用。`);
+        } else if (input.type === 'range' && Object.hasOwn(draft.triggers, input.name)) {
+          draft.triggers[input.name] = Number(input.value);
+          hideToast();
+          render();
+        }
+      });
+
+      form.addEventListener('submit', event => {
+        event.preventDefault();
+        if (busy) return;
+        busy = true;
+        clearTimeout(announcementTimer);
+        hideToast();
+        applyButton.classList.add('is-busy');
+        applyLabel.textContent = '应用中';
+        applyButton.setAttribute('aria-busy', 'true');
+        for (const control of form.querySelectorAll('button, select, input')) control.disabled = true;
+
+        // Brief local feedback models the command acknowledgement without sending it.
+        setTimeout(() => {
+          const draft = drafts[activeNode];
+          applied[activeNode] = { triggers: { ...draft.triggers }, hysteresis: draft.hysteresis };
+          busy = false;
+          for (const control of form.querySelectorAll('button, select, input')) control.disabled = false;
+          applyButton.classList.remove('is-busy');
+          applyButton.removeAttribute('aria-busy');
+          applyLabel.textContent = '下发水位配置';
+          render();
+          toast.hidden = false;
+          toastMessage.textContent = `本地演示：${nodes[activeNode].name} 配置已应用。`;
+          toastTimer = setTimeout(hideToast, 5000);
+        }, 500);
+      });
+
+      document.getElementById('toast-close').addEventListener('click', hideToast);
+      document.addEventListener('keydown', event => {
+        if (event.key === 'Escape' && !toast.hidden) hideToast();
+      });
+      render();
+    })();
+  </script>
+</body>
+</html>

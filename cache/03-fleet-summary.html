@@ -1,0 +1,205 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="light">
+  <title>UniOB · 全网概览</title>
+  <style>
+    :root{--paper:#f7f8fa;--white:#fff;--ink:#19202d;--muted:#778090;--soft:#a0a6b0;--line:#e9ecf1;--blue:#405cf5;--blue-soft:#f0f3ff;--amber:#b87414;--amber-soft:#fff7e9;--red:#d14355;--red-soft:#fff2f3;--green:#25835b;--green-soft:#f0f9f4;--radius:14px;--mono:"SFMono-Regular",Consolas,"Liberation Mono",monospace;--sans:Inter,"Segoe UI","PingFang SC","Microsoft YaHei",sans-serif}
+    *{box-sizing:border-box}body{margin:0;background:var(--paper);color:var(--ink);font:13px/1.5 var(--sans);-webkit-font-smoothing:antialiased}button,input{font:inherit}button{color:inherit}button{cursor:pointer}button:disabled{cursor:default}button,input{-webkit-tap-highlight-color:transparent}button:focus-visible,input:focus-visible,[tabindex]:focus-visible{outline:3px solid #a3b1ff;outline-offset:4px}button{touch-action:manipulation}.mono{font-family:var(--mono);font-variant-numeric:tabular-nums;letter-spacing:-.04em}svg.icon{display:inline-block;width:15px;height:15px;fill:none;stroke:currentColor;stroke-width:1.6;stroke-linecap:round;stroke-linejoin:round;flex:none;vertical-align:-3px}.symbols{position:absolute;width:0;height:0;overflow:hidden}
+    .workspace{width:min(1520px,100%);margin:0 auto;padding:34px 28px}.page-top{display:flex;align-items:center;justify-content:space-between;gap:16px;margin:0 2px 17px}.page-title{display:flex;align-items:center;gap:10px}.page-title h1{font-size:15px;letter-spacing:.015em;font-weight:650;margin:0}.page-title .icon{color:#737e91;width:17px;height:17px}.top-meta{display:flex;align-items:center;gap:10px;color:var(--muted);font-size:11px}.demo-tag{color:#8a919d;border:1px solid #e4e7ec;border-radius:5px;padding:1px 6px;font-size:10px;letter-spacing:.02em}.updated{font-variant-numeric:tabular-nums}.icon-button{display:grid;place-items:center;width:29px;height:29px;border:1px solid #e2e6ed;border-radius:7px;background:var(--white);color:#7d8697;transition:background .15s,color .15s}.icon-button:hover{background:var(--blue-soft);color:var(--blue);border-color:#cfd6ff}.icon-button.refreshing svg{animation:spin .6s ease-in-out}@keyframes spin{to{transform:rotate(360deg)}}
+    .summary{display:grid;grid-template-columns:1.02fr 1.03fr 1.04fr 1fr 1.13fr;border:1px solid #e1e5ec;border-radius:var(--radius);background:var(--white);box-shadow:0 2px 3px #24374b03,0 5px 18px #263b5503;overflow:hidden}.metric{position:relative;min-width:0;min-height:170px;padding:20px 20px 18px;display:flex;flex-direction:column}.metric+.metric:before{content:"";position:absolute;left:0;top:21px;bottom:21px;width:1px;background:var(--line)}.metric-head{display:flex;align-items:flex-start;justify-content:space-between;gap:7px;min-height:41px}.metric h2{margin:0;font-size:12px;font-weight:500;line-height:1.55;color:#6d7789;letter-spacing:.01em}.title-button{display:flex;align-items:center;gap:5px;padding:0;background:none;border:0;text-align:left;color:inherit;line-height:inherit;border-radius:3px}.title-button:hover{color:var(--blue)}.title-button>.icon{width:11px;height:11px;color:#a1a9b5;transition:transform .15s}.title-button:hover>.icon{transform:translateX(2px);color:var(--blue)}.overline{font:10px/1.5 var(--mono);letter-spacing:.02em;color:#939baa;display:block;margin-top:2px}.health-dot{margin:5px 1px 0 0;width:7px;height:7px;background:#dc932f;border-radius:50%;box-shadow:0 0 0 4px #fcf5e9}.metric-value{display:flex;align-items:baseline;gap:7px;min-height:43px;white-space:nowrap}.metric-value .large{font:500 28px/1.2 var(--mono);letter-spacing:-.07em}.metric-value .unit{font:500 17px/1.2 var(--mono);letter-spacing:-.045em;margin-left:2px}.metric-value .denominator{font:12px/1.3 var(--mono);color:#8a93a3;letter-spacing:-.025em}.value-button{display:flex;align-items:baseline;gap:2px;background:none;border:0;padding:0;border-radius:4px;text-align:left}.value-button:hover .large{color:var(--blue)}.metric-value .rate{font:11px/1.2 var(--mono);color:#6e7889;margin-left:2px;letter-spacing:-.02em}.metric-bottom{margin-top:auto}.status-list{display:flex;align-items:center;gap:12px;flex-wrap:wrap;padding-top:10px}.status-pill{display:inline-flex;align-items:center;gap:5px;padding:2px 0;border:0;background:none;color:#77818f;font:11px/1.4 var(--mono);border-radius:3px;white-space:nowrap}.status-pill:hover{text-decoration:underline;text-underline-offset:4px}.status-pill .dot{width:4px;height:4px;background:currentColor;border-radius:50%}.status-pill.live{color:var(--blue)}.status-pill.offline{color:var(--red)}.status-pill.offline .dot{border:1px solid currentColor;background:transparent;width:5px;height:5px}.cpu-mini{display:flex;gap:4px;align-items:baseline;color:#8a93a2;font-size:10px;white-space:nowrap;padding-top:1px}.cpu-mini strong{color:#53617b;font:500 11px/1.5 var(--mono);letter-spacing:-.03em}.available-label{font-size:12px;margin-right:1px;color:#6e7b90}.memory .metric-value{gap:4px}.memory .large{font-size:25px}.memory .unit{font-size:16px}.memory .denominator{font-size:11px;margin-left:auto}.meter-label{display:flex;justify-content:space-between;gap:8px;margin:0 0 8px;color:#9098a6;font-size:10px;line-height:1}.meter-label strong{font:400 10px/1 var(--mono);color:#758195}.track{height:3px;background:#edf0f3;border-radius:4px;overflow:hidden}.track>span{display:block;height:100%;background:var(--blue);border-radius:4px}.quiet-badge{font-size:10px;border:1px solid #e7eaf0;background:#f8f9fb;color:#707b8d;border-radius:5px;padding:1px 6px;white-space:nowrap;line-height:1.8}.quiet-badge:hover{background:#f0f3ff;border-color:#d7defe;color:var(--blue)}.probe .metric-value{gap:6px}.probe .large{font-size:25px}.probe .unit{font-size:15px;margin-left:0}.probe-label{font-size:11px;color:#6e7b90;margin-right:1px}.rust-label{font-size:9px;letter-spacing:.02em;color:#a0a7b2;white-space:nowrap;margin-left:auto;align-self:center;line-height:1.55}.warning-link{width:100%;display:flex;align-items:center;gap:5px;background:none;border:0;color:var(--amber);padding:8px 0 0;text-align:left;border-radius:3px;font:10px/1.5 var(--mono);letter-spacing:-.04em;white-space:normal}.warning-link .icon{width:13px;height:13px}.warning-link .node-name{min-width:0;overflow-wrap:anywhere}.warning-link .swap-value{margin-left:auto;white-space:nowrap;font-size:10px}.warning-link:hover .node-name{text-decoration:underline;text-underline-offset:4px}.free-tier{border:1px solid #d4ebdd;background:var(--green-soft);color:var(--green);border-radius:5px;padding:1px 6px;font-size:9px;white-space:nowrap;line-height:1.8}.budget .metric-value{gap:6px}.budget .large{font-size:25px}.budget .denominator{font-size:11px}.budget .meter-label strong{color:var(--blue)}.alerts-badge{display:inline-flex;gap:4px;align-items:center;white-space:nowrap;background:var(--red-soft);color:var(--red);border:1px solid #f2cbd2;border-radius:5px;padding:2px 5px;font-size:10px;line-height:1.5}.alerts-badge:hover{background:#ffe5e8;border-color:#e8a7b1}.edge .metric-head{gap:5px}.edge .metric-head h2{font-size:11.5px}.edge-title{display:flex;align-items:center;gap:4px}.edge-title>.icon{width:12px;height:12px}.edge .metric-value{gap:8px}.edge .large{font-size:28px}.edge .unit{font-size:20px;margin-left:1px}.reason{font:10px/1.6 var(--mono);color:#738099;letter-spacing:-.035em;align-self:center}.reason span{display:block;font:9px/1.5 var(--sans);color:#9aa2af}.edge-bottom{display:flex;align-items:center;justify-content:space-between;gap:8px;padding-top:10px;color:#9098a6;font-size:9px;white-space:nowrap}.edge-bottom strong{font:500 10px/1.5 var(--mono);color:#69788f;letter-spacing:-.02em}.edge-bottom .divider{width:1px;height:9px;background:#e6eaf0}.page-foot{display:flex;justify-content:space-between;gap:16px;padding:13px 3px 0;color:#9ca3ae;font-size:10px}.page-foot span{display:flex;align-items:center;gap:5px}.page-foot .icon{width:11px;height:11px;opacity:.75}.page-foot .link-button{border:0;background:none;color:#929cad;padding:0;font-size:10px;display:flex;align-items:center;gap:4px;border-radius:3px}.page-foot .link-button:hover{color:var(--blue)}
+    dialog{border:1px solid #e3e7ee;border-radius:16px;background:#fff;color:var(--ink);padding:0;width:min(720px,calc(100vw - 36px));max-height:calc(100dvh - 48px);box-shadow:0 24px 100px #17223a26;overflow:hidden}dialog::backdrop{background:#1f2b3d30;backdrop-filter:blur(3px)}dialog[open]{animation:dialog-in .18s ease-out}@keyframes dialog-in{from{opacity:0;transform:translateY(8px)}to{opacity:1;transform:translateY(0)}}.dialog-layout{display:flex;flex-direction:column;max-height:calc(100dvh - 50px)}.dialog-head{display:flex;align-items:flex-start;justify-content:space-between;gap:16px;padding:25px 26px 20px;border-bottom:1px solid var(--line);flex:none}.dialog-head h2{font-weight:650;font-size:19px;letter-spacing:-.02em;margin:0}.dialog-head p{margin:5px 0 0;font-size:12px;color:var(--muted)}.close-button{width:30px;height:30px;display:grid;place-items:center;border:0;border-radius:7px;color:#8e96a2;background:#f5f6f8;flex:none}.close-button:hover{color:var(--ink);background:#e9ecf2}.dialog-body{padding:22px 26px 26px;overflow:auto;overscroll-behavior:contain}.dialog-footer{display:flex;align-items:center;justify-content:space-between;gap:12px;padding:15px 26px;border-top:1px solid var(--line);background:#fcfcfd;color:#9199a6;font-size:11px;flex:none}.dialog-footer .button{border:1px solid #e1e5ed;border-radius:7px;background:#fff;padding:5px 12px;color:#64718a;font-size:11px}.dialog-footer .button:hover{border-color:#c9d2ff;color:var(--blue)}.filters{display:flex;gap:6px;flex-wrap:wrap;margin-bottom:16px}.filter{border:1px solid #e6eaf0;border-radius:6px;background:#fff;color:#7b8596;font-size:11px;padding:5px 10px}.filter[aria-pressed="true"]{border-color:#d5ddff;background:var(--blue-soft);color:var(--blue)}.filter:hover{border-color:#c7d0ed}.search{display:flex;align-items:center;border:1px solid #e4e8ef;border-radius:7px;padding:8px 10px;margin-bottom:16px;gap:8px;color:#939dad}.search input{width:100%;min-width:0;border:0;outline:none;font-size:12px;background:none;color:var(--ink)}.search:focus-within{border-color:#9aaafa;box-shadow:0 0 0 3px #405cf510}.search input:focus-visible{outline:none}.search input::placeholder{color:#a1a9b5}.table-scroll{overflow:auto;border:1px solid var(--line);border-radius:9px}table{border-collapse:collapse;width:100%;font-size:11px;text-align:left;white-space:nowrap}th{background:#fafbfc;color:#8c95a4;font-size:10px;font-weight:500;padding:10px 12px;border-bottom:1px solid var(--line)}td{padding:12px;border-bottom:1px solid #eff1f5;color:#6b7688}tbody tr:last-child td{border-bottom:0}td.node{font:11px var(--mono);letter-spacing:-.025em;color:#38475d}.table-empty{text-align:center;padding:32px;color:#8d96a6}.status-tag{display:inline-flex;align-items:center;gap:5px;font-size:10px;line-height:1.5;color:#818b9a}.status-tag:before{content:"";width:4px;height:4px;border-radius:50%;background:currentColor}.status-tag.live{color:var(--blue)}.status-tag.offline{color:var(--red)}.status-tag.sync{color:var(--amber)}.data-note{margin:13px 0 0;color:#9aa2ae;font-size:10px}.detail-stats{display:grid;grid-template-columns:repeat(3,1fr);gap:12px;margin-bottom:22px}.detail-stat{padding:16px;background:#f8f9fb;border:1px solid #edf0f4;border-radius:9px}.detail-stat dt{font-size:10px;color:#8c96a6;margin-bottom:7px}.detail-stat dd{margin:0;font:500 22px var(--mono);letter-spacing:-.055em;color:#29374c}.detail-stat dd small{font:11px var(--sans);color:#8a95a5;margin-left:3px}.detail-stats dl{margin:0}.mini-track{display:inline-block;width:60px;height:3px;background:#edf0f5;border-radius:4px;margin:0 7px 2px 0;overflow:hidden}.mini-track span{height:100%;display:block;background:#8295fb;border-radius:4px}.swap-table .hot td{background:#fffcf7}.warm{color:var(--amber)}.budget-hero{border:1px solid var(--line);border-radius:10px;padding:22px;margin-bottom:22px}.budget-numbers{display:flex;justify-content:space-between;gap:12px;align-items:baseline;margin-bottom:17px}.budget-numbers strong{font:500 31px var(--mono);letter-spacing:-.06em}.budget-numbers small{font:12px var(--mono);color:#969fad}.budget-numbers span{font:13px var(--mono);color:var(--blue)}.budget-hero .track{height:5px}.budget-caption{display:flex;justify-content:space-between;margin:12px 0 0;font-size:10px;color:#8c96a5;gap:12px}.quota-list{margin:0}.quota-list>div{display:flex;justify-content:space-between;gap:16px;padding:13px 0;border-bottom:1px solid var(--line)}.quota-list>div:last-child{border-bottom:0}.quota-list dt{color:#718097;font-size:12px}.quota-list dd{margin:0;color:#40506a;font:12px var(--mono)}
+    dialog.drawer{height:100dvh;max-height:100dvh;width:min(410px,100vw);max-width:100vw;margin:0 0 0 auto;border-radius:16px 0 0 16px;border-top:0;border-bottom:0;border-right:0}.drawer .dialog-layout{max-height:100dvh;height:100%}.drawer[open]{animation:drawer-in .2s ease-out}@keyframes drawer-in{from{transform:translateX(24px);opacity:0}to{transform:translateX(0);opacity:1}}.drawer .dialog-body{flex:1;padding-top:20px}.alert-list{display:grid;gap:14px}.alert-card{border:1px solid #e8ebf0;border-radius:11px;padding:16px}.alert-card-head{display:flex;gap:9px;align-items:flex-start}.alert-symbol{display:grid;place-items:center;background:var(--amber-soft);color:var(--amber);width:29px;height:29px;border-radius:7px;flex:none}.alert-symbol.offline{background:var(--red-soft);color:var(--red)}.alert-card h3{font-size:12px;font-weight:600;margin:0 0 3px}.alert-card .node-id{font:10px var(--mono);color:#8d97a6;letter-spacing:-.01em}.alert-time{font:10px var(--mono);color:#a2aab5;margin-left:auto;white-space:nowrap;line-height:1.8}.alert-values{display:flex;justify-content:space-between;gap:12px;padding:14px 0 12px;margin-top:9px;border-top:1px solid #f0f2f6}.alert-values span{font-size:10px;color:#929baa}.alert-values strong{display:block;font:500 22px var(--mono);letter-spacing:-.05em;color:#43516a;margin-top:2px}.alert-values strong small{font-size:12px;color:#9aa3b2;letter-spacing:0}.alert-values .limit{text-align:right}.alert-values .limit strong{font-size:13px;color:#7d8b9f;margin-top:8px}.alert-actions{display:flex;justify-content:space-between;gap:10px;align-items:center;border-top:1px solid #f0f2f6;padding-top:12px}.text-button{background:none;border:0;color:#73829c;font-size:10px;padding:3px 0;border-radius:3px}.text-button:hover{color:var(--blue)}.ack-button{border:1px solid #e0e6f0;background:#f9fafc;color:#697893;border-radius:6px;padding:5px 9px;font-size:10px}.ack-button:hover{border-color:#bdcaff;color:var(--blue)}.ack-button:disabled{color:var(--green);background:var(--green-soft);border-color:#d6eade}.check-filter{display:flex;align-items:center;gap:7px;color:#8490a2;font-size:11px;margin-bottom:17px;cursor:pointer}.check-filter input{accent-color:var(--blue);width:13px;height:13px;margin:0}.alert-empty{text-align:center;padding:40px 12px;color:#94a0b2;font-size:12px}.toast{position:fixed;bottom:26px;left:50%;transform:translate(-50%,12px);opacity:0;pointer-events:none;background:#253248;color:#fff;border:1px solid #3a485e;border-radius:9px;padding:10px 16px;font-size:12px;box-shadow:0 6px 30px #192c4d20;transition:opacity .15s,transform .15s;z-index:20;max-width:calc(100vw - 32px);text-align:center}.toast.visible{opacity:1;transform:translate(-50%,0)}.sr-only{position:absolute;width:1px;height:1px;margin:-1px;padding:0;overflow:hidden;clip:rect(0,0,0,0);white-space:nowrap;border:0}
+    @media(min-width:1400px){.metric{padding:22px 24px 20px;min-height:177px}.metric h2{font-size:13px}.edge .metric-head h2{font-size:12.5px}.metric-head{min-height:44px}.warning-link{font-size:11px}.warning-link .swap-value{font-size:11px}.edge-bottom{font-size:10px}.status-list{gap:16px}.metric-value .large{font-size:30px}.memory .large,.probe .large,.budget .large{font-size:28px}}
+    @media(max-width:1150px){.workspace{padding:28px 24px}.summary{grid-template-columns:repeat(6,minmax(0,1fr))}.metric{grid-column:span 2;padding:20px 22px;min-height:171px}.metric:nth-child(4),.metric:nth-child(5){grid-column:span 3;border-top:1px solid var(--line)}.metric:nth-child(4):before{display:none}.metric:nth-child(5):before{top:20px;bottom:20px}.edge-bottom{justify-content:flex-start;gap:12px;font-size:10px}.probe-label{font-size:12px}.warning-link{font-size:11px}.warning-link .swap-value{font-size:11px}.metric h2{font-size:13px}.edge .metric-head h2{font-size:13px}.memory .metric-value{gap:6px}.cpu-mini{font-size:11px}.cpu-mini strong{font-size:12px}.rust-label{font-size:10px}}
+    @media(max-width:680px){.workspace{padding:22px 16px}.page-top{margin-bottom:14px}.top-meta{gap:7px}.updated{display:none}.page-title h1{font-size:14px}.summary{grid-template-columns:repeat(2,minmax(0,1fr))}.metric{grid-column:span 1!important;min-height:164px;padding:18px 16px}.metric:nth-child(n+3){border-top:1px solid var(--line)}.metric:nth-child(odd):before{display:none}.metric:nth-child(even):before{display:block;top:18px;bottom:18px}.metric:last-child{grid-column:span 2!important;min-height:153px}.metric-head{min-height:40px}.metric h2{font-size:11px}.edge .metric-head h2{font-size:12px}.cpu-mini{display:block;font-size:9px;text-align:right;line-height:1.4}.cpu-mini strong{display:block;font-size:11px}.metric-value .large{font-size:27px}.memory .large,.budget .large,.probe .large{font-size:23px}.memory .metric-value{gap:3px;flex-wrap:wrap;row-gap:0;min-height:43px}.memory .denominator{margin-left:0;font-size:10px}.memory .unit{font-size:14px}.available-label{font-size:10px}.metric-value .rate{font-size:10px}.metric-value .denominator{font-size:10px}.status-list{gap:8px}.status-pill{font-size:10px;gap:4px}.probe-label{font-size:10px}.probe .metric-value{gap:4px}.rust-label{font-size:8px;max-width:34px;white-space:normal;text-align:right}.warning-link{font-size:9px;gap:4px}.warning-link .swap-value{font-size:9px}.warning-link .icon{width:11px;height:11px}.quiet-badge{font-size:9px;padding:0 5px}.free-tier{font-size:8px;padding:1px 4px}.budget .metric-value{gap:4px}.edge .metric-value{gap:12px}.reason span{display:inline;margin-left:8px}.edge-bottom{padding-top:7px;gap:14px}.page-foot{font-size:9px;padding-top:11px}.page-foot .link-button{font-size:9px}.dialog-head{padding:21px 20px 17px}.dialog-body{padding:18px 20px 22px}.dialog-footer{padding:14px 20px}.dialog-head h2{font-size:18px}.detail-stats{gap:7px}.detail-stat{padding:12px 10px}.detail-stat dd{font-size:20px}.detail-stat dd small{font-size:9px}.detail-stat dt{font-size:9px}.detail-stats{margin-bottom:17px}.mini-track{width:35px}.drawer .dialog-head{padding:24px}.drawer .dialog-body{padding:20px 24px}.drawer .dialog-footer{padding:16px 24px}}
+    @media(max-width:370px){.workspace{padding:18px 12px}.metric{padding:17px 12px}.status-list{gap:6px}.status-pill{font-size:9px}.metric-head{gap:3px}.memory .denominator{width:100%;padding:1px 0 0 14px}.metric-value .large{font-size:25px}.memory .large,.budget .large,.probe .large{font-size:22px}.warning-link{flex-wrap:wrap}.warning-link .swap-value{margin-left:15px}.rust-label{display:none}.page-foot>span{max-width:210px}.page-foot .link-button{white-space:nowrap}.detail-stats{grid-template-columns:1fr}.detail-stat{display:flex;align-items:center;justify-content:space-between}.detail-stat dt{margin:0}}
+    @media(prefers-reduced-motion:reduce){*,*:before,*:after{animation:none!important;transition:none!important;scroll-behavior:auto!important}}
+    @media(forced-colors:active){.track{border:1px solid CanvasText;height:5px}.track>span{background:Highlight}.health-dot{border:2px solid CanvasText}.filter[aria-pressed="true"]{outline:2px solid Highlight}.status-tag:before,.status-pill .dot{background:CanvasText}}
+    :root{--paper:#f7f7f5;--muted:#697386;--soft:#747e8d}
+    .workspace{padding:24px 8px}
+    .metric h2{font-size:14px}.edge .metric-head h2{font-size:13px}.title-button>.icon{display:none}
+    .status-pill{font-size:12px}.cpu-mini,.cpu-mini strong{font-size:12px}
+    .available-label{font-size:14px}.rust-label{font-size:11px;color:#778090}
+    .probe-label{font-size:13px}.quiet-badge,.free-tier,.alerts-badge{font-size:11px}
+    .warning-link,.warning-link .swap-value{font-size:11px}
+    .meter-label,.meter-label strong,.reason,.reason span,.edge-bottom,.edge-bottom strong{font-size:11px;color:#697386}
+    @media(max-width:760px){.workspace{padding:12px 8px}.metric h2{font-size:13px}.edge .metric-head h2{font-size:13px}.cpu-mini,.cpu-mini strong{font-size:11px}}
+  </style>
+</head>
+<body>
+  <svg class="symbols" aria-hidden="true" xmlns="http://www.w3.org/2000/svg"><defs>
+    <symbol id="i-grid" viewBox="0 0 24 24"><rect x="3" y="3" width="7" height="7" rx="1.5"/><rect x="14" y="3" width="7" height="7" rx="1.5"/><rect x="3" y="14" width="7" height="7" rx="1.5"/><rect x="14" y="14" width="7" height="7" rx="1.5"/></symbol>
+    <symbol id="i-arrow" viewBox="0 0 24 24"><path d="m9 5 7 7-7 7"/></symbol>
+    <symbol id="i-refresh" viewBox="0 0 24 24"><path d="M20 7v5h-5M4 17v-5h5"/><path d="M6.1 7a7 7 0 0 1 11.5-1L20 9M4 15l2.4 3a7 7 0 0 0 11.5-1"/></symbol>
+    <symbol id="i-warning" viewBox="0 0 24 24"><path d="m10.4 4.7-7.5 13a1.8 1.8 0 0 0 1.6 2.7h15a1.8 1.8 0 0 0 1.6-2.7l-7.5-13a1.8 1.8 0 0 0-3.2 0Z"/><path d="M12 9v4m0 3v.1"/></symbol>
+    <symbol id="i-zap" viewBox="0 0 24 24"><path d="m13 2-9 12h7l-1 8 10-13h-7l1-7Z"/></symbol>
+    <symbol id="i-close" viewBox="0 0 24 24"><path d="m6 6 12 12M6 18 18 6"/></symbol>
+    <symbol id="i-search" viewBox="0 0 24 24"><circle cx="10.5" cy="10.5" r="6.5"/><path d="m16 16 4.5 4.5"/></symbol>
+    <symbol id="i-clock" viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 2"/></symbol>
+    <symbol id="i-shield" viewBox="0 0 24 24"><path d="m12 3 8 3v6c0 5-8 9-8 9S4 17 4 12V6l8-3Z"/><path d="m8 12 3 3 5-6"/></symbol>
+    <symbol id="i-offline" viewBox="0 0 24 24"><path d="m4 4 16 16M9 5h9a2 2 0 0 1 2 2v8M5 8v10a2 2 0 0 0 2 2h10M8 16h3"/></symbol>
+  </defs></svg>
+  <main class="workspace">
+    <h1 class="sr-only">全网概览</h1>
+    <div class="summary" aria-label="全网运行摘要">
+      <section class="metric fleet" aria-labelledby="fleet-heading">
+        <div class="metric-head"><h2 id="fleet-heading"><button class="title-button" type="button" data-action="nodes" data-filter="all" aria-haspopup="dialog">在线节点 · 帧态分布<svg class="icon" aria-hidden="true"><use href="#i-arrow"/></svg></button></h2><span class="health-dot" title="1 台节点离线" aria-label="存在离线节点"></span></div>
+        <div class="metric-value"><button class="value-button" type="button" data-action="nodes" data-filter="online" aria-haspopup="dialog" aria-label="查看 10 台在线节点，共 11 台"><span class="large">10</span><span class="denominator">/ 11</span></button><span class="rate">90.9%</span></div>
+        <div class="metric-bottom status-list" aria-label="按帧态筛选节点"><button class="status-pill" type="button" data-action="nodes" data-filter="idle" aria-haspopup="dialog"><span class="dot" aria-hidden="true"></span>Idle <span>7</span></button><button class="status-pill live" type="button" data-action="nodes" data-filter="live" aria-haspopup="dialog"><span class="dot" aria-hidden="true"></span>Live <span>2</span></button><button class="status-pill offline" type="button" data-action="nodes" data-filter="offline" aria-haspopup="dialog"><span class="dot" aria-hidden="true"></span>离线 <span>1</span></button></div>
+      </section>
+      <section class="metric memory" aria-labelledby="memory-heading">
+        <div class="metric-head"><h2 id="memory-heading"><button class="title-button" type="button" data-action="resources" aria-haspopup="dialog">算力与内存余量<svg class="icon" aria-hidden="true"><use href="#i-arrow"/></svg></button></h2><div class="cpu-mini">均 CPU <strong>29.2%</strong></div></div>
+        <div class="metric-value"><span class="available-label">余</span><span class="large">24.4<span class="unit">GB</span></span><span class="denominator">/ 38 GB</span></div>
+        <div class="metric-bottom"><div class="meter-label"><span>内存已用</span><strong>35.8%</strong></div><div class="track" role="meter" aria-label="在线节点内存使用率" aria-valuemin="0" aria-valuemax="100" aria-valuenow="35.8" aria-valuetext="已用 13.6 GB，总计 38 GB"><span style="width:35.8%"></span></div></div>
+      </section>
+      <section class="metric probe" aria-labelledby="probe-heading">
+        <div class="metric-head"><h2 id="probe-heading"><button class="title-button" type="button" data-action="swap" aria-haspopup="dialog">小鸡 Swap 哨兵<svg class="icon" aria-hidden="true"><use href="#i-arrow"/></svg></button><span class="overline">≤ 2 GB</span></h2><button class="quiet-badge" type="button" data-action="swap" aria-haspopup="dialog" aria-label="查看 7 台小内存节点">7 台</button></div>
+        <div class="metric-value"><span class="probe-label">探针均</span><span class="large">4.2<span class="unit"> MB</span></span><span class="rust-label">Rust<br>零依赖</span></div>
+        <div class="metric-bottom"><button class="warning-link" type="button" data-action="alerts" data-alert="swap" aria-haspopup="dialog" aria-label="查看 sgp-tiny-relay 的 Swap 82.2% 告警"><svg class="icon" aria-hidden="true"><use href="#i-warning"/></svg><span class="node-name">sgp-tiny-relay</span><span class="swap-value">Swap 82.2%</span></button></div>
+      </section>
+      <section class="metric budget" aria-labelledby="budget-heading">
+        <div class="metric-head"><h2 id="budget-heading"><button class="title-button" type="button" data-action="budget" aria-haspopup="dialog">SCCH 日写入预算<svg class="icon" aria-hidden="true"><use href="#i-arrow"/></svg></button></h2><span class="free-tier">Free Tier</span></div>
+        <div class="metric-value"><span class="large">18.4k</span><span class="denominator">/ 100k</span></div>
+        <div class="metric-bottom"><div class="meter-label"><span>今日额度</span><strong>18.4%</strong></div><div class="track" role="meter" aria-label="SCCH 今日写入额度" aria-valuemin="0" aria-valuemax="100000" aria-valuenow="18400" aria-valuetext="已用 18,400 次，共 100,000 次，18.4%"><span style="width:18.4%"></span></div></div>
+      </section>
+      <section class="metric edge" aria-labelledby="edge-heading">
+        <div class="metric-head"><h2 class="edge-title" id="edge-heading"><svg class="icon" aria-hidden="true"><use href="#i-zap"/></svg><span>边缘越界上送延迟</span></h2><button class="alerts-badge" type="button" data-action="alerts" aria-haspopup="dialog">2 告警中</button></div>
+        <div class="metric-value"><span class="large">0<span class="unit">s</span></span><span class="reason">reason="edge"<span>即刻穿透</span></span></div>
+        <div class="metric-bottom edge-bottom"><span><strong>3%</strong> 迟滞防抖</span><span class="divider" aria-hidden="true"></span><span>DO 休眠率 <strong>96.4%</strong></span></div>
+      </section>
+    </div>
+  </main>
+  <dialog id="details" aria-labelledby="detail-title" aria-describedby="detail-subtitle">
+    <div class="dialog-layout"><header class="dialog-head"><div><h2 id="detail-title"></h2><p id="detail-subtitle"></p></div><button class="close-button" type="button" data-close="details" aria-label="关闭详情"><svg class="icon" aria-hidden="true"><use href="#i-close"/></svg></button></header><div class="dialog-body" id="detail-body"></div><footer class="dialog-footer"><span>本地演示数据</span><button class="button" type="button" data-close="details">完成</button></footer></div>
+  </dialog>
+  <dialog id="alerts" class="drawer" aria-labelledby="alerts-title" aria-describedby="alerts-subtitle">
+    <div class="dialog-layout"><header class="dialog-head"><div><h2 id="alerts-title">当前告警 <span class="mono" style="font-size:14px;color:#9aa3b1;margin-left:5px">02</span></h2><p id="alerts-subtitle">2 条待确认</p></div><button class="close-button" type="button" data-close="alerts" aria-label="关闭告警"><svg class="icon" aria-hidden="true"><use href="#i-close"/></svg></button></header><div class="dialog-body"><label class="check-filter"><input type="checkbox" id="unread-only">仅看待确认</label><div class="alert-list" id="alert-list"></div></div><footer class="dialog-footer"><span><svg class="icon" aria-hidden="true" style="width:12px;height:12px;margin-right:3px"><use href="#i-clock"/></svg>迟滞阈值 3%</span><span>本地演示</span></footer></div>
+  </dialog>
+  <script>
+    'use strict';
+    const nodes = [
+      {id:'sgp-tiny-relay', region:'新加坡', state:'live', cpu:92.8, free:.1, memory:1, probe:4.6, swap:82.2},
+      {id:'hkg-edge-01', region:'香港', state:'idle', cpu:21, free:1.2, memory:2, probe:4.2, swap:.8},
+      {id:'tokyo-edge-01', region:'东京', state:'live', cpu:25.4, free:.5, memory:1, probe:4.1, swap:0},
+      {id:'lax-micro-01', region:'洛杉矶', state:'idle', cpu:14, free:1.4, memory:2, probe:4.0, swap:0},
+      {id:'ams-micro-01', region:'阿姆斯特丹', state:'idle', cpu:17, free:1.3, memory:2, probe:4.3, swap:1.2},
+      {id:'syd-micro-01', region:'悉尼', state:'idle', cpu:12, free:.5, memory:1, probe:4.1, swap:0},
+      {id:'lon-micro-01', region:'伦敦', state:'idle', cpu:18, free:.7, memory:1, probe:4.1, swap:0},
+      {id:'fra-worker-01', region:'法兰克福', state:'idle', cpu:30, free:2.9, memory:4},
+      {id:'sjc-core-01', region:'圣何塞', state:'idle', cpu:37.8, free:5.5, memory:8},
+      {id:'nrt-core-01', region:'东京', state:'sync', cpu:24, free:10.3, memory:16},
+      {id:'lax-backup-01', region:'洛杉矶', state:'offline', cpu:null, free:null, memory:2}
+    ];
+    const stateLabels = {idle:'Idle',live:'Live',sync:'待首帧',offline:'离线'};
+    const detailDialog = document.getElementById('details');
+    const alertDialog = document.getElementById('alerts');
+    const detailBody = document.getElementById('detail-body');
+    const alertStates = {swap:false,offline:false};
+    let currentFilter = 'all';
+    let currentSearch = '';
+    const icon = name => '<svg class="icon" aria-hidden="true"><use href="#i-' + name + '"/></svg>';
+    const number = value => value.toFixed(1);
+    function showDetail(title, subtitle, html){
+      if(alertDialog.open) alertDialog.close();
+      document.getElementById('detail-title').textContent = title;
+      document.getElementById('detail-subtitle').textContent = subtitle;
+      detailBody.innerHTML = html;
+      if(!detailDialog.open) detailDialog.showModal();
+      detailBody.scrollTop = 0;
+    }
+    function filterCount(filter){return nodes.filter(n => filter === 'all' || (filter === 'online' ? n.state !== 'offline' : n.state === filter)).length;}
+    function renderNodeRows(){
+      const shown = nodes.filter(n => (currentFilter === 'all' || (currentFilter === 'online' ? n.state !== 'offline' : n.state === currentFilter)) && (n.id + ' ' + n.region).toLowerCase().includes(currentSearch.toLowerCase()));
+      document.getElementById('node-rows').innerHTML = shown.length ? shown.map(n => '<tr><td class="node">'+n.id+'</td><td>'+n.region+'</td><td><span class="status-tag '+n.state+'">'+stateLabels[n.state]+'</span></td><td class="mono">'+(n.cpu === null ? '—' : n.cpu.toFixed(1)+'%')+'</td><td class="mono">'+(n.free === null ? '—' : number(n.free)+' / '+n.memory+' GB')+'</td></tr>').join('') : '<tr><td class="table-empty" colspan="5">没有匹配的节点</td></tr>';
+      document.getElementById('node-count').textContent = shown.length + ' 台节点' + (shown.some(n => n.state === 'sync') ? ' · 含 1 台等待首帧' : '');
+      detailBody.querySelectorAll('[data-filter-node]').forEach(button => button.setAttribute('aria-pressed', String(button.dataset.filterNode === currentFilter)));
+    }
+    function openNodes(filter = 'all', search = ''){
+      currentFilter = filter;
+      currentSearch = search;
+      const filters = [['all','全部'],['online','在线'],['idle','Idle'],['live','Live'],['sync','待首帧'],['offline','离线']];
+      showDetail('节点状态','10 / 11 在线 · 在线率 90.9%',
+        '<div class="filters" role="group" aria-label="节点状态筛选">'+filters.map(([key,label]) => '<button class="filter" type="button" data-filter-node="'+key+'" aria-pressed="'+(key===filter)+'">'+label+' <span class="mono">'+filterCount(key)+'</span></button>').join('')+'</div>'+ 
+        '<label class="search">'+icon('search')+'<span class="sr-only">搜索节点或地区</span><input id="node-search" type="search" placeholder="搜索节点或地区" autocomplete="off"></label>'+
+        '<div class="table-scroll" tabindex="0" role="region" aria-label="节点列表，可横向滚动"><table><thead><tr><th scope="col">节点</th><th scope="col">地区</th><th scope="col">帧态</th><th scope="col">CPU</th><th scope="col">可用内存</th></tr></thead><tbody id="node-rows"></tbody></table></div><p class="data-note"><span id="node-count" aria-live="polite"></span></p>');
+      const searchInput = document.getElementById('node-search');
+      searchInput.value = search;
+      searchInput.addEventListener('input', event => {currentSearch = event.target.value; renderNodeRows();});
+      renderNodeRows();
+    }
+    function openResources(){
+      const connected = nodes.filter(n => n.state !== 'offline');
+      showDetail('算力与内存','10 台在线节点 · 离线节点不计入总量',
+        '<div class="detail-stats"><dl class="detail-stat"><dt>平均 CPU</dt><dd>29.2<small>%</small></dd></dl><dl class="detail-stat"><dt>可用内存</dt><dd>24.4<small>GB</small></dd></dl><dl class="detail-stat"><dt>总内存</dt><dd>38<small>GB</small></dd></dl></div>'+
+        '<div class="table-scroll" tabindex="0" role="region" aria-label="节点资源列表，可横向滚动"><table><thead><tr><th scope="col">节点</th><th scope="col">CPU 使用率</th><th scope="col">可用 / 总内存</th></tr></thead><tbody>'+connected.map(n=>'<tr><td class="node">'+n.id+'</td><td class="mono"><span class="mini-track" aria-hidden="true"><span style="width:'+n.cpu+'%"></span></span>'+n.cpu.toFixed(1)+'%</td><td class="mono">'+number(n.free)+' / '+n.memory+' GB</td></tr>').join('')+'</tbody></table></div>');
+    }
+    function openSwap(){
+      const tiny = nodes.filter(n => n.memory <= 2 && n.state !== 'offline');
+      showDetail('小鸡 Swap 哨兵','监测 ≤ 2 GB 的在线节点',
+        '<div class="detail-stats"><dl class="detail-stat"><dt>监测节点</dt><dd>7<small>台</small></dd></dl><dl class="detail-stat"><dt>探针平均内存</dt><dd>4.2<small>MB</small></dd></dl><dl class="detail-stat"><dt>Swap 告警</dt><dd class="warm">1<small>台</small></dd></dl></div>'+
+        '<div class="table-scroll" tabindex="0" role="region" aria-label="小内存节点列表，可横向滚动"><table class="swap-table"><thead><tr><th scope="col">节点</th><th scope="col">内存</th><th scope="col">探针</th><th scope="col">Swap</th></tr></thead><tbody>'+tiny.map(n=>'<tr'+(n.swap>80?' class="hot"':'')+'><td class="node">'+n.id+'</td><td class="mono">'+n.memory+' GB</td><td class="mono">'+number(n.probe)+' MB</td><td class="mono '+(n.swap>80?'warm':'')+'">'+(n.swap>80?icon('warning')+' ':'')+number(n.swap)+'%</td></tr>').join('')+'</tbody></table></div><p class="data-note">Rust 只读探针 · 零运行时依赖</p>');
+    }
+    function openBudget(){
+      showDetail('SCCH 日写入预算','Free Tier · 今日写入明细',
+        '<div class="budget-hero"><div class="budget-numbers"><div><strong>18,400</strong> <small>/ 100,000</small></div><span>18.4%</span></div><div class="track" role="meter" aria-label="已用写入额度" aria-valuemin="0" aria-valuemax="100000" aria-valuenow="18400"><span style="width:18.4%"></span></div><div class="budget-caption"><span>剩余额度 <b class="mono">81,600</b> 次</span><span>UTC 00:00 重置</span></div></div>'+
+        '<dl class="quota-list"><div><dt>心跳与在线状态</dt><dd>8,100</dd></div><div><dt>边缘越界上送</dt><dd>6,700</dd></div><div><dt>帧态变更</dt><dd>3,600</dd></div></dl>');
+    }
+    function renderAlerts(){
+      const onlyUnread = document.getElementById('unread-only').checked;
+      const items = [
+        {id:'swap',node:'sgp-tiny-relay',title:'Swap 占用越界',time:'2m',symbol:'warning',label:'当前占用',value:'82.2',unit:'%',threshold:'上送阈值',limit:'80.0%'},
+        {id:'offline',node:'lax-backup-01',title:'节点心跳超时',time:'4m',symbol:'offline',label:'距最近心跳',value:'3',unit:'m 48s',threshold:'离线阈值',limit:'90s'}
+      ];
+      const shown = items.filter(a => !onlyUnread || !alertStates[a.id]);
+      document.getElementById('alerts-subtitle').textContent = Object.values(alertStates).filter(v=>!v).length + ' 条待确认 · 2 条仍在持续';
+      document.getElementById('alert-list').innerHTML = shown.length ? shown.map(a => '<article class="alert-card" id="alert-'+a.id+'"><div class="alert-card-head"><span class="alert-symbol '+a.id+'">'+icon(a.symbol)+'</span><div><h3>'+a.title+'</h3><span class="node-id">'+a.node+'</span></div><span class="alert-time">'+a.time+' 前</span></div><div class="alert-values"><div><span>'+a.label+'</span><strong>'+a.value+'<small> '+a.unit+'</small></strong></div><div class="limit"><span>'+a.threshold+'</span><strong>'+a.limit+'</strong></div></div><div class="alert-actions"><button class="text-button" type="button" data-view-node="'+a.node+'">查看节点 '+icon('arrow')+'</button><button class="ack-button" type="button" data-ack="'+a.id+'" '+(alertStates[a.id]?'disabled':'')+'>'+(alertStates[a.id]?'✓ 已确认':'确认告警')+'</button></div></article>').join('') : '<div class="alert-empty">所有告警已确认</div>';
+    }
+    function openAlerts(alertId){
+      if(detailDialog.open) detailDialog.close();
+      document.getElementById('unread-only').checked = false;
+      renderAlerts();
+      if(!alertDialog.open) alertDialog.showModal();
+      if(alertId){const card = document.getElementById('alert-'+alertId); if(card) card.scrollIntoView({block:'nearest'});}
+    }
+    document.addEventListener('click', event => {
+      const button = event.target.closest('button');
+      if(!button) return;
+      if(button.dataset.close){document.getElementById(button.dataset.close).close();return;}
+      if(button.dataset.filterNode){currentFilter=button.dataset.filterNode;renderNodeRows();return;}
+      if(button.dataset.viewNode){openNodes('all',button.dataset.viewNode);return;}
+      if(button.dataset.ack){
+        const id = button.dataset.ack;
+        alertStates[id] = true;
+        renderAlerts();
+        const next = document.querySelector('#alert-list .ack-button:not(:disabled)');
+        if(next) next.focus(); else document.getElementById('unread-only').focus();
+        return;
+      }
+      switch(button.dataset.action){
+        case 'nodes':openNodes(button.dataset.filter || 'all');break;
+        case 'resources':openResources();break;
+        case 'swap':openSwap();break;
+        case 'budget':openBudget();break;
+        case 'alerts':openAlerts(button.dataset.alert);break;
+      }
+    });
+    document.getElementById('unread-only').addEventListener('change', renderAlerts);
+    for(const dialog of [detailDialog,alertDialog]){
+      let pointerStartedOutside = false;
+      dialog.addEventListener('pointerdown', event => {
+        const rect = dialog.getBoundingClientRect();
+        pointerStartedOutside = event.clientX < rect.left || event.clientX > rect.right || event.clientY < rect.top || event.clientY > rect.bottom;
+      });
+      dialog.addEventListener('click', event => {
+        if(!pointerStartedOutside) return;
+        const rect = dialog.getBoundingClientRect();
+        if(event.clientX < rect.left || event.clientX > rect.right || event.clientY < rect.top || event.clientY > rect.bottom) dialog.close();
+        pointerStartedOutside = false;
+      });
+    }
+  </script>
+</body>
+</html>

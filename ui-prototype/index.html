@@ -1,0 +1,36 @@
+<!doctype html>
+<html lang="zh-CN" data-theme="light" data-accent="cobalt">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta name="color-scheme" content="light" />
+    <script>
+      try {
+        var s = localStorage.getItem("uniob-proto-theme");
+        var a = localStorage.getItem("uniob-proto-accent");
+        var theme = s === "dark" ? "dark" : "light";
+        var accent = a === "vermilion" || a === "jade" ? a : "cobalt";
+        document.documentElement.dataset.theme = theme;
+        document.documentElement.dataset.accent = accent;
+        var m = document.querySelector('meta[name="color-scheme"]');
+        if (m) m.content = theme;
+      } catch (e) {}
+    </script>
+    <link
+      rel="icon"
+      type="image/svg+xml"
+      href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none'%3E%3Crect width='24' height='24' rx='6' fill='%2318181B'/%3E%3Ccircle cx='12' cy='12' r='4.5' stroke='%23FFFFFF' stroke-width='1.8'/%3E%3Ccircle cx='17.5' cy='6.5' r='2' fill='%233D5AFE'/%3E%3C/svg%3E"
+    />
+    <title>UniOB · 服务器监控</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link
+      href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&family=JetBrains+Mono:wght@400;500;600&family=Plus+Jakarta+Sans:wght@500;600;700&display=swap"
+      rel="stylesheet"
+    />
+  </head>
+  <body>
+    <div id="root"></div>
+    <script type="module" src="/src/main.tsx"></script>
+  </body>
+</html>

@@ -1,0 +1,267 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="light">
+  <title>tokyo-edge-01 · UniOB</title>
+  <style>
+    :root{--ink:#101828;--muted:#747b87;--line:#eaeae7;--soft:#f8f8f6;--blue:#4e61ff;--green:#15a45c;--mono:"SFMono-Regular",Consolas,"Liberation Mono",monospace;--sans:Inter,"Segoe UI","PingFang SC","Microsoft YaHei",sans-serif}
+    *{box-sizing:border-box}
+    html{min-width:280px}
+    body{margin:0;min-height:100vh;min-height:100svh;display:grid;place-items:center;padding:24px;background:#f7f7f5;color:var(--ink);font:14px/1.45 var(--sans);-webkit-font-smoothing:antialiased}
+    button{font:inherit;cursor:pointer;-webkit-tap-highlight-color:transparent}
+    button:focus-visible{outline:3px solid #aeb7ff;outline-offset:3px}
+    button svg{width:14px;height:14px;flex:none}
+    svg{fill:none;stroke:currentColor;stroke-width:1.5;stroke-linecap:round;stroke-linejoin:round}
+    .symbols{position:absolute;width:0;height:0;overflow:hidden}
+    .mono{font-family:var(--mono);font-variant-numeric:tabular-nums;letter-spacing:-.35px}
+    .node-card{width:min(100%,592px);padding:18px;border:1px solid #e9e9e6;border-radius:14px;background:#fff;box-shadow:0 2px 4px #10182803,0 14px 35px -28px #10182820}
+    .node-header{display:flex;justify-content:space-between;gap:12px;min-height:54px}
+    .title-line{display:flex;align-items:center;gap:8px;min-height:24px;flex-wrap:wrap}
+    .node-title{display:flex;align-items:center;gap:9px;margin:0;font-size:18px;font-weight:650;letter-spacing:-.55px;white-space:nowrap;line-height:24px}
+    .status-dot{height:8px;width:8px;flex:none;border-radius:50%;background:var(--green);box-shadow:0 0 0 4px #15a45c0a}
+    .plan{padding:2px 8px;border-radius:7px;background:#f1f1ee;color:#687183;line-height:20px;white-space:nowrap}
+    .meta{display:flex;align-items:center;gap:8px;margin-top:7px;color:#6a7485;font-size:14px;white-space:nowrap}
+    .country{display:inline-flex;align-items:center;justify-content:center;min-width:25px;height:22px;border:1px solid #ededeb;border-radius:5px;background:#fafaf9;color:#374151;font:12px var(--mono)}
+    .node-state{display:flex;flex:none;flex-direction:column;align-items:flex-end;gap:9px;padding-top:0}
+    .live-toggle{min-height:24px;padding:1px 7px;border:1px solid #c8ceff;border-radius:7px;background:#f6f7ff;color:var(--blue);font-size:13px;line-height:20px;white-space:nowrap;transition:background .16s,border-color .16s,color .16s}
+    .live-toggle:hover{background:#e9ecff;border-color:#aab4ff}
+    .live-toggle[aria-pressed="false"]{color:#6b7280;border-color:#deded9;background:#f6f6f4}
+    .uptime{color:#708097;font-size:12px;line-height:19px}
+    .cpu-panel{display:flex;justify-content:space-between;align-items:center;gap:16px;min-height:66px;margin:28px 0 26px;padding:9px 13px;border:1px solid #e6e6e3;border-radius:10px;background:var(--soft)}
+    .cpu-label{color:#6b7484;font-size:13px;line-height:19px}
+    .cpu-reading{display:flex;align-items:baseline;gap:10px;white-space:nowrap}
+    .cpu-number{font-size:22px;line-height:25px;font-weight:650;letter-spacing:-.8px}
+    .cpu-load{color:#748095;font-size:12px}
+    .sparkline{width:146px;height:42px;flex:0 0 146px;display:block}
+    .resources{display:grid;grid-template-columns:1fr 1fr;gap:9px 16px}
+    .resource{min-width:0}
+    .resource-line{display:flex;justify-content:space-between;gap:8px;align-items:baseline;line-height:21px;white-space:nowrap}
+    .resource-name{color:#6f7a8b}
+    .resource-value{font-size:13px;font-weight:600;color:#0e1726}
+    .track{height:3px;overflow:hidden;border-radius:3px;background:#eeefeb}
+    .fill{display:block;height:100%;width:var(--value);border-radius:3px;background:var(--blue);transition:width .65s ease}
+    .card-footer{display:flex;align-items:center;justify-content:space-between;gap:12px;margin-top:30px;padding-top:11px;border-top:1px solid #eeeeeb}
+    .traffic{display:flex;align-items:baseline;gap:8px;white-space:nowrap;color:#6d7b90;font-size:12px}
+    .traffic-speed{color:#4f6386}
+    .traffic-separator{color:#9299a4;font-size:10px}
+    .monthly{color:#77818e}
+    .card-actions{display:flex;gap:5px}
+    .subtle-button{display:inline-flex;align-items:center;justify-content:center;gap:5px;min-height:26px;padding:2px 8px;border:1px solid #e4e5e2;border-radius:6px;background:#fafaf8;color:#4c5666;font-size:12px;line-height:20px;white-space:nowrap;transition:background .15s,border-color .15s,color .15s}
+    .subtle-button:hover{background:#f0f2ff;border-color:#cbd1ff;color:#4053e7}
+    .subtle-button:active{background:#e8ecff}
+    dialog{width:min(560px,calc(100% - 32px));max-height:calc(100svh - 40px);margin:auto;padding:0;overflow:auto;overscroll-behavior:contain;border:1px solid #e6e7e4;border-radius:16px;background:#fff;color:var(--ink);box-shadow:0 25px 90px #18233928}
+    dialog::backdrop{background:#1b25334d;backdrop-filter:blur(3px)}
+    .dialog-header{display:flex;justify-content:space-between;align-items:center;gap:16px;padding:20px 22px 16px;border-bottom:1px solid #eeefeb}
+    .dialog-title{display:flex;align-items:center;gap:9px;margin:0;font-size:16px;line-height:24px;font-weight:600;letter-spacing:-.3px}
+    .dialog-title svg{width:18px;height:18px;color:var(--blue)}
+    .dialog-node{margin:3px 0 0;color:var(--muted);font-size:12px}
+    .close-button{display:grid;place-items:center;width:30px;height:30px;padding:0;border:1px solid #e9eae6;border-radius:8px;background:#fff;color:#677182;flex:none}
+    .close-button:hover{background:#f3f4f0;color:#111827}
+    .dialog-body{padding:20px 22px 22px}
+    .chart-heading{display:flex;justify-content:space-between;align-items:baseline;gap:12px}
+    .chart-heading p{margin:0;color:#737c8a;font-size:12px}
+    .chart-heading strong{font-size:25px;font-weight:600}
+    .chart-heading span{color:#7b8492;font-size:11px}
+    .detail-chart{display:block;width:100%;height:124px;margin-top:12px}
+    .chart-axis{display:flex;justify-content:space-between;color:#9298a2;font-size:10px;margin-top:5px}
+    .detail-stats{display:grid;grid-template-columns:1fr 1fr;gap:0 22px;margin-top:22px}
+    .detail-stat{padding:12px 0;border-top:1px solid #eeefeb;display:flex;justify-content:space-between;align-items:baseline;gap:8px;font-size:12px}
+    .detail-stat dt{color:#737e8c}
+    .detail-stat dd{margin:0;font-family:var(--mono);font-variant-numeric:tabular-nums;white-space:nowrap;color:#334155}
+    .dialog-footer{display:flex;justify-content:space-between;align-items:center;gap:12px;padding:13px 22px;border-top:1px solid #eeefeb;background:#fafaf8;color:#828b97;font-size:11px}
+    .dialog-footer span{display:inline-flex;align-items:center;gap:5px}
+    .demo-dot{width:5px;height:5px;border-radius:50%;background:#a4abb4}
+    .process-summary{display:flex;gap:20px;align-items:center;margin-bottom:18px;font-size:12px;color:#798291}
+    .process-summary strong{font-weight:600;color:#344054}
+    .table-wrap{overflow:auto;border:1px solid #eaece7;border-radius:9px}
+    table{width:100%;border-collapse:collapse;white-space:nowrap;font-size:12px}
+    th{padding:10px 11px;color:#7a8492;background:#f8f9f6;text-align:left;font-size:11px;font-weight:500}
+    td{padding:12px 11px;border-top:1px solid #f0f1ed;color:#4f5d70}
+    th:nth-child(n+3),td:nth-child(n+3){text-align:right}
+    td:nth-child(2){color:#1e293b}
+    td:first-child{color:#939ba5}
+    .sort-button{padding:0;border:0;background:transparent;color:var(--blue);font:inherit}
+    .process-count{color:#6f7b8d;font-size:11px}
+    .sr-only{position:absolute;clip:rect(0,0,0,0);clip-path:inset(50%);width:1px;height:1px;overflow:hidden;white-space:nowrap}
+    @media(max-width:640px){body{padding:10px 5px;background:#fff}.node-card{box-shadow:0 2px 5px #10182803}}
+    @media(max-height:380px) and (min-width:431px){body{padding:6px 5px}}
+    @media(max-width:430px){.node-card{padding:16px}.node-title{font-size:16px;gap:7px}.title-line{gap:5px}.plan{font-size:11px;padding:1px 5px}.meta{font-size:11px;gap:5px}.node-state{gap:9px}.uptime{font-size:11px}.live-toggle{font-size:11px;padding:1px 5px}.cpu-panel{margin-top:24px}.sparkline{width:115px;flex-basis:115px}.resources{gap:10px 12px}.resource-name{font-size:12px}.resource-value{font-size:11px}.card-footer{gap:12px;flex-wrap:wrap;margin-top:25px}.traffic{font-size:11px;gap:6px}.card-actions{margin-left:auto}.dialog-header{padding:17px}.dialog-body{padding:17px}.dialog-footer{padding:12px 17px}.detail-stats{column-gap:14px}.detail-stat{font-size:11px}}
+    @media(max-width:340px){.node-title{font-size:14px}.plan{font-size:10px}.node-card{padding:13px}.meta{font-size:10px}.cpu-panel{padding:9px 10px;gap:6px}.sparkline{width:85px;flex-basis:85px}.cpu-load{font-size:10px}.resources{column-gap:10px}.resource-value{font-size:10px}.resource-name{font-size:11px}.detail-stats{grid-template-columns:1fr}}
+    @media(prefers-reduced-motion:reduce){*{transition:none!important;scroll-behavior:auto!important}}
+    @media(forced-colors:active){.status-dot,.demo-dot,.fill{background:Highlight}.track{border-bottom:3px solid GrayText}.node-card,.cpu-panel,dialog{border:1px solid CanvasText}}
+  </style>
+</head>
+<body>
+  <svg class="symbols" aria-hidden="true"><defs>
+    <symbol id="icon-activity" viewBox="0 0 24 24"><path d="M3 12h4l3-8 4 16 3-8h4"/></symbol>
+    <symbol id="icon-terminal" viewBox="0 0 24 24"><path d="m5 6 5 5-5 5M13 18h6"/></symbol>
+    <symbol id="icon-close" viewBox="0 0 24 24"><path d="m6 6 12 12M18 6 6 18"/></symbol>
+  </defs></svg>
+
+  <main class="node-card" aria-labelledby="node-title">
+    <header class="node-header">
+      <div>
+        <div class="title-line">
+          <h1 class="node-title" id="node-title"><span class="status-dot" aria-label="节点在线" role="img"></span>tokyo-edge-01</h1>
+          <span class="plan">1G·Zram</span>
+        </div>
+        <div class="meta"><span class="country">JP</span><span>NRT · 东京 · Debian12</span></div>
+      </div>
+      <div class="node-state">
+        <button type="button" class="live-toggle" id="live-toggle" aria-pressed="true" aria-label="暂停实时更新" title="暂停实时更新">live · 2s</button>
+        <span class="uptime mono">Up 142d</span>
+      </div>
+    </header>
+
+    <section class="cpu-panel" aria-label="CPU 利用率概览">
+      <div><div class="cpu-label">CPU 利用率</div><div class="cpu-reading"><strong class="cpu-number mono" data-cpu>25.4%</strong><span class="cpu-load mono">Load <span data-load>0.28</span></span></div></div>
+      <canvas class="sparkline" id="sparkline" role="img" aria-label="过去 60 秒 CPU 利用率趋势，当前 25.4%">CPU 利用率趋势</canvas>
+    </section>
+
+    <section class="resources" aria-label="资源使用情况">
+      <div class="resource"><div class="resource-line"><span class="resource-name">CPU</span><span class="resource-value mono" data-cpu>25.4%</span></div><div class="track" id="cpu-meter" role="meter" aria-label="CPU 使用率" aria-valuemin="0" aria-valuemax="100" aria-valuenow="25.4"><span class="fill" data-bar="cpu" style="--value:25.4%"></span></div></div>
+      <div class="resource"><div class="resource-line"><span class="resource-name">内存 (小鸡)</span><span class="resource-value mono"><span data-ram>462</span> / 1024M</span></div><div class="track" id="ram-meter" role="meter" aria-label="内存使用量，MiB" aria-valuemin="0" aria-valuemax="1024" aria-valuenow="462"><span class="fill" data-bar="ram" style="--value:45.12%"></span></div></div>
+      <div class="resource"><div class="resource-line"><span class="resource-name">Swap · Zram</span><span class="resource-value mono">64/1024M</span></div><div class="track" role="meter" aria-label="交换空间使用量，MiB" aria-valuemin="0" aria-valuemax="1024" aria-valuenow="64"><span class="fill" style="--value:6.25%"></span></div></div>
+      <div class="resource"><div class="resource-line"><span class="resource-name">磁盘 /</span><span class="resource-value mono">9/25G</span></div><div class="track" role="meter" aria-label="磁盘使用量，GiB" aria-valuemin="0" aria-valuemax="25" aria-valuenow="9"><span class="fill" style="--value:36%"></span></div></div>
+    </section>
+
+    <footer class="card-footer">
+      <div class="traffic mono" aria-label="网络流量"><span class="traffic-speed" title="上传速率">↑<span data-upload>7.9</span> MB/s</span><span class="traffic-separator">·</span><span title="下载速率">↓<span data-download>6.3</span> MB/s</span><span class="traffic-separator">·</span><span class="monthly">月流 41%</span></div>
+      <div class="card-actions">
+        <button type="button" class="subtle-button" data-open="telemetry-dialog"><svg aria-hidden="true"><use href="#icon-activity"/></svg>遥测</button>
+        <button type="button" class="subtle-button" data-open="process-dialog"><svg aria-hidden="true"><use href="#icon-terminal"/></svg>进程</button>
+      </div>
+    </footer>
+    <span class="sr-only" id="update-announcement" role="status"></span>
+  </main>
+
+  <dialog id="telemetry-dialog" aria-labelledby="telemetry-title">
+    <header class="dialog-header"><div><h2 class="dialog-title" id="telemetry-title"><svg aria-hidden="true"><use href="#icon-activity"/></svg>遥测</h2><p class="dialog-node mono">tokyo-edge-01</p></div><button class="close-button" type="button" data-close aria-label="关闭遥测"><svg aria-hidden="true"><use href="#icon-close"/></svg></button></header>
+    <div class="dialog-body">
+      <div class="chart-heading"><div><p>CPU 利用率</p><strong class="mono" data-cpu>25.4%</strong></div><span class="mono">Load <span data-load>0.28</span></span></div>
+      <canvas id="detail-chart" class="detail-chart" role="img" aria-label="过去 60 秒 CPU 利用率趋势">CPU 利用率趋势</canvas>
+      <div class="chart-axis mono"><span>60 秒前</span><span>30 秒前</span><span>现在</span></div>
+      <dl class="detail-stats">
+        <div class="detail-stat"><dt>内存</dt><dd><span data-ram>462</span> / 1024 MiB</dd></div>
+        <div class="detail-stat"><dt>Swap · Zram</dt><dd>64 / 1024 MiB</dd></div>
+        <div class="detail-stat"><dt>上传</dt><dd><span data-upload>7.9</span> MB/s</dd></div>
+        <div class="detail-stat"><dt>下载</dt><dd><span data-download>6.3</span> MB/s</dd></div>
+        <div class="detail-stat"><dt>磁盘 /</dt><dd>9 / 25 GiB</dd></div>
+        <div class="detail-stat"><dt>本月流量</dt><dd>410 / 1000 GiB</dd></div>
+      </dl>
+    </div>
+    <footer class="dialog-footer"><span><i class="demo-dot" aria-hidden="true"></i>模拟数据</span><span class="mono" data-updated>更新于 —</span></footer>
+  </dialog>
+
+  <dialog id="process-dialog" aria-labelledby="process-title">
+    <header class="dialog-header"><div><h2 class="dialog-title" id="process-title"><svg aria-hidden="true"><use href="#icon-terminal"/></svg>进程</h2><p class="dialog-node mono">tokyo-edge-01</p></div><button class="close-button" type="button" data-close aria-label="关闭进程"><svg aria-hidden="true"><use href="#icon-close"/></svg></button></header>
+    <div class="dialog-body">
+      <div class="process-summary"><span><strong class="mono">87</strong> 个进程</span><span><strong class="mono">2</strong> 运行中</span><span><strong class="mono">85</strong> 休眠</span></div>
+      <div class="table-wrap" tabindex="0" role="region" aria-label="CPU 占用最高的进程">
+        <table><thead><tr><th scope="col">PID</th><th scope="col">进程</th><th scope="col" id="cpu-sort-header" aria-sort="descending"><button type="button" class="sort-button" id="sort-processes" aria-label="按 CPU 使用率升序排列">CPU ↓</button></th><th scope="col">内存</th></tr></thead><tbody id="process-rows"></tbody></table>
+      </div>
+    </div>
+    <footer class="dialog-footer"><span><i class="demo-dot" aria-hidden="true"></i>模拟数据 · Top 5</span><span class="mono" data-updated>更新于 —</span></footer>
+  </dialog>
+
+  <script>
+    (() => {
+      'use strict';
+      const $ = (selector) => document.querySelector(selector);
+      const all = (selector) => document.querySelectorAll(selector);
+      const samples = [22.1,21.3,20.2,19.1,18.4,18.1,18.5,19.2,20.5,22.3,24.3,26.2,28.2,29.6,30.9,31.5,31.8,31.2,30.5,29.8,28.9,28.1,27.5,26.9,26.4,25.9,25.5,25.4,25.4,25.4,25.4];
+      const mockCycle = [25.4,25.8,26.3,27.1,28.2,27.6,26.4,25.9,24.7,24.2,23.6,24.1,24.8,25.4,26.1,25.8];
+      const state = {live:true,tick:0,cpu:25.4,load:0.28,ram:462,upload:7.9,download:6.3,updated:new Date(),sortDescending:true};
+      const processData = [{pid:1478,name:'nginx',cpu:12.6,memory:38},{pid:896,name:'node',cpu:8.1,memory:186},{pid:512,name:'uniob-agent',cpu:2.8,memory:24},{pid:203,name:'containerd',cpu:1.2,memory:46},{pid:1,name:'systemd',cpu:0.2,memory:11}];
+      const spark = $('#sparkline');
+      const detail = $('#detail-chart');
+      function paintChart(canvas,expanded=false){
+        const bounds=canvas.getBoundingClientRect();
+        if(!bounds.width || !bounds.height)return;
+        const dpr=Math.min(window.devicePixelRatio||1,3);
+        canvas.width=Math.round(bounds.width*dpr);canvas.height=Math.round(bounds.height*dpr);
+        const ctx=canvas.getContext('2d');
+        if(!ctx)return;
+        ctx.scale(dpr,dpr);
+        const w=bounds.width,h=bounds.height,pad=expanded?5:3;
+        const ceiling=expanded?60:65;
+        const y=(value)=>h-pad-(value/ceiling)*(h-pad*2);
+        ctx.lineWidth=1;ctx.strokeStyle='#d9dcd9';ctx.setLineDash([2,3]);
+        (expanded?[20,40,60]:[60]).forEach(value=>{ctx.beginPath();ctx.moveTo(0,y(value));ctx.lineTo(w,y(value));ctx.stroke();});
+        ctx.setLineDash([]);
+        const points=samples.map((value,i)=>[pad+i*(w-pad*2)/(samples.length-1),y(value)]);
+        const path=()=>{ctx.beginPath();ctx.moveTo(...points[0]);for(let i=1;i<points.length;i++)ctx.lineTo(...points[i]);};
+        path();ctx.lineTo(w-pad,h-pad);ctx.lineTo(pad,h-pad);ctx.closePath();
+        const gradient=ctx.createLinearGradient(0,expanded?20:12,0,h);gradient.addColorStop(0,expanded?'#4e61ff18':'#4e61ff0c');gradient.addColorStop(1,'#4e61ff00');ctx.fillStyle=gradient;ctx.fill();
+        path();ctx.strokeStyle='#4e61ff';ctx.lineWidth=expanded?2:1.7;ctx.lineJoin='round';ctx.lineCap='round';ctx.stroke();
+        if(expanded){const last=points[points.length-1];ctx.fillStyle='#4e61ff';ctx.beginPath();ctx.arc(last[0],last[1],3,0,Math.PI*2);ctx.fill();}
+        canvas.setAttribute('aria-label',`过去 60 秒 CPU 利用率趋势，当前 ${state.cpu.toFixed(1)}%`);
+      }
+      function paintCharts(){paintChart(spark);if($('#telemetry-dialog').open)paintChart(detail,true);}
+      function renderProcesses(){
+        const multiplier=state.cpu/25.4;
+        const rows=processData.map(item=>({...item,cpu:item.cpu*multiplier})).sort((a,b)=>state.sortDescending?b.cpu-a.cpu:a.cpu-b.cpu);
+        $('#process-rows').innerHTML=rows.map(item=>`<tr><td class="mono">${item.pid}</td><td class="mono">${item.name}</td><td class="mono">${item.cpu.toFixed(1)}%</td><td class="mono">${item.memory} MiB</td></tr>`).join('');
+      }
+      function render(){
+        all('[data-cpu]').forEach(el=>el.textContent=state.cpu.toFixed(1)+'%');
+        all('[data-load]').forEach(el=>el.textContent=state.load.toFixed(2));
+        all('[data-ram]').forEach(el=>el.textContent=state.ram);
+        all('[data-upload]').forEach(el=>el.textContent=state.upload.toFixed(1));
+        all('[data-download]').forEach(el=>el.textContent=state.download.toFixed(1));
+        $('[data-bar="cpu"]').style.setProperty('--value',state.cpu+'%');
+        $('[data-bar="ram"]').style.setProperty('--value',(state.ram/1024*100)+'%');
+        $('#cpu-meter').setAttribute('aria-valuenow',state.cpu.toFixed(1));
+        $('#ram-meter').setAttribute('aria-valuenow',String(state.ram));
+        const stamp=state.updated.toLocaleTimeString('zh-CN',{hour12:false});
+        all('[data-updated]').forEach(el=>el.textContent=(state.live?'更新于 ':'已暂停 · ')+stamp);
+        renderProcesses();paintCharts();
+      }
+      $('#live-toggle').addEventListener('click',()=>{
+        state.live=!state.live;
+        const button=$('#live-toggle');
+        button.setAttribute('aria-pressed',String(state.live));
+        button.setAttribute('aria-label',state.live?'暂停实时更新':'恢复实时更新');
+        button.title=state.live?'暂停实时更新':'恢复实时更新';
+        button.textContent=state.live?'live · 2s':'已暂停';
+        $('#update-announcement').textContent=state.live?'已恢复实时更新，每 2 秒更新一次。':'实时更新已暂停。';
+        render();
+      });
+      all('[data-open]').forEach(button=>button.addEventListener('click',()=>{
+        const dialog=document.getElementById(button.dataset.open);
+        dialog.showModal();
+        requestAnimationFrame(paintCharts);
+      }));
+      all('[data-close]').forEach(button=>button.addEventListener('click',()=>button.closest('dialog').close()));
+      all('dialog').forEach(dialog=>{
+        let beganOnBackdrop=false;
+        const outside=(event)=>{const r=dialog.getBoundingClientRect();return event.clientX<r.left||event.clientX>r.right||event.clientY<r.top||event.clientY>r.bottom;};
+        dialog.addEventListener('pointerdown',event=>{beganOnBackdrop=event.target===dialog&&outside(event);});
+        dialog.addEventListener('click',event=>{if(beganOnBackdrop&&event.target===dialog&&outside(event))dialog.close();beganOnBackdrop=false;});
+      });
+      $('#sort-processes').addEventListener('click',()=>{
+        state.sortDescending=!state.sortDescending;
+        $('#cpu-sort-header').setAttribute('aria-sort',state.sortDescending?'descending':'ascending');
+        $('#sort-processes').textContent=state.sortDescending?'CPU ↓':'CPU ↑';
+        $('#sort-processes').setAttribute('aria-label',state.sortDescending?'按 CPU 使用率升序排列':'按 CPU 使用率降序排列');
+        renderProcesses();
+      });
+      const resizeObserver=new ResizeObserver(paintCharts);resizeObserver.observe(spark);resizeObserver.observe(detail);
+      render();
+      setInterval(()=>{
+        if(!state.live)return;
+        state.tick++;
+        state.cpu=mockCycle[state.tick%mockCycle.length];
+        state.load=0.28+(state.cpu-25.4)*0.005;
+        state.ram=462+Math.round(Math.sin(state.tick/3)*5);
+        state.upload=7.9+Math.sin(state.tick/2)*0.4;
+        state.download=6.3+Math.sin(state.tick/3)*0.3;
+        state.updated=new Date();
+        samples.push(state.cpu);samples.shift();render();
+      },2000);
+    })();
+  </script>
+</body>
+</html>

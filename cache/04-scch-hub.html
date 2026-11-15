@@ -1,0 +1,507 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="light">
+  <meta name="theme-color" content="#fafaf9">
+  <title>UniOB · Cloudflare SCCH 边缘同址</title>
+  <style>
+    :root {
+      --canvas: #fafaf9;
+      --surface: #fff;
+      --subtle: #f8f8f6;
+      --ink: #242427;
+      --secondary: #62626b;
+      --muted: #808088;
+      --line: #e8e8e7;
+      --track: #eeeee9;
+      --blue: #4258ff;
+      --blue-soft: #f2f4ff;
+      --blue-line: #d1d7ff;
+      --green: #19964c;
+      --mono: "SFMono-Regular", Consolas, "Liberation Mono", monospace;
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "Microsoft YaHei", "PingFang SC", sans-serif;
+      font-synthesis: none;
+      color: var(--ink);
+      background: var(--canvas);
+    }
+
+    * { box-sizing: border-box; }
+    body { margin: 0; min-width: 320px; padding: 28px 22px; }
+    button { font: inherit; }
+    button, a { -webkit-tap-highlight-color: transparent; }
+    button:focus-visible, a:focus-visible {
+      outline: 2px solid var(--blue);
+      outline-offset: 4px;
+    }
+    button { color: inherit; }
+    [hidden] { display: none !important; }
+    svg { display: block; flex-shrink: 0; }
+    .mono { font-family: var(--mono); font-variant-numeric: tabular-nums; }
+    .hub {
+      max-width: 1220px;
+      margin: 0 auto;
+      padding: 22px 22px 0;
+      background: var(--surface);
+      border: 1px solid var(--blue-line);
+      border-radius: 14px;
+      box-shadow: 0 4px 18px -14px #3d467d26;
+    }
+    .heading-row { display: flex; align-items: center; gap: 12px; }
+    .hub-mark {
+      display: grid;
+      place-items: center;
+      width: 30px;
+      height: 30px;
+      flex-shrink: 0;
+      border: 1px solid #d0d7ff;
+      border-radius: 7px;
+      color: var(--blue);
+      background: #f5f6ff;
+    }
+    h1 { margin: 0; font-size: 19px; font-weight: 650; letter-spacing: -.5px; line-height: 1.5; }
+    .free-badge {
+      padding: 3px 7px;
+      border: 1px solid #d2d8ff;
+      border-radius: 5px;
+      background: var(--blue-soft);
+      color: var(--blue);
+      font-size: 12px;
+      font-weight: 600;
+      white-space: nowrap;
+      line-height: 1.25;
+    }
+    .status {
+      display: flex;
+      align-items: center;
+      gap: 7px;
+      margin-left: auto;
+      color: var(--secondary);
+      font-size: 13px;
+      white-space: nowrap;
+    }
+    .status-dot { width: 7px; height: 7px; background: var(--green); border-radius: 50%; box-shadow: 0 0 0 4px #19964c06; }
+    .intro { margin: 8px 0 18px; font-size: 14px; line-height: 1.75; color: var(--secondary); }
+    .intro code { font-size: 13px; letter-spacing: -.2px; }
+
+    .pipeline {
+      display: grid;
+      grid-template-columns: 1fr auto 1.2fr auto 1.55fr auto 1.25fr;
+      align-items: center;
+      gap: 16px;
+      min-height: 46px;
+      padding: 12px 14px;
+      background: var(--subtle);
+      border: 1px solid var(--line);
+      border-radius: 10px;
+    }
+    .pipeline-stage { color: var(--secondary); font-size: 13px; line-height: 1.4; white-space: nowrap; text-align: center; }
+    .pipeline-stage:first-child { color: var(--ink); text-align: left; font-weight: 600; }
+    .pipeline-stage:last-child { text-align: right; }
+    .pipeline-stage.highlight { color: var(--blue); font-weight: 600; }
+    .flow-arrow { color: #93939b; width: 14px; height: 14px; }
+
+    .scenarios { display: grid; grid-template-columns: repeat(3, 1fr); gap: 10px; margin-top: 16px; }
+    .scenario {
+      appearance: none;
+      position: relative;
+      width: 100%;
+      padding: 13px 14px 12px;
+      border: 1px solid var(--line);
+      border-radius: 10px;
+      background: var(--subtle);
+      text-align: left;
+      cursor: pointer;
+      transition: border-color 160ms ease, background 160ms ease;
+    }
+    .scenario:hover { border-color: #b8c1ff; background: #f8f9ff; }
+    .scenario[aria-pressed="true"] { border-color: #c9d0ff; background: #f7f8ff; }
+    .scenario[aria-pressed="true"]::after {
+      content: "";
+      position: absolute;
+      top: 15px;
+      right: 14px;
+      width: 5px;
+      height: 5px;
+      border-radius: 50%;
+      background: var(--blue);
+    }
+    .scenario-name { display: block; padding-right: 12px; color: var(--secondary); font-size: 13px; line-height: 1.5; }
+    .scenario-capacity { display: flex; align-items: baseline; gap: 8px; margin-top: 5px; font-family: var(--mono); font-size: 21px; font-weight: 600; letter-spacing: -.65px; line-height: 1.4; font-variant-numeric: tabular-nums; }
+    .scenario-capacity .sign { font-size: 17px; }
+    .scenario-capacity .unit { margin-left: 1px; font-family: inherit; font-size: 17px; }
+    .scenario-note { display: block; color: var(--muted); font-family: var(--mono); font-size: 12px; line-height: 1.6; }
+    .scenario-detail {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 16px;
+      margin-top: 9px;
+      padding: 10px 12px;
+      border: 1px solid #e0e4ff;
+      border-radius: 8px;
+      background: #fafbff;
+      color: var(--secondary);
+      font-size: 12px;
+      line-height: 1.7;
+    }
+    .scenario-detail strong { color: var(--blue); font-weight: 600; }
+    .icon-button { display: grid; place-items: center; width: 28px; height: 28px; padding: 0; border: 0; border-radius: 6px; background: transparent; color: var(--muted); cursor: pointer; flex-shrink: 0; }
+    .icon-button:hover { background: #e9ecff; color: var(--blue); }
+
+    .quotas { margin-top: 22px; }
+    .section-heading { display: flex; justify-content: space-between; align-items: baseline; gap: 12px; margin-bottom: 10px; }
+    h2 { margin: 0; font-size: 13px; font-weight: 550; line-height: 1.5; color: #54545d; }
+    .quota-summary { color: var(--muted); font-size: 12px; white-space: nowrap; }
+    .quota-summary b { color: var(--secondary); font-weight: 500; }
+    .quota-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 9px 10px; }
+    .quota {
+      width: 100%;
+      display: block;
+      padding: 10px 12px 9px;
+      border: 1px solid #eaeaea;
+      border-radius: 10px;
+      background: var(--surface);
+      text-align: left;
+      cursor: pointer;
+      transition: border-color 160ms ease, background 160ms ease;
+    }
+    .quota:hover { background: #fdfdff; border-color: #cbd2ff; }
+    .quota.wide { grid-column: 1 / -1; }
+    .quota-head { display: flex; align-items: baseline; justify-content: space-between; gap: 12px; min-height: 19px; }
+    .quota-name { color: #707078; font-size: 12px; line-height: 1.5; }
+    .quota-value { flex-shrink: 0; font-family: var(--mono); font-size: 12px; font-weight: 600; line-height: 1.5; font-variant-numeric: tabular-nums; white-space: nowrap; letter-spacing: -.28px; }
+    .quota-value .slash { color: #8c8c93; padding: 0 2px; font-weight: 400; }
+    .quota-value .per-day { color: var(--secondary); font-weight: 400; }
+    .quota-value .percent { display: inline-block; min-width: 48px; text-align: right; }
+    .progress { display: block; height: 3px; margin: 5px 0 6px; overflow: hidden; border-radius: 10px; background: var(--track); }
+    .progress-fill { display: block; width: var(--value); min-width: 3px; height: 100%; border-radius: inherit; background: var(--blue); }
+    .quota-note { display: block; color: var(--muted); font-size: 12px; line-height: 1.6; }
+
+    .footer { display: flex; align-items: center; justify-content: space-between; gap: 18px; margin-top: 20px; padding: 12px 0 13px; border-top: 1px solid #ededeb; color: var(--muted); }
+    .footer-note { margin: 0; font-size: 12px; line-height: 1.7; }
+    .endpoint { display: flex; align-items: center; gap: 8px; border: 0; border-radius: 5px; padding: 4px 0 4px 6px; color: #7c7c87; background: transparent; cursor: pointer; white-space: nowrap; }
+    .endpoint code { font-family: var(--mono); font-size: 12px; font-weight: 500; }
+    .endpoint svg { opacity: .55; }
+    .endpoint:hover { color: var(--blue); }
+    .endpoint:hover svg { opacity: 1; }
+    .toast { position: fixed; bottom: 24px; left: 50%; transform: translate(-50%, 12px); z-index: 20; padding: 11px 18px; border-radius: 9px; color: #fff; background: #27272c; box-shadow: 0 4px 24px #00000012; font-size: 13px; pointer-events: none; opacity: 0; transition: opacity 160ms, transform 160ms; }
+    .toast.visible { opacity: 1; transform: translate(-50%, 0); }
+
+    .quota-dialog { width: min(440px, calc(100vw - 32px)); padding: 25px; border: 1px solid var(--line); border-radius: 15px; color: var(--ink); background: var(--surface); box-shadow: 0 20px 80px #1d234429; }
+    .quota-dialog::backdrop { background: #1c224733; backdrop-filter: blur(3px); }
+    .dialog-top { display: flex; align-items: flex-start; justify-content: space-between; gap: 14px; }
+    .dialog-top h2 { padding-top: 3px; font-size: 16px; line-height: 1.6; font-weight: 600; color: var(--ink); }
+    .dialog-label { display: block; margin-bottom: 4px; color: var(--blue); font-size: 11px; letter-spacing: .08em; font-family: var(--mono); }
+    .dialog-number { display: flex; align-items: baseline; gap: 10px; margin: 25px 0 10px; }
+    .dialog-number strong { font-family: var(--mono); font-size: 36px; font-weight: 500; letter-spacing: -1.5px; }
+    .dialog-number span { color: var(--muted); font-size: 13px; }
+    .dialog-progress { height: 5px; margin: 0 0 9px; }
+    .dialog-scale { display: flex; justify-content: space-between; color: var(--muted); font-size: 11px; }
+    .dialog-stats { display: grid; grid-template-columns: 1fr 1fr; gap: 18px; margin: 24px 0 20px; }
+    .dialog-stats div + div { border-left: 1px solid var(--line); padding-left: 20px; }
+    .dialog-stats dt { margin-bottom: 6px; color: var(--muted); font-size: 12px; }
+    .dialog-stats dd { margin: 0; font-family: var(--mono); font-size: 15px; font-weight: 500; }
+    .dialog-description { margin: 0; padding-top: 15px; border-top: 1px solid var(--line); color: var(--secondary); font-size: 13px; line-height: 1.85; }
+    .dialog-snapshot { margin: 14px 0 0; color: #9999a0; font-size: 11px; }
+
+    @media (min-width: 1500px) { body { padding-top: 48px; } }
+    @media (max-width: 1080px) {
+      .hub { padding: 20px 18px 0; }
+      .quota-head { align-items: flex-start; flex-direction: column; gap: 4px; }
+      .quota-value { align-self: flex-end; }
+      .quota.wide .quota-head { flex-direction: row; align-items: baseline; }
+      .pipeline { gap: 10px; }
+      .pipeline-stage { font-size: 12px; }
+    }
+    @media (max-width: 760px) {
+      body { padding: 14px 12px; }
+      .hub { padding: 16px 14px 0; border-radius: 12px; }
+      .heading-row { flex-wrap: wrap; gap: 9px; }
+      .hub-mark { width: 27px; height: 27px; }
+      h1 { font-size: 16px; letter-spacing: -.45px; }
+      .free-badge { margin-left: 36px; font-size: 11px; }
+      .status { font-size: 11px; }
+      .intro { margin: 11px 0 15px; font-size: 12px; }
+      .intro code { font-size: 11px; }
+      .pipeline { grid-template-columns: 1fr auto 1fr; gap: 12px; padding: 13px; }
+      .pipeline-stage { text-align: left; white-space: normal; }
+      .pipeline-stage:last-child { text-align: left; }
+      .pipeline-stage.highlight { grid-column: 1; }
+      .pipeline .flow-arrow:nth-child(4) { display: none; }
+      .scenarios { gap: 7px; margin-top: 12px; }
+      .scenario { padding: 11px 10px; border-radius: 8px; }
+      .scenario-name { font-size: 11px; line-height: 1.6; }
+      .scenario-capacity { gap: 5px; font-size: 21px; }
+      .scenario-capacity .unit, .scenario-capacity .sign { font-size: 14px; }
+      .scenario-note { font-size: 10px; margin-top: 3px; }
+      .scenario[aria-pressed="true"]::after { top: 13px; right: 9px; width: 4px; height: 4px; }
+      .quotas { margin-top: 18px; }
+      .section-heading { align-items: center; }
+      h2 { font-size: 12px; }
+      .quota-summary { font-size: 10px; }
+      .quota-grid { grid-template-columns: 1fr; gap: 8px; }
+      .quota { padding: 11px 12px 10px; }
+      .quota-head, .quota.wide .quota-head { flex-direction: row; align-items: baseline; gap: 8px; }
+      .quota-name { font-size: 11px; }
+      .quota-value { font-size: 11px; letter-spacing: -.35px; }
+      .quota-note { font-size: 11px; }
+      .quota-value .percent { min-width: 42px; }
+      .footer { flex-direction: column; align-items: flex-start; gap: 5px; margin-top: 16px; padding: 12px 0 14px; }
+      .footer-note { font-size: 11px; }
+      .endpoint { padding-left: 0; }
+      .endpoint code { font-size: 11px; }
+    }
+    @media (max-width: 470px) {
+      .heading-row h1 { flex: 1; font-size: 14px; }
+      .free-badge { margin-left: 36px; }
+      .quota-head, .quota.wide .quota-head { flex-direction: column; gap: 4px; }
+      .quota-name { font-size: 12px; }
+      .quota-value { align-self: flex-end; font-size: 12px; }
+      .quota-summary { display: none; }
+      .scenario-name { padding-right: 2px; font-size: 10px; }
+      .scenario[aria-pressed="true"]::after { display: none; }
+      .scenario-note { font-size: 9px; }
+      .scenario-capacity { font-size: 20px; }
+      .scenario-capacity .unit { font-size: 12px; }
+      .scenario-detail { align-items: flex-start; }
+    }
+    @media (prefers-reduced-motion: reduce) { *, *::before, *::after { transition: none !important; scroll-behavior: auto !important; } }
+    @media (forced-colors: active) {
+      .scenario[aria-pressed="true"] { outline: 2px solid Highlight; }
+      .progress-fill { background: Highlight; forced-color-adjust: none; }
+      .status-dot { background: CanvasText; forced-color-adjust: none; }
+    }
+  </style>
+</head>
+<body>
+  <main class="hub" aria-labelledby="hub-title">
+    <header>
+      <div class="heading-row">
+        <span class="hub-mark" aria-hidden="true">
+          <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M20 17.5a3.5 3.5 0 0 0-1.7-6.56A5.5 5.5 0 0 0 7.8 9.2a4.2 4.2 0 0 0 .4 8.3H20Z"/></svg>
+        </span>
+        <h1 id="hub-title">方向 B · Cloudflare SCCH 边缘同址</h1>
+        <span class="free-badge">$0/mo 免费层锁死</span>
+        <span class="status"><span class="status-dot" aria-hidden="true"></span>当前运行中枢</span>
+      </div>
+      <p class="intro">单协调器 <code class="mono">FleetHubDO("global")</code> WebSocket 休眠 + 20:1 多路复用，无人看盘时零挂起计费。</p>
+    </header>
+
+    <div class="pipeline" role="group" aria-label="数据路径：uniob-agent，WSS 20 比 1 帧合并，DO Hibernation 96.4%，D1 Slab 每台每天 888 行">
+      <span class="pipeline-stage mono">uniob-agent</span>
+      <svg class="flow-arrow" aria-hidden="true" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 8h10m-4-4 4 4-4 4"/></svg>
+      <span class="pipeline-stage">WSS 20:1 帧合并</span>
+      <svg class="flow-arrow" aria-hidden="true" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 8h10m-4-4 4 4-4 4"/></svg>
+      <span class="pipeline-stage highlight mono">DO Hibernation (96.4%)</span>
+      <svg class="flow-arrow" aria-hidden="true" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 8h10m-4-4 4 4-4 4"/></svg>
+      <span class="pipeline-stage mono">D1 Slab (888 行/台/天)</span>
+    </div>
+
+    <section class="scenarios" aria-label="运行场景">
+      <button class="scenario" type="button" data-scenario="quiet" aria-pressed="true" aria-expanded="false" aria-controls="scenario-detail">
+        <span class="scenario-name">静默值守上限</span>
+        <span class="scenario-capacity"><span class="sign">≤</span>112<span class="unit">台</span></span>
+        <span class="scenario-note">5m 微批 · 0 GB-s 休眠</span>
+      </button>
+      <button class="scenario" type="button" data-scenario="daily" aria-pressed="false" aria-expanded="false" aria-controls="scenario-detail">
+        <span class="scenario-name">日常 2h 巡检</span>
+        <span class="scenario-capacity"><span class="sign">≤</span>75<span class="unit">台</span></span>
+        <span class="scenario-note">按需唤醒 · live 2s</span>
+      </button>
+      <button class="scenario" type="button" data-scenario="always" aria-pressed="false" aria-expanded="false" aria-controls="scenario-detail">
+        <span class="scenario-name">24×7 常开大屏</span>
+        <span class="scenario-capacity"><span class="sign">≤</span>16<span class="unit">台</span></span>
+        <span class="scenario-note">严格不越免费红线</span>
+      </button>
+    </section>
+    <div class="scenario-detail" id="scenario-detail" hidden>
+      <span id="scenario-description" role="status"></span>
+      <button class="icon-button" type="button" id="close-scenario" aria-label="收起场景说明"><svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" aria-hidden="true"><path d="m4 4 8 8m0-8-8 8"/></svg></button>
+    </div>
+
+    <section class="quotas" aria-labelledby="quota-title">
+      <div class="section-heading">
+        <h2 id="quota-title">Workers Free 7 维硬配额实时水位</h2>
+        <span class="quota-summary mono">DO 写入 <b>18.4k</b> / 100k</span>
+      </div>
+      <div class="quota-grid">
+        <button class="quota" type="button" data-quota="do-write" aria-haspopup="dialog" aria-label="查看 DO SQLite 行写入详情，18.4k / 100k 每天，18.4%">
+          <span class="quota-head"><span class="quota-name">DO SQLite 行写入 (Ring-TSDB)</span><span class="quota-value">18.4k <span class="slash">/</span> 100k <span class="per-day">/ 天</span> <span class="percent">(18.4%)</span></span></span>
+          <span class="progress" aria-hidden="true"><span class="progress-fill" style="--value:18.4%"></span></span>
+          <span class="quota-note">静默节点仅 888 行/天 (5m 微批 12-slot 压缩)，零 DELETE 环形覆写</span>
+        </button>
+        <button class="quota" type="button" data-quota="workers" aria-haspopup="dialog" aria-label="查看 Workers 边缘请求详情，4.2k / 100k 每天，4.2%">
+          <span class="quota-head"><span class="quota-name">Workers 边缘请求</span><span class="quota-value">4.2k <span class="slash">/</span> 100k <span class="per-day">/ 天</span> <span class="percent">(4.2%)</span></span></span>
+          <span class="progress" aria-hidden="true"><span class="progress-fill" style="--value:4.2%"></span></span>
+          <span class="quota-note">探针复用单条出站 WSS 443 长连接，几乎不消耗 HTTP 请求配额</span>
+        </button>
+        <button class="quota" type="button" data-quota="do-requests" aria-haspopup="dialog" aria-label="查看 Durable Object 请求详情，1.9k / 100k 每天，1.9%">
+          <span class="quota-head"><span class="quota-name">Durable Object 请求 (20:1 WS 折算)</span><span class="quota-value">1.9k <span class="slash">/</span> 100k <span class="per-day">/ 天</span> <span class="percent">(1.9%)</span></span></span>
+          <span class="progress" aria-hidden="true"><span class="progress-fill" style="--value:1.9%"></span></span>
+          <span class="quota-note">WebSocket 帧按 20:1 计费折算 + AutoResponse Pong 零唤醒计费</span>
+        </button>
+        <button class="quota" type="button" data-quota="duration" aria-haspopup="dialog" aria-label="查看 DO 存活计算时长详情，410 GB-s / 13,000 GB-s 每天，3.1%">
+          <span class="quota-head"><span class="quota-name">DO 存活计算时长 (WS Hibernation)</span><span class="quota-value">410 GB-s <span class="slash">/</span> 13,000 GB-s <span class="per-day">/ 天</span> <span class="percent">(3.1%)</span></span></span>
+          <span class="progress" aria-hidden="true"><span class="progress-fill" style="--value:3.1%"></span></span>
+          <span class="quota-note">无浏览器在线时 FleetHubDO 96.4% 时间处于深度休眠 (0 GB-s)</span>
+        </button>
+        <button class="quota" type="button" data-quota="do-read" aria-haspopup="dialog" aria-label="查看 DO SQLite 行读取详情，142k / 5.0M 每天，2.8%">
+          <span class="quota-head"><span class="quota-name">DO SQLite 行读取</span><span class="quota-value">142k <span class="slash">/</span> 5.0M <span class="per-day">/ 天</span> <span class="percent">(2.8%)</span></span></span>
+          <span class="progress" aria-hidden="true"><span class="progress-fill" style="--value:2.8%"></span></span>
+          <span class="quota-note">Welford 5m/1h 预聚合分片索引直读，单次面板打开仅扫描 ~120 行</span>
+        </button>
+        <button class="quota wide" type="button" data-quota="d1-write" aria-haspopup="dialog" aria-label="查看 D1 控制面写入详情，640 / 100k 每天，0.6%">
+          <span class="quota-head"><span class="quota-name">D1 控制面写入 (节点/规则/账本)</span><span class="quota-value">640 <span class="slash">/</span> 100k <span class="per-day">/ 天</span> <span class="percent">(0.6%)</span></span></span>
+          <span class="progress" aria-hidden="true"><span class="progress-fill" style="--value:0.6%"></span></span>
+          <span class="quota-note">仅配置变更与告警事件落盘 D1，高频遥测完全隔离在 DO 内</span>
+        </button>
+        <button class="quota" type="button" data-quota="d1-read" aria-haspopup="dialog" aria-label="查看 D1 控制面读取详情，12.8k / 5.0M 每天，0.3%">
+          <span class="quota-head"><span class="quota-name">D1 控制面读取</span><span class="quota-value">12.8k <span class="slash">/</span> 5.0M <span class="per-day">/ 天</span> <span class="percent">(0.3%)</span></span></span>
+          <span class="progress" aria-hidden="true"><span class="progress-fill" style="--value:0.3%"></span></span>
+          <span class="quota-note">FleetHubDO 内存热缓存配置，冷启动加载一次</span>
+        </button>
+      </div>
+    </section>
+
+    <footer class="footer">
+      <p class="footer-note">零服务器维护 · 天然抗母鸡断电 · 全球 Anycast 边缘接入</p>
+      <button class="endpoint" id="copy-endpoint" type="button" aria-label="复制端点 wss://ob.uniob.cloud/ws/agent" title="复制端点">
+        <code>wss://ob.uniob.cloud/ws/agent</code>
+        <svg width="13" height="13" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="5.5" y="5.5" width="8" height="8" rx="1.5"/><path d="M10.5 3.5v-1a1 1 0 0 0-1-1h-7a1 1 0 0 0-1 1v7a1 1 0 0 0 1 1h1"/></svg>
+      </button>
+    </footer>
+  </main>
+
+  <dialog class="quota-dialog" id="quota-dialog" aria-labelledby="dialog-title" aria-describedby="dialog-description">
+    <div class="dialog-top">
+      <div><span class="dialog-label">WORKERS FREE</span><h2 id="dialog-title"></h2></div>
+      <button class="icon-button" id="close-dialog" type="button" aria-label="关闭配额详情"><svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" aria-hidden="true"><path d="m4 4 8 8m0-8-8 8"/></svg></button>
+    </div>
+    <div class="dialog-number"><strong id="dialog-percent"></strong><span>免费配额已用</span></div>
+    <div class="progress dialog-progress" aria-hidden="true"><span class="progress-fill" id="dialog-progress"></span></div>
+    <div class="dialog-scale mono"><span>0%</span><span>100%</span></div>
+    <dl class="dialog-stats"><div><dt>每日用量</dt><dd id="dialog-usage"></dd></div><div><dt>每日限额</dt><dd id="dialog-limit"></dd></div></dl>
+    <p class="dialog-description" id="dialog-description"></p>
+    <p class="dialog-snapshot">参考图配额快照</p>
+  </dialog>
+  <div class="toast" id="toast" role="status" aria-live="polite"></div>
+
+  <script>
+    (() => {
+      'use strict';
+
+      const scenarioButtons = [...document.querySelectorAll('[data-scenario]')];
+      const scenarioDetail = document.getElementById('scenario-detail');
+      const scenarioDescription = document.getElementById('scenario-description');
+      const scenarioDescriptions = {
+        quiet: ['静默值守 · ≤ 112 台', '5m 微批写入；无人看盘时保持 WebSocket 休眠。'],
+        daily: ['日常巡检 · ≤ 75 台', '每日 2h 巡检窗口，按需唤醒，live 2s 刷新。'],
+        always: ['常开大屏 · ≤ 16 台', '24×7 在线观察，以免费配额边界约束规模。']
+      };
+
+      function selectScenario(button) {
+        const collapse = button.getAttribute('aria-expanded') === 'true';
+        scenarioButtons.forEach(item => {
+          item.setAttribute('aria-pressed', String(item === button));
+          item.setAttribute('aria-expanded', String(item === button && !collapse));
+        });
+        scenarioDetail.hidden = collapse;
+        if (!collapse) {
+          const [title, description] = scenarioDescriptions[button.dataset.scenario];
+          const label = document.createElement('strong');
+          label.textContent = title + '　';
+          scenarioDescription.replaceChildren(label, document.createTextNode(description));
+        }
+      }
+
+      scenarioButtons.forEach((button, index) => {
+        button.addEventListener('click', () => selectScenario(button));
+        button.addEventListener('keydown', event => {
+          let next;
+          if (event.key === 'ArrowRight') next = (index + 1) % scenarioButtons.length;
+          if (event.key === 'ArrowLeft') next = (index + scenarioButtons.length - 1) % scenarioButtons.length;
+          if (event.key === 'Home') next = 0;
+          if (event.key === 'End') next = scenarioButtons.length - 1;
+          if (next !== undefined) {
+            event.preventDefault();
+            scenarioButtons[next].focus();
+          }
+        });
+      });
+
+      document.getElementById('close-scenario').addEventListener('click', () => {
+        scenarioDetail.hidden = true;
+        const activeButton = scenarioButtons.find(button => button.getAttribute('aria-pressed') === 'true');
+        scenarioButtons.forEach(button => button.setAttribute('aria-expanded', 'false'));
+        activeButton.focus();
+      });
+
+      const quotaData = {
+        'do-write': { used: '18.4k 行', limit: '100k 行', percent: '18.4%' },
+        workers: { used: '4.2k 次', limit: '100k 次', percent: '4.2%' },
+        'do-requests': { used: '1.9k 次', limit: '100k 次', percent: '1.9%' },
+        duration: { used: '410 GB-s', limit: '13,000 GB-s', percent: '3.1%' },
+        'do-read': { used: '142k 行', limit: '5.0M 行', percent: '2.8%' },
+        'd1-write': { used: '640 行', limit: '100k 行', percent: '0.6%' },
+        'd1-read': { used: '12.8k 行', limit: '5.0M 行', percent: '0.3%' }
+      };
+      const dialog = document.getElementById('quota-dialog');
+      let dialogTrigger = null;
+      document.querySelectorAll('[data-quota]').forEach(button => {
+        button.addEventListener('click', () => {
+          const data = quotaData[button.dataset.quota];
+          dialogTrigger = button;
+          document.getElementById('dialog-title').textContent = button.querySelector('.quota-name').textContent;
+          document.getElementById('dialog-description').textContent = button.querySelector('.quota-note').textContent;
+          document.getElementById('dialog-percent').textContent = data.percent;
+          document.getElementById('dialog-usage').textContent = data.used;
+          document.getElementById('dialog-limit').textContent = data.limit;
+          document.getElementById('dialog-progress').style.setProperty('--value', data.percent);
+          dialog.showModal();
+        });
+      });
+      document.getElementById('close-dialog').addEventListener('click', () => dialog.close());
+      dialog.addEventListener('click', event => {
+        if (event.target !== dialog) return;
+        const rect = dialog.getBoundingClientRect();
+        if (event.clientX < rect.left || event.clientX > rect.right || event.clientY < rect.top || event.clientY > rect.bottom) dialog.close();
+      });
+      dialog.addEventListener('close', () => {
+        if (dialogTrigger) dialogTrigger.focus();
+      });
+
+      let toastTimer;
+      function toast(message) {
+        const notification = document.getElementById('toast');
+        clearTimeout(toastTimer);
+        notification.textContent = message;
+        notification.classList.add('visible');
+        toastTimer = setTimeout(() => notification.classList.remove('visible'), 2500);
+      }
+
+      async function copyEndpoint() {
+        const endpoint = 'wss://ob.uniob.cloud/ws/agent';
+        let copied = false;
+        if (navigator.clipboard && window.isSecureContext) {
+          try { await navigator.clipboard.writeText(endpoint); copied = true; } catch (_) { /* Try the local-file fallback below. */ }
+        }
+        if (!copied) {
+          const input = document.createElement('textarea');
+          input.value = endpoint;
+          input.setAttribute('readonly', '');
+          input.style.cssText = 'position:fixed;left:-9999px;top:0;opacity:0';
+          document.body.appendChild(input);
+          input.select();
+          try { copied = document.execCommand('copy'); } catch (_) { copied = false; }
+          input.remove();
+          document.getElementById('copy-endpoint').focus();
+        }
+        toast(copied ? '端点已复制' : '复制未完成，请选中端点手动复制');
+      }
+      document.getElementById('copy-endpoint').addEventListener('click', copyEndpoint);
+    })();
+  </script>
+</body>
+</html>

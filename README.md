@@ -19,6 +19,7 @@
 | **[🏗️ 架构演进与实现细节](./docs/ARCHITECTURE.md)** | v1 成本瓶颈复盘、SCCH 6 大降本机制、智能迁移协议与工程避坑清单 |
 | **[🔌 HTTP / WebSocket API 文档](./docs/API.md)** | 全量 REST 接口、Watchdog HMAC 心跳签名与 Agent/Client WS 线协议参考 |
 | **[📐 技术规范与 7 维度计费精算](./docs/SPEC.md)** | 数据结构、环形 TSDB 设计及 10 / 50 / 200 节点 7 维度成本核算 |
+| **[三网网络质量检测：功能新增与 Agent 交接](./docs/features/network-quality.md)** | 待实施规格：TCP 探测、节点配置、双后端接入、历史与验收标准 |
 | **[🤝 贡献指南](./CONTRIBUTING.md) · [🔒 安全策略](./SECURITY.md) · [📝 更新日志](./CHANGELOG.md)** | 本地构建校验、只读安全边界与版本发布说明 |
 
 ---
