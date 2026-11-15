@@ -147,6 +147,9 @@ jobs:
     name: Package SHA256SUMS & Publish Release
     needs: [build, build-web]
     runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      actions: write
 
     steps:
       - name: Download built artifacts
@@ -176,6 +179,7 @@ jobs:
           if-no-files-found: error
 
       - name: Publish GitHub Release
+        id: publish
         if: startsWith(github.ref, 'refs/tags/v') || (github.event_name == 'workflow_dispatch' && inputs.tag != '')
         uses: softprops/action-gh-release@v2
         with:
@@ -188,3 +192,10 @@ jobs:
             release-artifacts/uniob-hub-aarch64-unknown-linux-musl
             release-artifacts/uniob-web-dist.tar.gz
             release-artifacts/SHA256SUMS
+
+      - name: Deploy published release to Cloudflare
+        if: vars.ENABLE_CF_AUTO_DEPLOY == 'true' && steps.publish.outcome == 'success'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ startsWith(github.ref, 'refs/tags/v') && github.ref_name || inputs.tag }}
+        run: gh workflow run deploy-cloudflare.yml --repo "$GITHUB_REPOSITORY" --ref "$RELEASE_TAG"

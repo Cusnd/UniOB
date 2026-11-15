@@ -127,20 +127,22 @@ UniOB/
 
 ### 方式 2：通过 GitHub Actions 自动部署（`.github/workflows/deploy-cloudflare.yml`）
 
-Fork 本仓库后，可在 GitHub 仓库的 **Settings -> Secrets and variables -> Actions** 配置以下参数，无需在仓库中硬编码个人 ID，即可手动触发或在 push/release 时自动构建前端、下载最新 Release 探针并部署至 Cloudflare Workers：
+Fork 本仓库后，可在 GitHub 仓库的 **Settings -> Secrets and variables -> Actions** 配置以下参数，无需在仓库中硬编码个人 ID。部署工作流会构建前端、下载最新 Release 探针、执行 D1 数据库迁移并部署至 Cloudflare Workers：
 
 | 类型 | 名称 | 必填 | 说明 |
 | :--- | :--- | :---: | :--- |
 | **Secret** | `CLOUDFLARE_API_TOKEN` | ✅ | 拥有 Workers Scripts、D1、Workers Routes 权限的 Cloudflare API Token |
 | **Secret / Variable** | `CLOUDFLARE_ACCOUNT_ID` | ✅ | 您的 Cloudflare Account ID |
 | **Variable** | `CF_D1_DATABASE_ID` | ✅ | 已创建的 `uniob-meta` D1 数据库 UUID |
-| **Variable** | `ENABLE_CF_AUTO_DEPLOY` | 可选 | 设为 `true` 时在推送 `main` 或发布 Release 后自动触发部署（默认仅允许手动 `workflow_dispatch`） |
+| **Variable** | `ENABLE_CF_AUTO_DEPLOY` | 可选 | 设为 `true` 时，在 `main` 推送的 CI 成功后部署该提交，或在 Release 发布后部署（默认仅允许手动 `workflow_dispatch`） |
 | **Variable** | `CF_CUSTOM_DOMAIN` | 可选 | 自定义域名（如 `monitor.example.com`） |
 | **Variable** | `CF_WORKERS_DEV` | 可选 | `"true"` / `"false"`（配合 Zero Trust 时建议设为 `"false"`） |
 | **Variable** | `CF_AUTH_MODE` | 可选 | `"builtin"`（默认）或 `"cf_access"` |
 | **Variable** | `CF_ACCESS_TEAM_DOMAIN` | 可选 | Zero Trust Team 域名（如 `your-team.cloudflareaccess.com`） |
 | **Secret / Variable** | `CF_ACCESS_AUD` | 可选 | Cloudflare Access Application Audience (AUD) Tag |
 | **Variable** | `CF_ACCESS_ALLOWED_EMAILS` | 可选 | 允许访问的邮箱列表（英文逗号分隔，如 `admin@example.com`） |
+
+自动部署 `main` 时，工作流等待 CI 成功并检出同一提交。手动部署和 Release 发布触发仍可使用；当 `ENABLE_CF_AUTO_DEPLOY=true` 时，仓库的 Release 工作流会在发布成功后主动触发部署。
 
 ---
 
@@ -291,7 +293,7 @@ cargo zigbuild --manifest-path hub/Cargo.toml --release --target aarch64-unknown
 ### 3. GitHub Actions CI/CD 与自动发布
 
 - **持续集成（[.github/workflows/ci.yml](.github/workflows/ci.yml)）**：每次推送 `main` 或发起 PR 时自动校验 `scripts/*.tmpl` shell 语法、前后端 TypeScript 类型检查、`web/dist` 构建、Worker Miniflare 测试，以及 `agent` / `hub` 的 `cargo fmt --check`、`cargo clippy -D warnings` 与单元测试/E2E。
-- **自动发布（[.github/workflows/release.yml](.github/workflows/release.yml)）**：推送 `v*` 标签或手动触发即构建并发布 GitHub Release 产物：
+- **自动发布（[.github/workflows/release.yml](.github/workflows/release.yml)）**：推送 `v*` 标签或手动运行时填写 tag，即构建并发布 GitHub Release 产物；手动运行未填写 tag 时仅生成构建产物：
 
 ```bash
 git tag v0.1.0
@@ -299,6 +301,8 @@ git push origin v0.1.0
 ```
 
 工作流自动运行 `agent` 与 `hub` 测试，构建前端产物 `uniob-web-dist.tar.gz`，交叉编译 `uniob-agent-{x86_64,aarch64}-unknown-linux-musl`（强制校验 `<= 2,621,440` 字节）与 `uniob-hub-{x86_64,aarch64}-unknown-linux-musl`，并生成 `SHA256SUMS` 一并发布。
+
+启用 `ENABLE_CF_AUTO_DEPLOY` 后，发布成功会继续触发 Cloudflare 部署。日常推送 `main` 则等待该提交的 CI 成功后自动部署，无需创建 Release。
 
 ### 4. Linux 被控节点一键安装 / 升级 / 卸载
 

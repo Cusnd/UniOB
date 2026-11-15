@@ -97,13 +97,15 @@ Fork the repo and configure **Settings -> Secrets and variables -> Actions** so 
 | **Secret** | `CLOUDFLARE_API_TOKEN` | Yes | Cloudflare API Token with Workers Scripts, D1, and Workers Routes permissions |
 | **Secret / Variable** | `CLOUDFLARE_ACCOUNT_ID` | Yes | Your Cloudflare Account ID |
 | **Variable** | `CF_D1_DATABASE_ID` | Yes | UUID of your `uniob-meta` D1 database |
-| **Variable** | `ENABLE_CF_AUTO_DEPLOY` | Optional | Set to `true` to auto-deploy on `main` pushes and published Releases (otherwise `workflow_dispatch` only) |
+| **Variable** | `ENABLE_CF_AUTO_DEPLOY` | Optional | Set to `true` to deploy a `main` push after CI succeeds for that commit, or after a Release is published (otherwise `workflow_dispatch` only) |
 | **Variable** | `CF_CUSTOM_DOMAIN` | Optional | Custom domain hostname (e.g. `monitor.example.com`) |
 | **Variable** | `CF_WORKERS_DEV` | Optional | `"true"` or `"false"` (set `"false"` when gating with Zero Trust Access) |
 | **Variable** | `CF_AUTH_MODE` | Optional | `"builtin"` (default) or `"cf_access"` |
 | **Variable** | `CF_ACCESS_TEAM_DOMAIN` | Optional | Zero Trust team domain (`your-team.cloudflareaccess.com`) |
 | **Secret / Variable** | `CF_ACCESS_AUD` | Optional | Access Application Audience (AUD) tag |
 | **Variable** | `CF_ACCESS_ALLOWED_EMAILS` | Optional | Comma-separated allowlist emails (e.g. `admin@example.com`) |
+
+Automatic deployments of `main` wait for CI to succeed and check out the same commit. Manual deployment and published Release triggers remain available. When `ENABLE_CF_AUTO_DEPLOY=true`, the Release workflow explicitly dispatches deployment after publishing successfully. Deployment builds the web assets, downloads the latest Release binaries, applies D1 migrations, and deploys the Worker.
 
 ---
 
@@ -159,6 +161,8 @@ Pushing any `v*` tag triggers [.github/workflows/release.yml](./.github/workflow
 git tag v0.1.0
 git push origin v0.1.0
 ```
+
+You can also run the Release workflow manually with a tag; leaving the tag empty only builds artifacts. When `ENABLE_CF_AUTO_DEPLOY=true`, successful publication triggers Cloudflare deployment. Regular `main` pushes deploy after CI succeeds for that commit, without requiring a Release.
 
 ### Installing `uniob-agent` on a Monitored Linux Server
 
