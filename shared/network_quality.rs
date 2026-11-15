@@ -3,26 +3,52 @@
 
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
-use std::collections::{BTreeMap, HashSet, VecDeque};
+use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 use std::net::{Ipv4Addr, SocketAddr, TcpStream, ToSocketAddrs};
 use std::sync::{
-    atomic::{AtomicBool, Ordering},
+    atomic::{AtomicBool, AtomicU64, Ordering},
     mpsc, Arc, Mutex,
 };
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
-pub const IDS: [&str; 3] = ["ct", "cu", "cm"];
+pub const MAX_TARGETS: usize = 8;
 pub const MAX_POINTS: usize = 270;
-const INTERVAL: Duration = Duration::from_secs(20);
+pub const MIN_INTERVAL_SEC: u16 = 10;
+pub const MAX_INTERVAL_SEC: u16 = 300;
+pub const DEFAULT_INTERVAL_SEC: u16 = 20;
 const BUDGET: Duration = Duration::from_millis(1500);
+
+fn default_port() -> u16 {
+    80
+}
+
+fn default_interval_sec() -> u16 {
+    DEFAULT_INTERVAL_SEC
+}
+
+fn is_default_interval_sec(v: &u16) -> bool {
+    *v == DEFAULT_INTERVAL_SEC
+}
+
+pub fn target_sort_key(id: &str) -> (u8, &str) {
+    let rank = match id {
+        "ct" => 0,
+        "cu" => 1,
+        "cm" => 2,
+        _ => 3,
+    };
+    (rank, id)
+}
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Target {
     pub id: String,
     pub enabled: bool,
     pub label: String,
-    pub region: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub region: Option<String>,
     pub host: String,
+    #[serde(default = "default_port")]
     pub port: u16,
     pub address_family: String,
 }
@@ -30,13 +56,18 @@ pub struct Target {
 #[serde(deny_unknown_fields)]
 pub struct Config {
     pub enabled: bool,
+    #[serde(
+        default = "default_interval_sec",
+        skip_serializing_if = "is_default_interval_sec"
+    )]
+    pub interval_sec: u16,
     pub targets: Vec<Target>,
 }
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct NodeOverride {
     pub mode: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub config: Option<Config>,
 }
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -51,6 +82,11 @@ pub struct Control {
     pub schema_version: u8,
     pub config_id: String,
     pub enabled: bool,
+    #[serde(
+        default = "default_interval_sec",
+        skip_serializing_if = "is_default_interval_sec"
+    )]
+    pub interval_sec: u16,
     pub targets: Vec<ControlTarget>,
 }
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -131,14 +167,14 @@ pub struct QueryPoint {
 pub fn default_config() -> Config {
     Config {
         enabled: false,
-        targets: IDS
-            .iter()
-            .zip(["电信", "联通", "移动"])
+        interval_sec: DEFAULT_INTERVAL_SEC,
+        targets: [("ct", "电信"), ("cu", "联通"), ("cm", "移动")]
+            .into_iter()
             .map(|(id, label)| Target {
-                id: (*id).into(),
+                id: id.into(),
                 enabled: true,
                 label: label.into(),
-                region: "广东".into(),
+                region: Some("广东".into()),
                 host: format!("gd-{id}-v4.ip.zstaticcdn.com"),
                 port: 80,
                 address_family: "ipv4".into(),
@@ -146,7 +182,7 @@ pub fn default_config() -> Config {
             .collect(),
     }
 }
-fn allowed(value: &Value, keys: &[&str]) -> Result<(), String> {
+fn reject_unknown_keys(value: &Value, keys: &[&str]) -> Result<(), String> {
     let obj = value.as_object().ok_or("Expected an object")?;
     if obj.keys().any(|k| !keys.contains(&k.as_str())) {
         return Err("Unknown network quality field".into());
@@ -154,11 +190,58 @@ fn allowed(value: &Value, keys: &[&str]) -> Result<(), String> {
     Ok(())
 }
 fn short_text(value: &str, max: usize) -> Result<String, String> {
+    if value.chars().any(char::is_control) {
+        return Err("Invalid network quality text".into());
+    }
     let s = value.trim();
-    if s.is_empty() || s.chars().count() > max || value.chars().any(char::is_control) {
+    if s.is_empty() || s.chars().count() > max {
         return Err("Invalid network quality text".into());
     }
     Ok(s.into())
+}
+fn optional_short_text(value: Option<&str>, max: usize) -> Result<Option<String>, String> {
+    let Some(raw) = value else {
+        return Ok(None);
+    };
+    if raw.chars().any(char::is_control) {
+        return Err("Invalid network quality text".into());
+    }
+    let s = raw.trim();
+    if s.is_empty() {
+        return Ok(None);
+    }
+    if s.chars().count() > max {
+        return Err("Invalid network quality text".into());
+    }
+    Ok(Some(s.into()))
+}
+fn valid_target_id(id: &str) -> bool {
+    let bytes = id.as_bytes();
+    !bytes.is_empty()
+        && bytes.len() <= 24
+        && (bytes[0].is_ascii_lowercase() || bytes[0].is_ascii_digit())
+        && bytes[1..]
+            .iter()
+            .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || *b == b'_' || *b == b'-')
+}
+fn validate_host(raw: &str) -> Result<String, String> {
+    let host = short_text(raw, 253)?.to_ascii_lowercase();
+    if host.bytes().all(|b| b.is_ascii_digit() || b == b'.') {
+        if !host.parse::<Ipv4Addr>().is_ok_and(is_public_ipv4) {
+            return Err("Target must be a public IPv4 address".into());
+        }
+    } else if !host.contains('.')
+        || !host.split('.').all(|p| {
+            !p.is_empty()
+                && p.len() <= 63
+                && p.as_bytes()[0].is_ascii_alphanumeric()
+                && p.as_bytes()[p.len() - 1].is_ascii_alphanumeric()
+                && p.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-')
+        })
+    {
+        return Err("Invalid target hostname".into());
+    }
+    Ok(host)
 }
 pub fn is_public_ipv4(ip: Ipv4Addr) -> bool {
     let [a, b, c, _] = ip.octets();
@@ -175,71 +258,110 @@ pub fn is_public_ipv4(ip: Ipv4Addr) -> bool {
         && !(a == 198 && (b == 18 || b == 19 || (b == 51 && c == 100)))
         && !(a == 203 && b == 0 && c == 113)
 }
-pub fn parse_target(v: &Value) -> Result<Target, String> {
-    allowed(
-        v,
-        &[
-            "id",
-            "enabled",
-            "label",
-            "region",
-            "host",
-            "port",
-            "address_family",
-        ],
-    )?;
-    let mut t: Target = serde_json::from_value(v.clone()).map_err(|_| "Invalid network target")?;
-    if !IDS.contains(&t.id.as_str()) || t.address_family != "ipv4" || t.port == 0 {
+pub fn normalize_target(mut t: Target) -> Result<Target, String> {
+    if !valid_target_id(&t.id) || t.address_family != "ipv4" || t.port == 0 {
         return Err("Invalid target identity, port or address family".into());
     }
-    t.label = short_text(&t.label, 64)?;
-    t.region = short_text(&t.region, 64)?;
-    t.host = short_text(&t.host, 253)?.to_ascii_lowercase();
-    if t.host.bytes().all(|b| b.is_ascii_digit() || b == b'.') {
-        if !t.host.parse::<Ipv4Addr>().is_ok_and(is_public_ipv4) {
-            return Err("Target must be a public IPv4 address".into());
-        }
-    } else if !t.host.contains('.')
-        || !t.host.split('.').all(|p| {
-            !p.is_empty()
-                && p.len() <= 63
-                && p.as_bytes()[0].is_ascii_alphanumeric()
-                && p.as_bytes()[p.len() - 1].is_ascii_alphanumeric()
-                && p.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-')
-        })
-    {
-        return Err("Invalid target hostname".into());
-    }
+    t.label = short_text(&t.label, 32)?;
+    t.region = optional_short_text(t.region.as_deref(), 64)?;
+    t.host = validate_host(&t.host)?;
     Ok(t)
 }
-pub fn parse_config(v: &Value) -> Result<Config, String> {
-    allowed(v, &["enabled", "targets"])?;
-    let enabled = v["enabled"].as_bool().ok_or("Missing enabled")?;
-    let values = v["targets"]
-        .as_array()
-        .filter(|v| v.len() == 3)
-        .ok_or("Expected three target slots")?;
-    let mut targets: Vec<Target> = values.iter().map(parse_target).collect::<Result<_, _>>()?;
-    targets.sort_by_key(|t| IDS.iter().position(|id| *id == t.id).unwrap());
-    if targets.iter().map(|t| &t.id).collect::<HashSet<_>>().len() != 3 {
-        return Err("Duplicate target slot".into());
+pub fn normalize_config(mut c: Config) -> Result<Config, String> {
+    if !(MIN_INTERVAL_SEC..=MAX_INTERVAL_SEC).contains(&c.interval_sec) {
+        return Err("Invalid probe interval".into());
     }
-    Ok(Config { enabled, targets })
+    if !(1..=MAX_TARGETS).contains(&c.targets.len()) {
+        return Err("Expected 1 to 8 targets".into());
+    }
+    let mut normalized = Vec::with_capacity(c.targets.len());
+    let mut seen = HashSet::with_capacity(c.targets.len());
+    for target in c.targets {
+        let t = normalize_target(target)?;
+        if !seen.insert(t.id.clone()) {
+            return Err("Duplicate target id".into());
+        }
+        normalized.push(t);
+    }
+    normalized.sort_by(|a, b| target_sort_key(&a.id).cmp(&target_sort_key(&b.id)));
+    c.targets = normalized;
+    Ok(c)
+}
+fn reject_unknown_target_keys(v: &Value, allow_revision: bool) -> Result<(), String> {
+    if allow_revision {
+        reject_unknown_keys(
+            v,
+            &[
+                "id",
+                "enabled",
+                "label",
+                "region",
+                "host",
+                "port",
+                "address_family",
+                "target_revision",
+            ],
+        )
+    } else {
+        reject_unknown_keys(
+            v,
+            &[
+                "id",
+                "enabled",
+                "label",
+                "region",
+                "host",
+                "port",
+                "address_family",
+            ],
+        )
+    }
+}
+pub fn parse_target(v: &Value) -> Result<Target, String> {
+    reject_unknown_target_keys(v, false)?;
+    let t: Target = serde_json::from_value(v.clone()).map_err(|_| "Invalid network target")?;
+    normalize_target(t)
+}
+pub fn parse_config(v: &Value) -> Result<Config, String> {
+    let raw_targets = v
+        .as_object()
+        .and_then(|o| o.get("targets"))
+        .and_then(|t| t.as_array())
+        .ok_or("Expected target array")?;
+    for target in raw_targets {
+        reject_unknown_target_keys(target, false)?;
+    }
+    let c: Config = serde_json::from_value(v.clone()).map_err(|_| "Invalid network config")?;
+    normalize_config(c)
 }
 pub fn parse_override(v: &Value) -> Result<NodeOverride, String> {
-    allowed(v, &["mode", "config"])?;
-    let mode = v["mode"].as_str().ok_or("Missing mode")?;
-    let config = if mode == "custom" {
-        Some(parse_config(&v["config"])?)
-    } else if (mode == "inherit" || mode == "off") && v.get("config").is_none() {
-        None
-    } else {
-        return Err("Invalid node network mode".into());
-    };
-    Ok(NodeOverride {
-        mode: mode.into(),
-        config,
-    })
+    let o: NodeOverride =
+        serde_json::from_value(v.clone()).map_err(|_| "Invalid node network mode")?;
+    match o.mode.as_str() {
+        "custom" => {
+            let Some(cfg) = o.config else {
+                return Err("Missing custom config".into());
+            };
+            if let Some(targets) = v
+                .get("config")
+                .and_then(|c| c.get("targets"))
+                .and_then(|t| t.as_array())
+            {
+                for target in targets {
+                    reject_unknown_target_keys(target, false)?;
+                }
+            }
+            Ok(NodeOverride {
+                mode: o.mode,
+                config: Some(normalize_config(cfg)?),
+            })
+        }
+        "inherit" | "off" if v.get("config").is_none() => Ok(NodeOverride {
+            mode: o.mode,
+            config: None,
+        }),
+        _ => Err("Invalid node network mode".into()),
+    }
 }
 fn target_array(t: &Target) -> Value {
     json!([
@@ -256,24 +378,29 @@ pub fn target_revision(t: &Target) -> String {
     crate::crypto::sha256_hex(target_array(t).to_string().as_bytes())
 }
 pub fn make_control(c: &Config) -> Control {
+    let mut targets = c.targets.clone();
+    targets.sort_by(|a, b| target_sort_key(&a.id).cmp(&target_sort_key(&b.id)));
+    let target_arrays: Vec<Value> = targets.iter().map(target_array).collect();
+    let config_input = if c.interval_sec == DEFAULT_INTERVAL_SEC {
+        json!(["network_quality_v1", c.enabled, target_arrays])
+    } else {
+        json!([
+            "network_quality_v1",
+            c.enabled,
+            target_arrays,
+            c.interval_sec
+        ])
+    };
     Control {
         schema_version: 1,
-        config_id: crate::crypto::sha256_hex(
-            json!([
-                "network_quality_v1",
-                c.enabled,
-                c.targets.iter().map(target_array).collect::<Vec<_>>()
-            ])
-            .to_string()
-            .as_bytes(),
-        ),
+        config_id: crate::crypto::sha256_hex(config_input.to_string().as_bytes()),
         enabled: c.enabled,
-        targets: c
-            .targets
-            .iter()
+        interval_sec: c.interval_sec,
+        targets: targets
+            .into_iter()
             .map(|t| ControlTarget {
-                target: t.clone(),
-                target_revision: target_revision(t),
+                target_revision: target_revision(&t),
+                target: t,
             })
             .collect(),
     }
@@ -287,29 +414,28 @@ pub fn effective_control(global: &Config, node: &NodeOverride) -> Result<Control
     if node.mode == "off" {
         config.enabled = false;
     }
-    Ok(make_control(&parse_config(
-        &serde_json::to_value(config).map_err(|e| e.to_string())?,
-    )?))
+    Ok(make_control(&normalize_config(config)?))
 }
 pub fn parse_control(v: &Value) -> Result<Control, String> {
-    allowed(v, &["schema_version", "config_id", "enabled", "targets"])?;
+    let raw_targets = v
+        .as_object()
+        .and_then(|o| o.get("targets"))
+        .and_then(|t| t.as_array())
+        .ok_or("Invalid control targets")?;
+    for target in raw_targets {
+        reject_unknown_target_keys(target, true)?;
+    }
     let c: Control = serde_json::from_value(v.clone()).map_err(|_| "Invalid network control")?;
-    let targets = v["targets"]
-        .as_array()
-        .ok_or("Invalid control targets")?
-        .iter()
-        .map(|t| {
-            let mut t = t.clone();
-            t.as_object_mut()
-                .ok_or("Invalid control target")?
-                .remove("target_revision");
-            Ok(t)
-        })
-        .collect::<Result<Vec<_>, String>>()?;
-    let normalized = make_control(&parse_config(
-        &json!({"enabled":c.enabled,"targets":targets}),
-    )?);
-    if c.schema_version != 1 || c != normalized {
+    if c.schema_version != 1 {
+        return Err("Network control schema mismatch".into());
+    }
+    let cfg = normalize_config(Config {
+        enabled: c.enabled,
+        interval_sec: c.interval_sec,
+        targets: c.targets.iter().map(|t| t.target.clone()).collect(),
+    })?;
+    let normalized = make_control(&cfg);
+    if c != normalized {
         return Err("Network control hash or schema mismatch".into());
     }
     Ok(c)
@@ -327,7 +453,7 @@ pub fn validate_payload(v: &Value, now: u64) -> Result<Payload, String> {
         return Err("Oversized network payload".into());
     }
     // Aggregates are ignored, but their envelope is bounded. The store rebuilds them from raw data.
-    if v["latest"].as_array().is_none_or(|a| a.len() > 3) {
+    if v["latest"].as_array().is_none_or(|a| a.len() > MAX_TARGETS) {
         return Err("Invalid network latest array".into());
     }
     let mut sanitized = v.clone();
@@ -342,7 +468,18 @@ pub fn validate_payload(v: &Value, now: u64) -> Result<Payload, String> {
         return Err("Invalid network payload header".into());
     }
     for q in &mut p.points {
-        q.target = parse_target(&serde_json::to_value(&q.target).map_err(|e| e.to_string())?)?;
+        q.target = normalize_target(std::mem::replace(
+            &mut q.target,
+            Target {
+                id: String::new(),
+                enabled: false,
+                label: String::new(),
+                region: None,
+                host: String::new(),
+                port: 80,
+                address_family: String::new(),
+            },
+        ))?;
         let good_ip = q
             .remote_ip
             .as_ref()
@@ -394,11 +531,14 @@ fn window<'a>(points: &'a [Point], end: &Point) -> Vec<&'a Point> {
     w
 }
 pub fn latest_from_points(points: &[Point]) -> Vec<Latest> {
-    IDS.iter()
+    let mut ids: Vec<&str> = points.iter().map(|p| p.target_id.as_str()).collect();
+    ids.sort_by_key(|id| target_sort_key(id));
+    ids.dedup();
+    ids.into_iter()
         .filter_map(|id| {
             points
                 .iter()
-                .filter(|p| p.target_id == *id)
+                .filter(|p| p.target_id == id)
                 .max_by_key(|p| (p.ts, p.round_seq))
                 .map(|p| {
                     let w = window(points, p);
@@ -504,24 +644,27 @@ fn wall_time() -> u64 {
 }
 #[derive(Clone)]
 struct ProbeJob {
-    slot: usize,
+    target_id: String,
     sequence: u64,
     generation: u64,
+    cancel_epoch: Arc<AtomicU64>,
     target: ControlTarget,
     cancelled: Arc<AtomicBool>,
+    interval: Duration,
 }
 enum Outcome {
     Measured(ProbeResult, Option<f64>, Option<Ipv4Addr>),
     Blocked,
     Cancelled,
 }
-#[allow(clippy::large_enum_variant)] // Fixed 12-slot channel; avoid a heap allocation per sample.
+#[allow(clippy::large_enum_variant)]
 enum ProbeEvent {
-    Started(usize, u64, Instant),
-    Resolved(usize, u64),
-    Finished(ProbeJob, Outcome, u64),
+    Started(String, u64, Instant),
+    Resolved(String, u64),
+    Finished(usize, ProbeJob, Outcome, u64),
 }
 struct ActiveJob {
+    worker_idx: usize,
     job: ProbeJob,
     started: Option<Instant>,
     dns_pending: bool,
@@ -533,27 +676,52 @@ struct Segment {
     id: String,
     ip: Option<Ipv4Addr>,
 }
+struct QueuedPoint {
+    point: Point,
+    serialized_len: usize,
+}
 struct RuntimeState {
     control: Option<Control>,
     negotiated: bool,
     config_error: Option<String>,
-    target_errors: [Option<String>; 3],
-    generations: [u64; 3],
-    queue: VecDeque<Point>,
+    target_errors: HashMap<String, String>,
+    generations: HashMap<String, Arc<AtomicU64>>,
+    queue: VecDeque<QueuedPoint>,
     recent: VecDeque<Point>,
     latest: Vec<Latest>,
     dropped: u64,
     round: u64,
     segment_counter: u64,
     session: String,
-    segments: [Segment; 3],
+    segments: HashMap<String, Segment>,
 }
 impl RuntimeState {
+    fn generation_for(&mut self, id: &str) -> Arc<AtomicU64> {
+        self.generations
+            .entry(id.to_owned())
+            .or_insert_with(|| Arc::new(AtomicU64::new(0)))
+            .clone()
+    }
+    fn bump_generation(&mut self, id: &str) {
+        self.generation_for(id).fetch_add(1, Ordering::AcqRel);
+    }
+    fn current_generation(&self, id: &str) -> u64 {
+        self.generations
+            .get(id)
+            .map_or(0, |g| g.load(Ordering::Acquire))
+    }
+    fn refresh_config_error(&mut self) {
+        self.config_error = self
+            .target_errors
+            .iter()
+            .min_by_key(|(id, _)| target_sort_key(id))
+            .map(|(_, msg)| msg.clone());
+    }
     fn trim(&mut self, now: u64) {
         while self
             .queue
             .front()
-            .is_some_and(|p| p.ts < now.saturating_sub(1800))
+            .is_some_and(|p| p.point.ts < now.saturating_sub(1800))
             || self.queue.len() > MAX_POINTS
         {
             self.queue.pop_front();
@@ -561,7 +729,7 @@ impl RuntimeState {
         }
     }
     fn complete(&mut self, job: &ProbeJob, outcome: Outcome, ts: u64) {
-        if job.generation != self.generations[job.slot]
+        if job.generation != self.current_generation(&job.target_id)
             || !self.control.as_ref().is_some_and(|c| c.enabled)
         {
             return;
@@ -569,18 +737,18 @@ impl RuntimeState {
         let (result, connect_ms, ip) = match outcome {
             Outcome::Measured(result, ms, ip) => (result, ms, ip),
             Outcome::Blocked => {
-                self.target_errors[job.slot] = Some(format!(
-                    "{}: resolved address blocked",
-                    job.target.target.id
-                ));
-                self.config_error = self.target_errors.iter().find_map(Clone::clone);
+                self.target_errors.insert(
+                    job.target_id.clone(),
+                    format!("{}: resolved address blocked", job.target_id),
+                );
+                self.refresh_config_error();
                 return;
             }
             Outcome::Cancelled => return,
         };
-        self.target_errors[job.slot] = None;
-        self.config_error = self.target_errors.iter().find_map(Clone::clone);
-        let segment = &mut self.segments[job.slot];
+        self.target_errors.remove(&job.target_id);
+        self.refresh_config_error();
+        let segment = self.segments.entry(job.target_id.clone()).or_default();
         if segment.revision != job.target.target_revision
             || (segment.ip.is_some() && ip.is_some() && segment.ip != ip)
             || segment.id.is_empty()
@@ -588,20 +756,23 @@ impl RuntimeState {
             self.segment_counter += 1;
             *segment = Segment {
                 revision: job.target.target_revision.clone(),
-                id: format!("{}:{}:{}", self.session, job.slot, self.segment_counter),
+                id: format!(
+                    "{}:{}:{}",
+                    self.session, job.target_id, self.segment_counter
+                ),
                 ip,
             };
         } else if ip.is_some() {
             segment.ip = ip;
         }
         let point = Point {
-            sample_id: format!("{}:{}:{}", self.session, job.sequence, job.slot),
+            sample_id: format!("{}:{}:{}", self.session, job.sequence, job.target_id),
             round_seq: job.sequence,
             // A different target may have changed while this attempt was in
             // flight. The generation check above proves this target is still
             // valid; acknowledge its measurement under the current control.
             config_id: self.control.as_ref().unwrap().config_id.clone(),
-            target_id: job.target.target.id.clone(),
+            target_id: job.target_id.clone(),
             target_revision: job.target.target_revision.clone(),
             segment_id: segment.id.clone(),
             ts,
@@ -610,7 +781,11 @@ impl RuntimeState {
             remote_ip: ip.map(|ip| ip.to_string()),
             target: job.target.target.clone(),
         };
-        self.queue.push_back(point.clone());
+        let serialized_len = serde_json::to_vec(&point).map_or(usize::MAX, |v| v.len());
+        self.queue.push_back(QueuedPoint {
+            point: point.clone(),
+            serialized_len,
+        });
         self.recent.push_back(point);
         // Keep six attempts per target/segment independently of the transmission queue.
         let end = self.recent.back().unwrap().clone();
@@ -625,13 +800,12 @@ impl RuntimeState {
     }
 }
 
-/// Four bounded background threads at most: one scheduler and one resolver/connector
-/// per target. A stalled system resolver occupies its existing worker; later rounds
-/// skip that target until it returns. No per-attempt thread or external process exists.
+/// Bounded background probe runtime: one scheduler and a lazily-grown, capped pool of
+/// resolver/connector workers (at most 2 * MAX_TARGETS threads). A stalled system resolver
+/// occupies its worker; later rounds skip that target until it returns.
 pub struct ProbeRuntime {
     state: Arc<Mutex<RuntimeState>>,
     stop: Arc<AtomicBool>,
-    generation: Arc<[std::sync::atomic::AtomicU64; 3]>,
 }
 impl ProbeRuntime {
     pub fn new(node_id: &str) -> Self {
@@ -647,8 +821,8 @@ impl ProbeRuntime {
             control: None,
             negotiated: false,
             config_error: None,
-            target_errors: [None, None, None],
-            generations: [0; 3],
+            target_errors: HashMap::new(),
+            generations: HashMap::new(),
             queue: VecDeque::new(),
             recent: VecDeque::new(),
             latest: vec![],
@@ -656,29 +830,22 @@ impl ProbeRuntime {
             round: 0,
             segment_counter: 0,
             session,
-            segments: std::array::from_fn(|_| Segment::default()),
+            segments: HashMap::new(),
         }));
         let stop = Arc::new(AtomicBool::new(false));
-        let generation = Arc::new(std::array::from_fn(|_| {
-            std::sync::atomic::AtomicU64::new(0)
-        }));
         let digest = crate::crypto::sha256_hex(node_id.as_bytes());
         let offset =
             Duration::from_millis(u64::from_str_radix(&digest[..8], 16).unwrap_or(0) % 2001);
-        let (s, quit, g) = (state.clone(), stop.clone(), generation.clone());
+        let (s, quit) = (state.clone(), stop.clone());
         if std::thread::Builder::new()
             .name("uniob-nq".into())
             .stack_size(128 * 1024)
-            .spawn(move || run_probes(s, quit, g, offset))
+            .spawn(move || run_probes(s, quit, offset))
             .is_err()
         {
             state.lock().unwrap().config_error = Some("probe executor unavailable".into());
         }
-        Self {
-            state,
-            stop,
-            generation,
-        }
+        Self { state, stop }
     }
     /// `first` means the first ctrl on this physical connection. Missing configuration
     /// there disables an old inherited configuration; later omission leaves it intact.
@@ -692,9 +859,8 @@ impl ProbeRuntime {
                     // An invalid extension stops probing until a valid configuration arrives.
                     s.negotiated = true;
                     s.control = None;
-                    for slot in 0..3 {
-                        s.generations[slot] += 1;
-                        self.generation[slot].store(s.generations[slot], Ordering::Release);
+                    for g in s.generations.values() {
+                        g.fetch_add(1, Ordering::AcqRel);
                     }
                     return;
                 }
@@ -710,20 +876,40 @@ impl ProbeRuntime {
         }
         if s.control != control {
             let old = s.control.clone();
-            for (slot, id) in IDS.iter().enumerate() {
-                let before = old.as_ref().map(|c| (&c.targets[slot], c.enabled));
-                let after = control.as_ref().map(|c| (&c.targets[slot], c.enabled));
+            let mut ids = HashSet::new();
+            if let Some(ref c) = old {
+                for t in &c.targets {
+                    ids.insert(t.target.id.clone());
+                }
+            }
+            if let Some(ref c) = control {
+                for t in &c.targets {
+                    ids.insert(t.target.id.clone());
+                }
+            }
+            for id in ids {
+                let before = old.as_ref().and_then(|c| {
+                    c.targets
+                        .iter()
+                        .find(|t| t.target.id == id)
+                        .map(|t| (t, c.enabled))
+                });
+                let after = control.as_ref().and_then(|c| {
+                    c.targets
+                        .iter()
+                        .find(|t| t.target.id == id)
+                        .map(|t| (t, c.enabled))
+                });
                 if before != after {
-                    s.generations[slot] += 1;
-                    self.generation[slot].store(s.generations[slot], Ordering::Release);
-                    s.segments[slot] = Segment::default();
-                    s.target_errors[slot] = None;
-                    s.recent.retain(|p| p.target_id != *id);
-                    s.latest.retain(|p| p.target_id != *id);
+                    s.bump_generation(&id);
+                    s.segments.remove(&id);
+                    s.target_errors.remove(&id);
+                    s.recent.retain(|p| p.target_id != id);
+                    s.latest.retain(|p| p.target_id != id);
                 }
             }
             s.control = control;
-            s.config_error = s.target_errors.iter().find_map(Clone::clone);
+            s.refresh_config_error();
         }
     }
     pub fn payload(&self) -> Option<Payload> {
@@ -742,16 +928,18 @@ impl ProbeRuntime {
             latest: s.latest.clone(),
             points: vec![],
         };
-        // Verbose user labels can make 270 points exceed the envelope. Send an oldest
-        // prefix; remaining points retain their IDs/timestamps until the next resource frame.
+        // Verbose user labels can make buffered points exceed the 128 KiB envelope.
+        // Use the serialized byte size cached on enqueue so repeated calls never re-serialize points.
         let mut size = serde_json::to_vec(&p).ok()?.len();
-        for point in &s.queue {
-            let cost = serde_json::to_vec(point).ok()?.len() + usize::from(!p.points.is_empty());
+        for entry in &s.queue {
+            let cost = entry
+                .serialized_len
+                .saturating_add(usize::from(!p.points.is_empty()));
             if size + cost > 128 * 1024 {
                 break;
             }
             size += cost;
-            p.points.push(point.clone());
+            p.points.push(entry.point.clone());
         }
         Some(p)
     }
@@ -765,73 +953,73 @@ impl ProbeRuntime {
             .lock()
             .unwrap()
             .queue
-            .retain(|p| !ids.contains(p.sample_id.as_str()));
+            .retain(|entry| !ids.contains(entry.point.sample_id.as_str()));
     }
 }
 impl Drop for ProbeRuntime {
     fn drop(&mut self) {
         self.stop.store(true, Ordering::Release);
-        for g in self.generation.iter() {
-            g.fetch_add(1, Ordering::AcqRel);
+        if let Ok(s) = self.state.lock() {
+            for g in s.generations.values() {
+                g.fetch_add(1, Ordering::AcqRel);
+            }
         }
     }
 }
 
-fn run_probes(
-    state: Arc<Mutex<RuntimeState>>,
-    stop: Arc<AtomicBool>,
-    generation: Arc<[std::sync::atomic::AtomicU64; 3]>,
-    offset: Duration,
-) {
-    run_probes_with_resolver(
-        state,
-        stop,
-        generation,
-        offset,
-        INTERVAL,
-        BUDGET,
-        Arc::new(resolve),
-    );
+fn run_probes(state: Arc<Mutex<RuntimeState>>, stop: Arc<AtomicBool>, offset: Duration) {
+    run_probes_with_resolver(state, stop, offset, None, BUDGET, Arc::new(resolve));
+}
+
+struct WorkerHandle {
+    tx: mpsc::SyncSender<ProbeJob>,
+    busy: bool,
+    last_target: String,
 }
 
 type Resolver = Arc<dyn Fn(&Target) -> Resolution + Send + Sync>;
 fn run_probes_with_resolver(
     state: Arc<Mutex<RuntimeState>>,
     stop: Arc<AtomicBool>,
-    generation: Arc<[std::sync::atomic::AtomicU64; 3]>,
     offset: Duration,
-    interval: Duration,
+    interval_override: Option<Duration>,
     budget: Duration,
     resolver: Resolver,
 ) {
-    let (events_tx, events_rx) = mpsc::sync_channel::<ProbeEvent>(12);
-    let mut workers: Option<Vec<mpsc::SyncSender<ProbeJob>>> = None;
-    let mut active: [Option<ActiveJob>; 3] = std::array::from_fn(|_| None);
+    let (events_tx, events_rx) = mpsc::sync_channel::<ProbeEvent>(MAX_TARGETS * 8);
+    let mut workers: Vec<WorkerHandle> = Vec::new();
+    let mut active: HashMap<String, ActiveJob> = HashMap::new();
     let mut next = Instant::now() + offset;
     let mut was_enabled = false;
+    let mut last_interval: Option<Duration> = None;
+    let mut worker_spawn_failed = false;
+
     while !stop.load(Ordering::Acquire) {
         while let Ok(event) = events_rx.try_recv() {
             match event {
-                ProbeEvent::Started(slot, seq, started) => {
-                    if let Some(a) = &mut active[slot] {
+                ProbeEvent::Started(target_id, seq, started) => {
+                    if let Some(a) = active.get_mut(&target_id) {
                         if a.job.sequence == seq {
                             a.started = Some(started);
                         }
                     }
                 }
-                ProbeEvent::Resolved(slot, seq) => {
-                    if let Some(a) = &mut active[slot] {
+                ProbeEvent::Resolved(target_id, seq) => {
+                    if let Some(a) = active.get_mut(&target_id) {
                         if a.job.sequence == seq {
                             a.dns_pending = false;
                         }
                     }
                 }
-                ProbeEvent::Finished(job, outcome, ts) => {
-                    if active[job.slot]
-                        .as_ref()
+                ProbeEvent::Finished(worker_idx, job, outcome, ts) => {
+                    if let Some(w) = workers.get_mut(worker_idx) {
+                        w.busy = false;
+                    }
+                    if active
+                        .get(&job.target_id)
                         .is_some_and(|a| a.job.sequence == job.sequence)
                     {
-                        let a = active[job.slot].take().unwrap();
+                        let a = active.remove(&job.target_id).unwrap();
                         if !a.emitted {
                             state.lock().unwrap().complete(&job, outcome, ts);
                         }
@@ -840,7 +1028,7 @@ fn run_probes_with_resolver(
             }
         }
         let now = Instant::now();
-        for a in active.iter_mut().flatten() {
+        for a in active.values_mut() {
             if a.dns_pending
                 && !a.emitted
                 && a.started
@@ -855,79 +1043,117 @@ fn run_probes_with_resolver(
                 );
             }
         }
-        let (control, generations) = {
+        let control = {
             let mut s = state.lock().unwrap();
             // Expire retained samples even while disabled or disconnected, when no
             // resource frame is asking for a payload.
             s.trim(wall_time());
-            (s.control.clone().filter(|c| c.enabled), s.generations)
+            s.control.clone().filter(|c| c.enabled)
         };
-        if control.is_some() && !was_enabled {
-            next = next.max(now + offset);
+        let active_interval = interval_override.unwrap_or_else(|| {
+            control
+                .as_ref()
+                .map_or(Duration::from_secs(u64::from(DEFAULT_INTERVAL_SEC)), |c| {
+                    Duration::from_secs(u64::from(c.interval_sec))
+                })
+        });
+        if control.is_some() {
+            if !was_enabled {
+                next = next.max(now + offset);
+            } else if last_interval.is_some_and(|prev| prev != active_interval) {
+                next = next.min(now + active_interval);
+            }
+            last_interval = Some(active_interval);
         }
         was_enabled = control.is_some();
         if let Some(control) = control {
-            if workers.is_none() {
-                let mut senders = Vec::new();
-                for slot in 0..3 {
-                    let (tx, rx) = mpsc::sync_channel::<ProbeJob>(1);
-                    let events = events_tx.clone();
-                    let g = generation.clone();
-                    let resolve = resolver.clone();
-                    if std::thread::Builder::new()
-                        .name(format!("uniob-nq-{slot}"))
-                        .stack_size(128 * 1024)
-                        .spawn(move || probe_worker(rx, events, g, budget, resolve))
-                        .is_err()
-                    {
-                        state.lock().unwrap().config_error =
-                            Some("probe worker unavailable".into());
-                        return;
-                    }
-                    senders.push(tx);
-                }
-                workers = Some(senders);
-            }
-            if now >= next {
+            if now >= next && !worker_spawn_failed {
                 // No catch-up probes after congestion or a long scheduler pause.
-                next = now + interval;
-                let sequence = {
-                    let mut s = state.lock().unwrap();
-                    s.round += 1;
-                    s.round
-                };
-                for (slot, target) in control.targets.into_iter().enumerate() {
-                    if !target.target.enabled || active[slot].is_some() {
-                        continue;
-                    }
-                    let job = ProbeJob {
-                        slot,
-                        sequence,
-                        generation: generations[slot],
-                        target,
-                        cancelled: Arc::new(AtomicBool::new(false)),
-                    };
-                    if workers.as_ref().unwrap()[slot]
-                        .try_send(job.clone())
-                        .is_ok()
+                next = now + active_interval;
+                let enabled_targets: Vec<ControlTarget> = control
+                    .targets
+                    .into_iter()
+                    .filter(|t| t.target.enabled && !active.contains_key(&t.target.id))
+                    .collect();
+                if !enabled_targets.is_empty() {
+                    let mut dispatch = Vec::with_capacity(enabled_targets.len());
                     {
-                        active[slot] = Some(ActiveJob {
-                            job,
-                            started: None,
-                            dns_pending: true,
-                            emitted: false,
-                        });
+                        let mut s = state.lock().unwrap();
+                        s.round += 1;
+                        let sequence = s.round;
+                        for target in enabled_targets {
+                            let cancel_epoch = s.generation_for(&target.target.id);
+                            let generation = cancel_epoch.load(Ordering::Acquire);
+                            dispatch.push((target, sequence, generation, cancel_epoch));
+                        }
+                    }
+                    for (target, sequence, generation, cancel_epoch) in dispatch {
+                        let target_id = target.target.id.clone();
+                        let worker_idx = workers
+                            .iter()
+                            .position(|w| !w.busy && w.last_target == target_id)
+                            .or_else(|| workers.iter().position(|w| !w.busy));
+                        let worker_idx = match worker_idx {
+                            Some(idx) => idx,
+                            None if workers.len() < MAX_TARGETS * 2 => {
+                                let idx = workers.len();
+                                let (tx, rx) = mpsc::sync_channel::<ProbeJob>(1);
+                                let events = events_tx.clone();
+                                let resolve = resolver.clone();
+                                if std::thread::Builder::new()
+                                    .name(format!("uniob-nq-{idx}"))
+                                    .stack_size(128 * 1024)
+                                    .spawn(move || probe_worker(idx, rx, events, budget, resolve))
+                                    .is_err()
+                                {
+                                    worker_spawn_failed = true;
+                                    state.lock().unwrap().config_error =
+                                        Some("probe worker unavailable".into());
+                                    break;
+                                }
+                                workers.push(WorkerHandle {
+                                    tx,
+                                    busy: false,
+                                    last_target: target_id.clone(),
+                                });
+                                idx
+                            }
+                            None => continue,
+                        };
+                        let job = ProbeJob {
+                            target_id: target_id.clone(),
+                            sequence,
+                            generation,
+                            cancel_epoch,
+                            target,
+                            cancelled: Arc::new(AtomicBool::new(false)),
+                            interval: active_interval,
+                        };
+                        if workers[worker_idx].tx.try_send(job.clone()).is_ok() {
+                            workers[worker_idx].busy = true;
+                            workers[worker_idx].last_target = target_id.clone();
+                            active.insert(
+                                target_id,
+                                ActiveJob {
+                                    worker_idx,
+                                    job,
+                                    started: None,
+                                    dns_pending: true,
+                                    emitted: false,
+                                },
+                            );
+                        }
                     }
                 }
             }
         }
-        std::thread::sleep(if was_enabled || active.iter().any(Option::is_some) {
-            Duration::from_millis(20).min(interval / 4)
+        std::thread::sleep(if was_enabled || !active.is_empty() {
+            Duration::from_millis(20).min(active_interval / 4)
         } else {
             Duration::from_millis(200)
         });
     }
-    for a in active.into_iter().flatten() {
+    for a in active.into_values() {
         a.job.cancelled.store(true, Ordering::Release);
     }
 }
@@ -971,9 +1197,9 @@ fn resolve(target: &Target) -> Resolution {
     }
 }
 fn probe_worker(
+    worker_idx: usize,
     rx: mpsc::Receiver<ProbeJob>,
     events: mpsc::SyncSender<ProbeEvent>,
-    generation: Arc<[std::sync::atomic::AtomicU64; 3]>,
     budget: Duration,
     resolve: Resolver,
 ) {
@@ -981,12 +1207,17 @@ fn probe_worker(
     while let Ok(job) = rx.recv() {
         let live = || {
             !job.cancelled.load(Ordering::Acquire)
-                && generation[job.slot].load(Ordering::Acquire) == job.generation
+                && job.cancel_epoch.load(Ordering::Acquire) == job.generation
         };
         let started = Instant::now();
         if !live() {
             if events
-                .send(ProbeEvent::Finished(job, Outcome::Cancelled, wall_time()))
+                .send(ProbeEvent::Finished(
+                    worker_idx,
+                    job,
+                    Outcome::Cancelled,
+                    wall_time(),
+                ))
                 .is_err()
             {
                 break;
@@ -994,7 +1225,11 @@ fn probe_worker(
             continue;
         }
         if events
-            .send(ProbeEvent::Started(job.slot, job.sequence, started))
+            .send(ProbeEvent::Started(
+                job.target_id.clone(),
+                job.sequence,
+                started,
+            ))
             .is_err()
         {
             break;
@@ -1018,7 +1253,7 @@ fn probe_worker(
                 Outcome::Cancelled
             };
             if events
-                .send(ProbeEvent::Finished(job, outcome, wall_time()))
+                .send(ProbeEvent::Finished(worker_idx, job, outcome, wall_time()))
                 .is_err()
             {
                 break;
@@ -1036,13 +1271,13 @@ fn probe_worker(
                     + if matches!(resolution, Resolution::Address(_)) {
                         Duration::from_secs(600)
                     } else {
-                        INTERVAL
+                        job.interval
                     },
                 resolution.clone(),
             ));
         }
         if events
-            .send(ProbeEvent::Resolved(job.slot, job.sequence))
+            .send(ProbeEvent::Resolved(job.target_id.clone(), job.sequence))
             .is_err()
         {
             break;
@@ -1057,12 +1292,12 @@ fn probe_worker(
                     let connect_start = Instant::now();
                     match TcpStream::connect_timeout(
                         &SocketAddr::from((ip, job.target.target.port)),
-                        BUDGET,
+                        budget,
                     ) {
                         Ok(stream) => {
                             drop(stream);
                             let elapsed = connect_start.elapsed();
-                            if elapsed > BUDGET {
+                            if elapsed > budget {
                                 Outcome::Measured(ProbeResult::ConnectTimeout, None, Some(ip))
                             } else {
                                 Outcome::Measured(
@@ -1091,7 +1326,7 @@ fn probe_worker(
         };
         let outcome = if live() { outcome } else { Outcome::Cancelled };
         if events
-            .send(ProbeEvent::Finished(job, outcome, wall_time()))
+            .send(ProbeEvent::Finished(worker_idx, job, outcome, wall_time()))
             .is_err()
         {
             break;
@@ -1102,10 +1337,7 @@ fn probe_worker(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::{
-        atomic::{AtomicU64, AtomicUsize},
-        Condvar,
-    };
+    use std::sync::{atomic::AtomicUsize, Condvar};
 
     fn fixture() -> Value {
         serde_json::from_str(include_str!("fixtures/network-quality-v1.json")).unwrap()
@@ -1116,8 +1348,8 @@ mod tests {
                 control: None,
                 negotiated: false,
                 config_error: None,
-                target_errors: [None, None, None],
-                generations: [0; 3],
+                target_errors: HashMap::new(),
+                generations: HashMap::new(),
                 queue: VecDeque::new(),
                 recent: VecDeque::new(),
                 latest: vec![],
@@ -1125,10 +1357,9 @@ mod tests {
                 round: 0,
                 segment_counter: 0,
                 session: "test-session".into(),
-                segments: std::array::from_fn(|_| Segment::default()),
+                segments: HashMap::new(),
             })),
             stop: Arc::new(AtomicBool::new(false)),
-            generation: Arc::new(std::array::from_fn(|_| AtomicU64::new(0))),
         }
     }
     fn enabled(runtime: &ProbeRuntime) -> Value {
@@ -1139,14 +1370,20 @@ mod tests {
         v
     }
     fn job(runtime: &ProbeRuntime, slot: usize, sequence: u64) -> ProbeJob {
-        let s = runtime.state.lock().unwrap();
-        let c = s.control.as_ref().unwrap();
+        let mut s = runtime.state.lock().unwrap();
+        let target = s.control.as_ref().unwrap().targets[slot].clone();
+        let target_id = target.target.id.clone();
+        let interval = Duration::from_secs(u64::from(s.control.as_ref().unwrap().interval_sec));
+        let cancel_epoch = s.generation_for(&target_id);
+        let generation = cancel_epoch.load(Ordering::Acquire);
         ProbeJob {
-            slot,
+            target_id,
             sequence,
-            generation: s.generations[slot],
-            target: c.targets[slot].clone(),
+            generation,
+            cancel_epoch,
+            target,
             cancelled: Arc::new(AtomicBool::new(false)),
+            interval,
         }
     }
     fn complete(
@@ -1170,7 +1407,15 @@ mod tests {
             ),
             ts,
         );
-        runtime.state.lock().unwrap().queue.back().unwrap().clone()
+        runtime
+            .state
+            .lock()
+            .unwrap()
+            .queue
+            .back()
+            .unwrap()
+            .point
+            .clone()
     }
 
     #[test]
@@ -1181,12 +1426,16 @@ mod tests {
             make_control(&c),
             serde_json::from_value::<Control>(f["control"].clone()).unwrap()
         );
+        // Verify default interval_sec=20 omits "interval_sec" from serialized canonical JSON.
+        let ctrl_json = serde_json::to_value(make_control(&c)).unwrap();
+        assert!(ctrl_json.get("interval_sec").is_none());
+        assert_eq!(ctrl_json["config_id"], f["control"]["config_id"]);
         let points: Vec<Point> = serde_json::from_value(f["points"].clone()).unwrap();
         assert_eq!(
             latest_from_points(&points),
             serde_json::from_value::<Vec<Latest>>(f["expected"]["latest"].clone()).unwrap()
         );
-        for id in IDS {
+        for id in ["ct", "cu", "cm"] {
             let ps: Vec<_> = points
                 .iter()
                 .filter(|p| p.target_id == id)
@@ -1207,6 +1456,95 @@ mod tests {
                 .unwrap()
             );
         }
+    }
+    #[test]
+    fn custom_targets_sort_interval_and_optional_region() {
+        let raw = json!({
+            "enabled": true,
+            "interval_sec": 30,
+            "targets": [
+                {
+                    "id": "us-west",
+                    "enabled": true,
+                    "label": "US West",
+                    "region": "   ",
+                    "host": "1.1.1.1",
+                    "address_family": "ipv4"
+                },
+                {
+                    "id": "cm",
+                    "enabled": true,
+                    "label": "移动",
+                    "host": "8.8.8.8",
+                    "port": 443,
+                    "address_family": "ipv4"
+                },
+                {
+                    "id": "ap-hk_1",
+                    "enabled": false,
+                    "label": "Hong Kong",
+                    "region": "HK",
+                    "host": "example.com",
+                    "port": 8443,
+                    "address_family": "ipv4"
+                },
+                {
+                    "id": "ct",
+                    "enabled": true,
+                    "label": "电信",
+                    "region": "广东",
+                    "host": "9.9.9.9",
+                    "port": 80,
+                    "address_family": "ipv4"
+                }
+            ]
+        });
+        let cfg = parse_config(&raw).unwrap();
+        assert_eq!(cfg.interval_sec, 30);
+        let ids: Vec<&str> = cfg.targets.iter().map(|t| t.id.as_str()).collect();
+        assert_eq!(ids, vec!["ct", "cm", "ap-hk_1", "us-west"]);
+        assert_eq!(cfg.targets[0].region.as_deref(), Some("广东"));
+        assert_eq!(cfg.targets[1].region, None);
+        assert_eq!(cfg.targets[3].region, None);
+        assert_eq!(cfg.targets[3].port, 80);
+
+        let serialized_cfg = serde_json::to_value(&cfg).unwrap();
+        assert_eq!(serialized_cfg["interval_sec"], 30);
+        assert!(serialized_cfg["targets"][1].get("region").is_none());
+        assert!(serialized_cfg["targets"][3].get("region").is_none());
+
+        let ctrl = make_control(&cfg);
+        let ctrl_val = serde_json::to_value(&ctrl).unwrap();
+        assert_eq!(ctrl_val["interval_sec"], 30);
+        assert_eq!(parse_control(&ctrl_val).unwrap(), ctrl);
+
+        // interval_sec == 20 yields identical config_id and omits field.
+        let mut cfg20 = cfg.clone();
+        cfg20.interval_sec = 20;
+        let ctrl20 = make_control(&cfg20);
+        assert_ne!(ctrl20.config_id, ctrl.config_id);
+        let ctrl20_val = serde_json::to_value(&ctrl20).unwrap();
+        assert!(ctrl20_val.get("interval_sec").is_none());
+        assert_eq!(parse_control(&ctrl20_val).unwrap(), ctrl20);
+
+        // Bounds checks: 0 targets, 9 targets, duplicate id, invalid slug, label > 32, C1 control, bad interval.
+        assert!(parse_config(&json!({"enabled": true, "targets": []})).is_err());
+        let eight: Vec<Value> = (1..=8)
+            .map(|i| json!({"id": format!("t-{i}"), "enabled": true, "label": format!("T{i}"), "host": "1.1.1.1", "address_family": "ipv4"}))
+            .collect();
+        assert!(parse_config(&json!({"enabled": true, "targets": eight})).is_ok());
+        let mut nine = eight;
+        nine.push(json!({"id": "t-9", "enabled": true, "label": "T9", "host": "1.1.1.1", "address_family": "ipv4"}));
+        assert!(parse_config(&json!({"enabled": true, "targets": nine})).is_err());
+
+        for bad_id in ["", "-abc", "AB", "a b", "a".repeat(25).as_str()] {
+            assert!(parse_config(&json!({"enabled": true, "targets": [{"id": bad_id, "enabled": true, "label": "x", "host": "1.1.1.1", "address_family": "ipv4"}]})).is_err(), "{bad_id}");
+        }
+        assert!(parse_config(&json!({"enabled": true, "targets": [{"id": "a", "enabled": true, "label": "x".repeat(33), "host": "1.1.1.1", "address_family": "ipv4"}]})).is_err());
+        assert!(parse_config(&json!({"enabled": true, "targets": [{"id": "a", "enabled": true, "label": "hi\u{0085}", "host": "1.1.1.1", "address_family": "ipv4"}]})).is_err());
+        assert!(parse_config(&json!({"enabled": true, "targets": [{"id": "a", "enabled": true, "label": "hi", "region": "r\u{007f}", "host": "1.1.1.1", "address_family": "ipv4"}]})).is_err());
+        assert!(parse_config(&json!({"enabled": true, "interval_sec": 9, "targets": [{"id": "a", "enabled": true, "label": "hi", "host": "1.1.1.1", "address_family": "ipv4"}]})).is_err());
+        assert!(parse_config(&json!({"enabled": true, "interval_sec": 301, "targets": [{"id": "a", "enabled": true, "label": "hi", "host": "1.1.1.1", "address_family": "ipv4"}]})).is_err());
     }
     #[test]
     fn unchanged_inflight_target_acknowledges_current_configuration() {
@@ -1392,14 +1730,11 @@ mod tests {
             .unwrap()
             .queue
             .iter()
-            .any(|p| p.sample_id == last.sample_id));
-        assert!(!rt
-            .state
-            .lock()
-            .unwrap()
-            .queue
+            .any(|p| p.point.sample_id == last.sample_id));
+        assert!(!rt.state.lock().unwrap().queue.iter().any(|p| payload
+            .points
             .iter()
-            .any(|p| payload.points.iter().any(|q| q.sample_id == p.sample_id)));
+            .any(|q| q.sample_id == p.point.sample_id)));
         rt.state.lock().unwrap().trim(now + 1801);
         assert!(rt.state.lock().unwrap().queue.is_empty());
         assert_eq!(rt.payload().unwrap().latest.len(), 2); // sending/ageing never recomputes last statistics
@@ -1408,7 +1743,7 @@ mod tests {
     fn blocked_configuration_is_not_an_attempt_and_errors_clear_on_recovery() {
         let rt = runtime();
         let config = enabled(&rt);
-        let job = job(&rt, 0, 1);
+        let job = job(runtime_ref(&rt), 0, 1);
         rt.state
             .lock()
             .unwrap()
@@ -1421,6 +1756,9 @@ mod tests {
         complete(&rt, 0, 2, wall_time(), Some(Ipv4Addr::new(1, 1, 1, 1)));
         assert!(rt.payload().unwrap().config_error.is_none());
     }
+    fn runtime_ref(rt: &ProbeRuntime) -> &ProbeRuntime {
+        rt
+    }
     #[test]
     fn stuck_resolver_is_bounded_and_other_targets_keep_sampling() {
         let rt = runtime();
@@ -1429,7 +1767,10 @@ mod tests {
         let calls = Arc::new(std::array::from_fn::<_, 3, _>(|_| AtomicUsize::new(0)));
         let (release, counts) = (gate.clone(), calls.clone());
         let resolver: Resolver = Arc::new(move |t| {
-            let slot = IDS.iter().position(|id| *id == t.id).unwrap();
+            let slot = ["ct", "cu", "cm"]
+                .iter()
+                .position(|id| *id == t.id)
+                .unwrap();
             counts[slot].fetch_add(1, Ordering::SeqCst);
             if slot == 0 {
                 let (lock, cv) = &*release;
@@ -1440,14 +1781,13 @@ mod tests {
             }
             Resolution::Error
         });
-        let (state, stop, generation) = (rt.state.clone(), rt.stop.clone(), rt.generation.clone());
+        let (state, stop) = (rt.state.clone(), rt.stop.clone());
         let runner = std::thread::spawn(move || {
             run_probes_with_resolver(
                 state,
                 stop,
-                generation,
                 Duration::ZERO,
-                Duration::from_millis(30),
+                Some(Duration::from_millis(30)),
                 Duration::from_millis(10),
                 resolver,
             )
@@ -1477,14 +1817,13 @@ mod tests {
     fn configuration_updates_do_not_restart_the_probe_clock() {
         let rt = runtime();
         enabled(&rt);
-        let (state, stop, generation) = (rt.state.clone(), rt.stop.clone(), rt.generation.clone());
+        let (state, stop) = (rt.state.clone(), rt.stop.clone());
         let runner = std::thread::spawn(move || {
             run_probes_with_resolver(
                 state,
                 stop,
-                generation,
                 Duration::ZERO,
-                Duration::from_millis(400),
+                Some(Duration::from_millis(400)),
                 Duration::from_millis(100),
                 Arc::new(|_| Resolution::Error),
             )
@@ -1509,6 +1848,43 @@ mod tests {
             1,
             "config edits must not trigger probes"
         );
+        rt.stop.store(true, Ordering::Release);
+        runner.join().unwrap();
+    }
+    #[test]
+    fn dynamic_custom_targets_probe_concurrently() {
+        let rt = runtime();
+        let cfg = parse_config(&json!({
+            "enabled": true,
+            "interval_sec": 15,
+            "targets": [
+                {"id": "hk", "enabled": true, "label": "HK", "host": "1.1.1.1", "port": 80, "address_family": "ipv4"},
+                {"id": "jp", "enabled": true, "label": "JP", "host": "8.8.8.8", "port": 443, "address_family": "ipv4"},
+                {"id": "us", "enabled": true, "label": "US", "host": "9.9.9.9", "port": 80, "address_family": "ipv4"},
+                {"id": "eu", "enabled": false, "label": "EU", "host": "1.0.0.1", "port": 80, "address_family": "ipv4"}
+            ]
+        })).unwrap();
+        rt.apply_control(
+            Some(&serde_json::to_value(make_control(&cfg)).unwrap()),
+            true,
+        );
+        let (state, stop) = (rt.state.clone(), rt.stop.clone());
+        let runner = std::thread::spawn(move || {
+            run_probes_with_resolver(
+                state,
+                stop,
+                Duration::ZERO,
+                Some(Duration::from_millis(25)),
+                Duration::from_millis(10),
+                Arc::new(|_| Resolution::Error),
+            )
+        });
+        std::thread::sleep(Duration::from_millis(90));
+        let p = rt.payload().unwrap();
+        assert!(p.points.iter().any(|q| q.target_id == "hk"));
+        assert!(p.points.iter().any(|q| q.target_id == "jp"));
+        assert!(p.points.iter().any(|q| q.target_id == "us"));
+        assert!(!p.points.iter().any(|q| q.target_id == "eu"));
         rt.stop.store(true, Ordering::Release);
         runner.join().unwrap();
     }

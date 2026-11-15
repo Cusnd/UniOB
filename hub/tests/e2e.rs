@@ -277,6 +277,7 @@ async fn full_rest_agent_v2_client_ws_bundle_migrate_and_static_flow() {
             udp: 3,
         },
         procs: None,
+        upd: None,
     };
     let t1 = metrics_frame_to_tuple(&last_frame);
     let mb = json!({
@@ -1579,4 +1580,432 @@ async fn two_hub_and_install_ticket_smart_migration_flow() {
     assert_eq!(r500.status(), 502);
 
     let _ = (hub_a, hub_b, hub_c);
+}
+
+#[tokio::test]
+async fn auto_update_config_check_trigger_status_and_override_flow() {
+    use axum::{routing::get, Router};
+    use tokio::net::TcpListener;
+    use uniob_hub::crypto::{hmac_sha256_hex, sha256_hex};
+
+    let releases_dir = std::env::temp_dir().join(format!(
+        "uniob_hub_e2e_releases_{}_{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    std::fs::create_dir_all(&releases_dir).unwrap();
+
+    let fake_bin = b"\x7fELF\x02\x01\x01\x00uniob-agent-v0.2.5";
+    let fake_sha = sha256_hex(fake_bin);
+    std::fs::write(
+        releases_dir.join("uniob-agent-x86_64-unknown-linux-musl"),
+        fake_bin,
+    )
+    .unwrap();
+    std::fs::write(releases_dir.join("VERSION"), "0.2.5\n").unwrap();
+    std::fs::write(
+        releases_dir.join("SHA256SUMS"),
+        format!("{fake_sha}  uniob-agent-x86_64-unknown-linux-musl\n"),
+    )
+    .unwrap();
+
+    let hub_cfg = HubConfig {
+        releases_dir: releases_dir.clone(),
+        ..Default::default()
+    };
+    let (addr, _hub) = spawn_test_hub(hub_cfg, None).await;
+    let base = format!("http://{addr}");
+    let ws_base = format!("ws://{addr}");
+    let client = reqwest::Client::new();
+
+    // Unauthenticated access rejected
+    assert_eq!(
+        client
+            .get(format!("{base}/api/agent-update/config"))
+            .send()
+            .await
+            .unwrap()
+            .status(),
+        401
+    );
+
+    let cookie = login_cookie(&client, &base, "AutoUpdatePass123!").await;
+
+    // Initial config
+    let cfg_res: Value = client
+        .get(format!("{base}/api/agent-update/config"))
+        .header("Cookie", &cookie)
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(cfg_res["ok"], true);
+    assert_eq!(cfg_res["config"]["auto_update_enabled"], false);
+    assert_eq!(cfg_res["config"]["channel"], "stable");
+    assert_eq!(cfg_res["config"]["check_interval_sec"], 21600);
+    assert_eq!(cfg_res["bundled_version"], "0.2.0");
+
+    // Check release against local releases_dir
+    let chk_res: Value = client
+        .post(format!("{base}/api/agent-update/check"))
+        .header("Cookie", &cookie)
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(chk_res["ok"], true);
+    assert!(chk_res["error"].is_null());
+    assert_eq!(chk_res["latest_release"]["version"], "0.2.5");
+    assert_eq!(chk_res["latest_release"]["source"], "local");
+    let asset_url = chk_res["latest_release"]["assets"]["amd64"]["url"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    assert!(asset_url.ends_with("/releases/uniob-agent-x86_64-unknown-linux-musl"));
+    assert_eq!(
+        chk_res["latest_release"]["assets"]["amd64"]["sha256"],
+        fake_sha
+    );
+    // Hub serves the staged release binary over /releases/*
+    let dl_bytes = client
+        .get(&asset_url)
+        .send()
+        .await
+        .unwrap()
+        .bytes()
+        .await
+        .unwrap();
+    assert_eq!(dl_bytes.as_ref(), fake_bin);
+
+    // Create node & connect admin fleet client WS
+    let created: Value = client
+        .post(format!("{base}/api/nodes"))
+        .header("Cookie", &cookie)
+        .json(&json!({ "name": "AutoUpd-Node" }))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let node_id = created["node"]["id"].as_str().unwrap().to_string();
+    let token = created["agent_token"].as_str().unwrap().to_string();
+    let token_sha256 = sha256_hex(token.as_bytes());
+
+    let mut client_req = format!("{ws_base}/api/client/ws")
+        .into_client_request()
+        .unwrap();
+    client_req
+        .headers_mut()
+        .insert("Cookie", HeaderValue::from_str(&cookie).unwrap());
+    let (mut client_ws, _) = tokio_tungstenite::connect_async(client_req).await.unwrap();
+    client_ws
+        .send(WsMsg::Text(json!({"op":"sub_fleet"}).to_string().into()))
+        .await
+        .unwrap();
+
+    // Connect agent with v0.2.0 and auto_update_v1 capability
+    let mut agent_req = format!("{ws_base}/api/agent/ws")
+        .into_client_request()
+        .unwrap();
+    agent_req
+        .headers_mut()
+        .insert("X-UniOB-Node-Id", HeaderValue::from_str(&node_id).unwrap());
+    agent_req.headers_mut().insert(
+        "Authorization",
+        HeaderValue::from_str(&format!("Bearer {token}")).unwrap(),
+    );
+    let (mut agent_ws, _) = tokio_tungstenite::connect_async(agent_req).await.unwrap();
+    let hello = json!({
+        "t": "hello",
+        "v": 2,
+        "agent_ver": "0.2.0",
+        "hostname": "upd-host",
+        "os": "Linux",
+        "kernel": "6.8.0",
+        "arch": "x86_64",
+        "cpu_model": "EPYC",
+        "cpu_cores": 2,
+        "mem_total": 2_000_000_000u64,
+        "swap_total": 0,
+        "boot_time": 1_700_000_000u64,
+        "proc_enabled": true,
+        "capabilities": ["mb_v2", "network_quality_v1", "auto_update_v1"]
+    });
+    agent_ws
+        .send(WsMsg::Text(hello.to_string().into()))
+        .await
+        .unwrap();
+
+    // Initial hello reply should have no update because auto_update_enabled=false
+    let init_ctrl_txt = match timeout(Duration::from_secs(3), agent_ws.next())
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap()
+    {
+        WsMsg::Text(t) => t,
+        other => panic!("unexpected frame: {other:?}"),
+    };
+    let init_ctrl: Value = serde_json::from_str(&init_ctrl_txt).unwrap();
+    assert!(init_ctrl.get("update").is_none());
+
+    // Disable node via auto_update_override = false -> non-forced trigger skips it
+    let patch_resp: Value = client
+        .patch(format!("{base}/api/nodes/{node_id}"))
+        .header("Cookie", &cookie)
+        .json(&json!({ "auto_update_override": false }))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(patch_resp["node"]["auto_update_override"], false);
+
+    let skip_trig: Value = client
+        .post(format!("{base}/api/agent-update/trigger"))
+        .header("Cookie", &cookie)
+        .json(&json!({ "node_ids": [&node_id], "force": false }))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(skip_trig["targeted"], 1);
+    assert_eq!(skip_trig["dispatched"], 0);
+    assert_eq!(skip_trig["skipped"], 1);
+
+    // Forced trigger dispatches signed update directive over WS
+    let force_trig: Value = client
+        .post(format!("{base}/api/agent-update/trigger"))
+        .header("Cookie", &cookie)
+        .json(&json!({ "node_ids": [&node_id], "force": true }))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(force_trig["ok"], true);
+    assert_eq!(force_trig["version"], "0.2.5");
+    assert_eq!(force_trig["targeted"], 1);
+    assert_eq!(force_trig["dispatched"], 1);
+    assert_eq!(force_trig["skipped"], 0);
+
+    let upd_ctrl_txt = match timeout(Duration::from_secs(3), agent_ws.next())
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap()
+    {
+        WsMsg::Text(t) => t,
+        other => panic!("unexpected ctrl: {other:?}"),
+    };
+    let upd_ctrl: Value = serde_json::from_str(&upd_ctrl_txt).unwrap();
+    let dir = upd_ctrl.get("update").expect("ctrl.update must be present");
+    assert_eq!(dir["version"], "0.2.5");
+    assert_eq!(dir["sha256"], fake_sha);
+    assert_eq!(dir["url"], asset_url);
+    let issued_at = dir["issued_at"].as_u64().unwrap();
+    let expected_msg = format!(
+        "agent_update_v1:{node_id}:0.2.5:{fake_sha}:{issued_at}:{asset_url}:{}",
+        dir["fallback_url"].as_str().unwrap_or("")
+    );
+    let expected_hmac = hmac_sha256_hex(token_sha256.as_bytes(), expected_msg.as_bytes());
+    assert_eq!(dir["hmac"], expected_hmac);
+
+    // Agent reports downloading in `m` frame and staged in `mb` frame
+    let sample_metric = json!({
+        "ts": 1_800_000_010u64,
+        "up": 100,
+        "cpu": { "all": 10.0, "steal": 0.0, "iowait": 0.0 },
+        "mem": { "used": 100, "avail": 900, "cached": 50, "swap_used": 0 },
+        "net": { "rx_bps": 0, "tx_bps": 0, "rx_tot": 0, "tx_tot": 0, "tcp_est": 1, "tcp_tw": 0, "udp": 0 }
+    });
+    let mut m_frame = sample_metric.clone();
+    m_frame["t"] = json!("m");
+    m_frame["upd"] = json!({ "st": "downloading", "ver": "0.2.5", "ts": 1_800_000_010u64 });
+    agent_ws
+        .send(WsMsg::Text(m_frame.to_string().into()))
+        .await
+        .unwrap();
+
+    let mb_frame = json!({
+        "t": "mb",
+        "pts": [[1800000012.0, 102.0, 12.0, 0.0, 0.0, 0.1, 100.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0]],
+        "last": sample_metric,
+        "upd": { "st": "staged", "ver": "0.2.5", "ts": 1_800_000_012u64 }
+    });
+    agent_ws
+        .send(WsMsg::Text(mb_frame.to_string().into()))
+        .await
+        .unwrap();
+
+    // Verify client fleet_tick receives staged update_status
+    let mut saw_staged_tick = false;
+    for _ in 0..10 {
+        let msg = timeout(Duration::from_secs(3), client_ws.next())
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        if let WsMsg::Text(txt) = msg {
+            let v: Value = serde_json::from_str(&txt).unwrap();
+            if v["t"] == "fleet_tick"
+                && v["nodeId"] == node_id
+                && v["update_status"]["state"] == "staged"
+            {
+                assert_eq!(v["update_status"]["target_version"], "0.2.5");
+                saw_staged_tick = true;
+                break;
+            }
+        }
+    }
+    assert!(
+        saw_staged_tick,
+        "expected fleet_tick with staged update_status"
+    );
+
+    // Verify GET /api/nodes reflects caps, auto_update_override=false, update_status=staged
+    let nodes_res: Value = client
+        .get(format!("{base}/api/nodes"))
+        .header("Cookie", &cookie)
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let n0 = nodes_res["nodes"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|n| n["id"] == node_id)
+        .unwrap();
+    assert_eq!(n0["auto_update_override"], false);
+    assert_eq!(n0["update_status"]["state"], "staged");
+    assert_eq!(n0["update_status"]["target_version"], "0.2.5");
+    assert!(n0["caps"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|c| c == "auto_update_v1"));
+
+    // Reset override to inherit (null) and enable auto_update via PUT /api/agent-update/config
+    let patch_null: Value = client
+        .patch(format!("{base}/api/nodes/{node_id}"))
+        .header("Cookie", &cookie)
+        .json(&json!({ "auto_update_override": Value::Null }))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert!(patch_null["node"]["auto_update_override"].is_null());
+
+    // Simulate agent restarting on 0.2.5 and reconnecting -> DB settles update_status to idle
+    drop(agent_ws);
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    let mut agent_req2 = format!("{ws_base}/api/agent/ws")
+        .into_client_request()
+        .unwrap();
+    agent_req2
+        .headers_mut()
+        .insert("X-UniOB-Node-Id", HeaderValue::from_str(&node_id).unwrap());
+    agent_req2.headers_mut().insert(
+        "Authorization",
+        HeaderValue::from_str(&format!("Bearer {token}")).unwrap(),
+    );
+    let (mut agent_ws2, _) = tokio_tungstenite::connect_async(agent_req2).await.unwrap();
+    let mut hello_new = hello;
+    hello_new["agent_ver"] = json!("0.2.5");
+    agent_ws2
+        .send(WsMsg::Text(hello_new.to_string().into()))
+        .await
+        .unwrap();
+    let _ = timeout(Duration::from_secs(3), agent_ws2.next())
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap();
+
+    let nodes_after_restart: Value = client
+        .get(format!("{base}/api/nodes"))
+        .header("Cookie", &cookie)
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let n0_after = nodes_after_restart["nodes"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|n| n["id"] == node_id)
+        .unwrap();
+    assert_eq!(n0_after["agent_version"], "0.2.5");
+    assert_eq!(n0_after["update_status"]["state"], "idle");
+
+    // Mock custom mirror URL and verify PUT /api/agent-update/config + auto-dispatch of 0.3.0
+    let mirror_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let mirror_addr = mirror_listener.local_addr().unwrap();
+    let v3_sha = "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc";
+    let mirror_app = Router::new()
+        .route("/VERSION", get(|| async { "0.3.0\n" }))
+        .route(
+            "/SHA256SUMS",
+            get(
+                move || async move { format!("{v3_sha}  uniob-agent-x86_64-unknown-linux-musl\n") },
+            ),
+        );
+    tokio::spawn(async move {
+        let _ = axum::serve(mirror_listener, mirror_app).await;
+    });
+
+    let put_res: Value = client
+        .put(format!("{base}/api/agent-update/config"))
+        .header("Cookie", &cookie)
+        .json(&json!({
+            "auto_update_enabled": true,
+            "channel": "stable",
+            "check_interval_sec": 300,
+            "custom_base_url": format!("http://{mirror_addr}")
+        }))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(put_res["ok"], true);
+    assert_eq!(put_res["config"]["auto_update_enabled"], true);
+    assert_eq!(put_res["latest_release"]["version"], "0.3.0");
+    assert_eq!(put_res["latest_release"]["source"], "custom");
+
+    // Connected node on 0.2.5 should receive automatic update directive for 0.3.0
+    let auto_ctrl_txt = match timeout(Duration::from_secs(3), agent_ws2.next())
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap()
+    {
+        WsMsg::Text(t) => t,
+        other => panic!("expected auto update ctrl frame, got: {other:?}"),
+    };
+    let auto_ctrl: Value = serde_json::from_str(&auto_ctrl_txt).unwrap();
+    assert_eq!(auto_ctrl["update"]["version"], "0.3.0");
+    assert_eq!(auto_ctrl["update"]["sha256"], v3_sha);
+
+    let _ = std::fs::remove_dir_all(&releases_dir);
 }

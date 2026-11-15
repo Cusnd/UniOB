@@ -1,3 +1,8 @@
+use crate::agent_update::{
+    build_signed_directive, compare_semver, normalize_arch, parse_agent_update_status,
+    resolve_latest_release, AgentUpdateCache, AgentUpdateConfig, AUTO_DISPATCH_COOLDOWN_SEC,
+    DEFAULT_GITHUB_API_BASE, RELEASE_CACHE_TTL_SEC,
+};
 use crate::alerts::{
     compute_watermarks_for_node, evaluate_node_metrics_alerts, evaluate_node_offline_alerts,
     get_offline_threshold_sec, resolve_offline_rules_if_firing,
@@ -8,16 +13,18 @@ use crate::crypto::{now_sec, sign_migrate_directive};
 use crate::db::{payload_to_raw_sample, HubDb, RawSlabSample};
 use crate::protocol::{
     metrics_frame_to_tuple, AgentCtrlFrame, AgentHelloFrame, AgentMetricsBatchFrame,
-    AgentMetricsFrame, AlertChangeMessage, CtrlMigrateDirective, FleetBatchMessage,
-    FleetTickMessage, HubMigrateRequest, HubMigrateResponse, HubStatusResponse, NodeDetailMessage,
-    NodeHardwareInfo, NodeMetricsPayload, NodeOfflineMessage, NodeRow, WatchdogStatusView,
+    AgentMetricsFrame, AlertChangeMessage, CtrlMigrateDirective, CtrlUpdateDirective,
+    FleetBatchMessage, FleetTickMessage, HubMigrateRequest, HubMigrateResponse, HubStatusResponse,
+    LatestRelease, NodeDetailMessage, NodeHardwareInfo, NodeMetricsPayload, NodeOfflineMessage,
+    NodeRow, NodeUpdateStatus, ReleaseAssetInfo, WatchdogStatusView,
 };
+use serde_json::{json, Value};
 use std::collections::HashMap;
 use std::net::{IpAddr, Ipv4Addr};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
-use tokio::sync::{mpsc, RwLock};
+use tokio::sync::{mpsc, Notify, RwLock};
 use url::Url;
 
 pub const CLIENT_LEASE_SEC: u64 = 90;
@@ -66,6 +73,9 @@ pub struct HubState {
     pub http: reqwest::Client,
     pub cf_verifier: CfAccessVerifier,
     pub rate_limiter: LoginRateLimiter,
+    pub self_probe_notify: Arc<Notify>,
+    github_api_base: String,
+    agent_update_cache: Arc<RwLock<AgentUpdateCache>>,
     agents: Arc<RwLock<HashMap<String, AgentSessionHandle>>>,
     agent_last_alive: Arc<RwLock<HashMap<String, i64>>>,
     clients: Arc<RwLock<HashMap<u64, ClientSubscriber>>>,
@@ -91,6 +101,9 @@ impl HubState {
             http,
             cf_verifier,
             rate_limiter: LoginRateLimiter::default(),
+            self_probe_notify: Arc::new(Notify::new()),
+            github_api_base: DEFAULT_GITHUB_API_BASE.to_string(),
+            agent_update_cache: Arc::new(RwLock::new(AgentUpdateCache::default())),
             agents: Arc::new(RwLock::new(HashMap::new())),
             agent_last_alive: Arc::new(RwLock::new(HashMap::new())),
             clients: Arc::new(RwLock::new(HashMap::new())),
@@ -101,6 +114,11 @@ impl HubState {
 
     pub fn with_cf_certs_url(mut self, certs_url: String) -> Self {
         self.cf_verifier = self.cf_verifier.with_certs_url(certs_url);
+        self
+    }
+
+    pub fn with_github_api_base(mut self, base: String) -> Self {
+        self.github_api_base = base;
         self
     }
 
@@ -264,6 +282,7 @@ impl HubState {
             flush_now: if flush_now { Some(true) } else { None },
             watermarks,
             migrate: None,
+            update: None,
             network_quality: if self
                 .agents
                 .read()
@@ -279,6 +298,9 @@ impl HubState {
     }
 
     pub async fn push_ctrl_to_agent(&self, node_id: &str, flush_now: bool) {
+        if node_id == self.cfg.self_probe_node_id {
+            self.self_probe_notify.notify_one();
+        }
         let ctrl = self.compute_ctrl_for_node(node_id, flush_now).await;
         self.send_ctrl_to_agent(node_id, None, ctrl).await;
     }
@@ -366,6 +388,7 @@ impl HubState {
     }
 
     pub async fn sync_ctrl_to_all_agents(&self, flush_now: bool) {
+        self.self_probe_notify.notify_one();
         let node_ids: Vec<String> = {
             let guard = self.agents.read().await;
             guard.keys().cloned().collect()
@@ -455,6 +478,9 @@ impl HubState {
                                     agent_version: s.agent_version,
                                     proc_enabled: s.proc_enabled,
                                 }),
+                                caps: Some(s.caps),
+                                auto_update_override: s.auto_update_override,
+                                update_status: s.update_status,
                             })
                             .collect();
                         let batch = FleetBatchMessage {
@@ -549,13 +575,34 @@ impl HubState {
             agent_version: non_empty(&hello.agent_ver),
             proc_enabled: hello.proc_enabled,
         };
-        self.db.update_node_hello(node_id, &hw, now)?;
+        self.db
+            .update_node_hello_with_caps(node_id, &hw, &hello.capabilities, now)?;
         self.db.network_set_supported(
             node_id,
             hello.capabilities.iter().any(|c| c == "network_quality_v1"),
         )?;
 
         if let Some(node) = self.db.get_node_row(node_id)? {
+            if let Some(ref json_str) = node.update_status_json {
+                if let Ok(st) = serde_json::from_str::<NodeUpdateStatus>(json_str) {
+                    let ver_trimmed = hello.agent_ver.trim();
+                    if st.state != "idle"
+                        && !ver_trimmed.is_empty()
+                        && st.target_version.as_deref().is_some_and(|tv| {
+                            compare_semver(ver_trimmed, tv) != std::cmp::Ordering::Less
+                        })
+                    {
+                        let settled = NodeUpdateStatus {
+                            state: "idle".to_string(),
+                            target_version: Some(ver_trimmed.to_string()),
+                            error: None,
+                            updated_at: Some(now),
+                        };
+                        self.db.set_node_update_status(node_id, Some(&settled))?;
+                        self.clear_node_dispatch_cooldown(node_id).await;
+                    }
+                }
+            }
             let resolved = resolve_offline_rules_if_firing(&self.db, &self.http, &node, now)?;
             if resolved {
                 self.broadcast_alert_change().await;
@@ -571,11 +618,25 @@ impl HubState {
                 traffic: summary.traffic,
                 metrics: summary.metrics,
                 hardware: Some(hw),
+                caps: Some(summary.caps),
+                auto_update_override: summary.auto_update_override,
+                update_status: summary.update_status,
             })
             .await;
         }
 
-        Ok(self.compute_ctrl_for_node(node_id, false).await)
+        let cfg = self.db.agent_update_config()?;
+        let mut ctrl = self.compute_ctrl_for_node(node_id, false).await;
+        if let Ok(Some(node)) = self.db.get_node_row(node_id) {
+            let target = UpdateTargetNode::from_node_row(&node, &hello.capabilities);
+            if let Some(directive) = self
+                .auto_directive_for_node_if_due(&target, &cfg, now)
+                .await
+            {
+                ctrl.update = Some(directive);
+            }
+        }
+        Ok(ctrl)
     }
 
     pub async fn ingest_metrics_v1(
@@ -588,6 +649,13 @@ impl HubState {
         let Some(node) = self.db.get_node_row(node_id)? else {
             return Err("Unknown node".to_string());
         };
+        let update_status = frame
+            .upd
+            .as_ref()
+            .and_then(|v| parse_agent_update_status(v, wall_sec));
+        if let Some(ref st) = update_status {
+            self.db.set_node_update_status(node_id, Some(st))?;
+        }
         let mut payload = NodeMetricsPayload::from(&frame);
         payload.network_quality =
             self.accept_network_quality(node_id, frame.network_quality.as_ref(), wall_sec);
@@ -619,6 +687,7 @@ impl HubState {
             &traffic,
             &payload,
             frame.procs,
+            update_status,
             was_offline,
             wall_sec,
         )
@@ -635,6 +704,15 @@ impl HubState {
         let Some(node) = self.db.get_node_row(node_id)? else {
             return Err("Unknown node".to_string());
         };
+
+        let update_status = batch
+            .upd
+            .as_ref()
+            .or(batch.last.upd.as_ref())
+            .and_then(|v| parse_agent_update_status(v, wall_sec));
+        if let Some(ref st) = update_status {
+            self.db.set_node_update_status(node_id, Some(st))?;
+        }
 
         let mut latest_payload = NodeMetricsPayload::from(&batch.last);
         latest_payload.network_quality =
@@ -671,6 +749,7 @@ impl HubState {
             &traffic,
             &latest_payload,
             batch.last.procs,
+            update_status,
             was_offline,
             wall_sec,
         )
@@ -694,12 +773,14 @@ impl HubState {
         self.db.network_state(node_id).ok()
     }
 
+    #[allow(clippy::too_many_arguments)]
     async fn after_metrics_persisted(
         &self,
         node: &NodeRow,
         traffic: &crate::protocol::NodeTrafficSummary,
         payload: &NodeMetricsPayload,
         procs: Option<Vec<crate::protocol::AgentProcEntry>>,
+        update_status: Option<NodeUpdateStatus>,
         was_offline: bool,
         wall_sec: i64,
     ) -> Result<(), String> {
@@ -716,8 +797,15 @@ impl HubState {
             self.broadcast_alert_change().await;
         }
 
-        self.broadcast_live_update(&node.id, wall_sec, traffic.clone(), payload.clone(), procs)
-            .await;
+        self.broadcast_live_update(
+            &node.id,
+            wall_sec,
+            traffic.clone(),
+            payload.clone(),
+            procs,
+            update_status,
+        )
+        .await;
         Ok(())
     }
 
@@ -728,6 +816,7 @@ impl HubState {
         traffic: crate::protocol::NodeTrafficSummary,
         metrics: NodeMetricsPayload,
         procs: Option<Vec<crate::protocol::AgentProcEntry>>,
+        update_status: Option<NodeUpdateStatus>,
     ) {
         let now = now_sec();
         let clients = self.clients.read().await;
@@ -743,6 +832,9 @@ impl HubState {
             traffic,
             metrics: Some(metrics.clone()),
             hardware: None,
+            caps: None,
+            auto_update_override: None,
+            update_status,
         })
         .ok();
 
@@ -940,13 +1032,16 @@ impl HubState {
 
         for (node_id, token_sha256) in targets {
             let sig = sign_migrate_directive(&token_sha256, &node_id, epoch, &target_ws_url);
-            let mut ctrl = self.compute_ctrl_for_node(&node_id, true).await;
-            ctrl.migrate = Some(CtrlMigrateDirective {
-                url: target_ws_url.clone(),
-                fallback_url: fallback_ws_url.clone(),
-                epoch,
-                sig,
-            });
+            let ctrl = {
+                let mut ctrl = self.compute_ctrl_for_node(&node_id, true).await;
+                ctrl.migrate = Some(CtrlMigrateDirective {
+                    url: target_ws_url.clone(),
+                    fallback_url: fallback_ws_url.clone(),
+                    epoch,
+                    sig,
+                });
+                ctrl
+            };
             if self.send_ctrl_to_agent(&node_id, None, ctrl).await {
                 dispatched += 1;
             }
@@ -961,15 +1056,395 @@ impl HubState {
         })
     }
 
+    pub fn default_hub_origin(&self) -> String {
+        let pub_url = self.cfg.public_url.trim().trim_end_matches('/');
+        if !pub_url.is_empty() {
+            return pub_url.to_string();
+        }
+        let listen = self.cfg.listen.trim();
+        if let Some(port) = listen.strip_prefix("0.0.0.0:") {
+            format!("http://127.0.0.1:{port}")
+        } else if let Some(port) = listen.strip_prefix("[::]:") {
+            format!("http://127.0.0.1:{port}")
+        } else if !listen.is_empty() {
+            format!("http://{listen}")
+        } else {
+            String::new()
+        }
+    }
+
+    pub async fn cached_agent_update_snapshot(
+        &self,
+    ) -> (Option<LatestRelease>, Option<i64>, Option<String>) {
+        let guard = self.agent_update_cache.read().await;
+        (
+            guard.latest.clone(),
+            guard.checked_at,
+            guard.last_error.clone(),
+        )
+    }
+
+    pub async fn invalidate_agent_update_cache(&self) {
+        let mut guard = self.agent_update_cache.write().await;
+        guard.latest = None;
+        guard.checked_at = None;
+        guard.last_error = None;
+        guard.dispatched_versions.clear();
+    }
+
+    pub async fn clear_node_dispatch_cooldown(&self, node_id: &str) {
+        self.agent_update_cache
+            .write()
+            .await
+            .dispatched_versions
+            .remove(node_id);
+    }
+
+    pub async fn check_latest_release(&self, origin: &str) -> Result<LatestRelease, String> {
+        let cfg = self.db.agent_update_config()?;
+        let effective_origin = if origin.trim().is_empty() {
+            self.default_hub_origin()
+        } else {
+            origin.trim().trim_end_matches('/').to_string()
+        };
+        match resolve_latest_release(
+            &self.http,
+            &cfg,
+            &self.cfg.releases_dir,
+            &self.github_api_base,
+            &self.cfg.github_repo,
+            &effective_origin,
+        )
+        .await
+        {
+            Ok(release) => {
+                let mut guard = self.agent_update_cache.write().await;
+                guard.latest = Some(release.clone());
+                guard.checked_at = Some(release.checked_at);
+                guard.last_error = None;
+                Ok(release)
+            }
+            Err(err) => {
+                let mut guard = self.agent_update_cache.write().await;
+                guard.checked_at = Some(now_sec());
+                guard.last_error = Some(err.clone());
+                Err(err)
+            }
+        }
+    }
+
+    fn load_update_target_nodes(&self) -> Result<Vec<UpdateTargetNode>, String> {
+        self.db.with_conn(|c| {
+            let mut stmt = c
+                .prepare(
+                    "SELECT id, token_sha256, arch, agent_version, auto_update_override, caps_json, update_status_json
+                     FROM nodes
+                     ORDER BY sort_order ASC, created_at ASC",
+                )
+                .map_err(|e| format!("prepare update target nodes error: {e}"))?;
+            let rows = stmt
+                .query_map([], |r| {
+                    let caps_json: String = r.get(5)?;
+                    let update_status_json: Option<String> = r.get(6)?;
+                    let caps = serde_json::from_str::<Vec<String>>(&caps_json).unwrap_or_default();
+                    let update_status = update_status_json
+                        .as_deref()
+                        .and_then(|s| serde_json::from_str::<NodeUpdateStatus>(s).ok());
+                    Ok(UpdateTargetNode {
+                        id: r.get(0)?,
+                        token_sha256: r.get(1)?,
+                        arch: r.get(2)?,
+                        agent_version: r.get(3)?,
+                        auto_update_override: r.get(4)?,
+                        caps,
+                        update_status,
+                    })
+                })
+                .map_err(|e| format!("query update target nodes error: {e}"))?;
+            let mut out = Vec::new();
+            for row in rows {
+                out.push(row.map_err(|e| format!("read update target node row error: {e}"))?);
+            }
+            Ok(out)
+        })
+    }
+
+    async fn auto_directive_for_node_if_due(
+        &self,
+        node: &UpdateTargetNode,
+        cfg: &AgentUpdateConfig,
+        now: i64,
+    ) -> Option<CtrlUpdateDirective> {
+        if node.id == self.cfg.self_probe_node_id {
+            return None;
+        }
+        if !node.caps.iter().any(|c| c == "auto_update_v1") {
+            return None;
+        }
+        let effective_enabled = node
+            .auto_update_override
+            .map(|v| v != 0)
+            .unwrap_or(cfg.auto_update_enabled);
+        if !effective_enabled {
+            return None;
+        }
+
+        let current_ver = node
+            .agent_version
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())?;
+        let release = {
+            let guard = self.agent_update_cache.read().await;
+            guard.latest.clone()?
+        };
+        if compare_semver(current_ver, &release.version) != std::cmp::Ordering::Less {
+            return None;
+        }
+        let asset = release_asset_for_arch(&release, node.arch.as_deref())?;
+        if let Some(ref st) = node.update_status {
+            if matches!(st.state.as_str(), "downloading" | "staged" | "applying")
+                && st.target_version.as_deref() == Some(release.version.as_str())
+            {
+                return None;
+            }
+        }
+
+        let mut guard = self.agent_update_cache.write().await;
+        if guard
+            .dispatched_versions
+            .get(&node.id)
+            .is_some_and(|(ver, ts)| {
+                ver == &release.version && now.saturating_sub(*ts) < AUTO_DISPATCH_COOLDOWN_SEC
+            })
+        {
+            return None;
+        }
+        guard
+            .dispatched_versions
+            .insert(node.id.clone(), (release.version.clone(), now));
+
+        Some(build_signed_directive(
+            &node.token_sha256,
+            &node.id,
+            &release.version,
+            asset,
+            now as u64,
+        ))
+    }
+
+    pub async fn trigger_agent_update(
+        &self,
+        node_ids: Option<Vec<String>>,
+        force: bool,
+        origin: &str,
+    ) -> Result<Value, (u16, String)> {
+        let now = now_sec();
+        let release = match self.check_latest_release(origin).await {
+            Ok(rel) => rel,
+            Err(err) => {
+                if let Some(cached) = self.cached_agent_update_snapshot().await.0 {
+                    cached
+                } else {
+                    return Err((502, err));
+                }
+            }
+        };
+
+        let all_nodes = self.load_update_target_nodes().map_err(|e| (500, e))?;
+        let cleaned_ids: Option<Vec<String>> = node_ids.map(|ids| {
+            ids.into_iter()
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty())
+                .collect::<Vec<_>>()
+        });
+        let targets: Vec<UpdateTargetNode> = match cleaned_ids {
+            Some(ref ids) if !ids.is_empty() => all_nodes
+                .into_iter()
+                .filter(|n| ids.iter().any(|wanted| wanted == &n.id))
+                .collect(),
+            _ => all_nodes
+                .into_iter()
+                .filter(|n| n.id != self.cfg.self_probe_node_id)
+                .collect(),
+        };
+
+        let targeted = targets.len();
+        let mut dispatched = 0usize;
+        let mut skipped = 0usize;
+
+        for node in targets {
+            if node.id == self.cfg.self_probe_node_id {
+                skipped += 1;
+                continue;
+            }
+            let live_caps = {
+                let guard = self.agents.read().await;
+                guard.get(&node.id).map(|h| h.capabilities.clone())
+            };
+            let Some(caps) = live_caps else {
+                skipped += 1;
+                continue;
+            };
+            if !caps.iter().any(|c| c == "auto_update_v1") {
+                skipped += 1;
+                continue;
+            }
+            let Some(asset) = release_asset_for_arch(&release, node.arch.as_deref()) else {
+                skipped += 1;
+                continue;
+            };
+            if !force {
+                if node.auto_update_override == Some(0) {
+                    skipped += 1;
+                    continue;
+                }
+                let newer = node
+                    .agent_version
+                    .as_deref()
+                    .map(str::trim)
+                    .filter(|s| !s.is_empty())
+                    .is_some_and(|cur| {
+                        compare_semver(cur, &release.version) == std::cmp::Ordering::Less
+                    });
+                if !newer {
+                    skipped += 1;
+                    continue;
+                }
+            }
+
+            let directive = build_signed_directive(
+                &node.token_sha256,
+                &node.id,
+                &release.version,
+                asset,
+                now as u64,
+            );
+            let mut ctrl = self.compute_ctrl_for_node(&node.id, true).await;
+            ctrl.update = Some(directive);
+            if self.send_ctrl_to_agent(&node.id, None, ctrl).await {
+                self.agent_update_cache
+                    .write()
+                    .await
+                    .dispatched_versions
+                    .insert(node.id.clone(), (release.version.clone(), now));
+                dispatched += 1;
+            } else {
+                skipped += 1;
+            }
+        }
+
+        Ok(json!({
+            "ok": true,
+            "version": release.version,
+            "targeted": targeted,
+            "dispatched": dispatched,
+            "skipped": skipped,
+        }))
+    }
+
+    pub async fn maybe_dispatch_auto_updates(&self, origin: &str) {
+        let Ok(cfg) = self.db.agent_update_config() else {
+            return;
+        };
+        let Ok(nodes) = self.load_update_target_nodes() else {
+            return;
+        };
+        if !cfg.auto_update_enabled && !nodes.iter().any(|n| n.auto_update_override == Some(1)) {
+            return;
+        }
+
+        let now = now_sec();
+        let needs_refresh = {
+            let guard = self.agent_update_cache.read().await;
+            match (&guard.latest, guard.checked_at) {
+                (Some(_), Some(ts)) => now.saturating_sub(ts) >= cfg.check_interval_sec as i64,
+                (None, Some(ts)) => {
+                    let retry_ttl = (cfg.check_interval_sec as i64).min(RELEASE_CACHE_TTL_SEC);
+                    now.saturating_sub(ts) >= retry_ttl
+                }
+                (_, None) => true,
+            }
+        };
+        if needs_refresh {
+            let _ = self.check_latest_release(origin).await;
+        }
+
+        let live_caps: HashMap<String, Vec<String>> = {
+            let guard = self.agents.read().await;
+            guard
+                .iter()
+                .map(|(id, h)| (id.clone(), h.capabilities.clone()))
+                .collect()
+        };
+
+        for mut node in nodes {
+            let Some(caps) = live_caps.get(&node.id) else {
+                continue;
+            };
+            node.caps = caps.clone();
+            if let Some(directive) = self.auto_directive_for_node_if_due(&node, &cfg, now).await {
+                let mut ctrl = self.compute_ctrl_for_node(&node.id, true).await;
+                ctrl.update = Some(directive);
+                let _ = self.send_ctrl_to_agent(&node.id, None, ctrl).await;
+            }
+        }
+    }
+
     pub fn spawn_background_tasks(&self) {
         let state = self.clone();
         tokio::spawn(async move {
             let mut tick = tokio::time::interval(std::time::Duration::from_secs(15));
+            let mut update_tick: u64 = 0;
             loop {
                 tick.tick().await;
                 state.check_offline_nodes().await;
+                if update_tick.is_multiple_of(4) {
+                    let origin = state.default_hub_origin();
+                    state.maybe_dispatch_auto_updates(&origin).await;
+                }
+                update_tick = update_tick.wrapping_add(1);
             }
         });
+    }
+}
+
+struct UpdateTargetNode {
+    id: String,
+    token_sha256: String,
+    arch: Option<String>,
+    agent_version: Option<String>,
+    auto_update_override: Option<i64>,
+    caps: Vec<String>,
+    update_status: Option<NodeUpdateStatus>,
+}
+
+impl UpdateTargetNode {
+    fn from_node_row(row: &NodeRow, caps: &[String]) -> Self {
+        let update_status = row
+            .update_status_json
+            .as_deref()
+            .and_then(|s| serde_json::from_str::<NodeUpdateStatus>(s).ok());
+        Self {
+            id: row.id.clone(),
+            token_sha256: row.token_sha256.clone(),
+            arch: row.arch.clone(),
+            agent_version: row.agent_version.clone(),
+            auto_update_override: row.auto_update_override,
+            caps: caps.to_vec(),
+            update_status,
+        }
+    }
+}
+
+fn release_asset_for_arch<'a>(
+    release: &'a LatestRelease,
+    arch: Option<&str>,
+) -> Option<&'a ReleaseAssetInfo> {
+    match normalize_arch(arch)? {
+        "amd64" => release.assets.amd64.as_ref(),
+        "arm64" => release.assets.arm64.as_ref(),
+        _ => None,
     }
 }
 

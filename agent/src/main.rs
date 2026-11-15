@@ -6,6 +6,7 @@ mod migrate;
 mod network_quality;
 mod protocol;
 mod sanitize;
+mod update;
 
 use collector::AgentCollector;
 use config::Config;
@@ -36,6 +37,10 @@ enum CliAction {
         allow_insecure_ws: bool,
         once: bool,
     },
+    VerifyStagedUpdate {
+        config_path: PathBuf,
+        state_dir: PathBuf,
+    },
     Version,
     Help,
 }
@@ -49,6 +54,7 @@ where
     let mut state_dir = PathBuf::from(DEFAULT_STATE_DIR);
     let mut allow_insecure_ws = false;
     let mut once = false;
+    let mut verify_staged_update = false;
 
     let mut iter = args.into_iter();
     let _bin = iter.next();
@@ -60,6 +66,7 @@ where
             "-h" | "--help" => return Ok(CliAction::Help),
             "--once" => once = true,
             "--allow-insecure-ws-for-test" => allow_insecure_ws = true,
+            "--verify-staged-update" => verify_staged_update = true,
             "-c" | "--config" => {
                 let val = iter
                     .next()
@@ -96,6 +103,13 @@ where
             }
             other => return Err(format!("unknown argument: {other}")),
         }
+    }
+
+    if verify_staged_update {
+        return Ok(CliAction::VerifyStagedUpdate {
+            config_path,
+            state_dir,
+        });
     }
 
     Ok(CliAction::Run {
@@ -277,19 +291,37 @@ fn send_json<T: serde::Serialize>(
 
 /// Piggyback network results on existing m/mb messages. Release only the exact
 /// transmitted prefix after a successful send; failures keep the queue intact.
+#[derive(serde::Serialize)]
+struct TelemetryFrame<'a, T: serde::Serialize> {
+    #[serde(flatten)]
+    frame: &'a T,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    network_quality: Option<&'a network_quality::Payload>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    upd: Option<&'a protocol::UpdateStatusReport>,
+}
+
 fn send_telemetry<T: serde::Serialize>(
     ws: &mut WebSocket<MaybeTlsStream<TcpStream>>,
     frame: &T,
     quality: &network_quality::ProbeRuntime,
+    updater: Option<&mut update::UpdateRuntime>,
 ) -> Result<(), String> {
     let extension = quality.payload();
-    let mut value = serde_json::to_value(frame).map_err(|e| e.to_string())?;
-    if let Some(ref payload) = extension {
-        value["network_quality"] = serde_json::to_value(payload).map_err(|e| e.to_string())?;
-    }
-    send_json(ws, &value)?;
+    let upd_report = updater
+        .as_deref()
+        .and_then(update::UpdateRuntime::pending_report);
+    let envelope = TelemetryFrame {
+        frame,
+        network_quality: extension.as_ref(),
+        upd: upd_report.as_ref(),
+    };
+    send_json(ws, &envelope)?;
     if let Some(ref payload) = extension {
         quality.mark_sent(payload);
+    }
+    if let (Some(u), Some(report)) = (updater, upd_report) {
+        u.mark_reported(report);
     }
     Ok(())
 }
@@ -378,8 +410,12 @@ fn run_session_with_migration(
     ws: &mut WebSocket<MaybeTlsStream<TcpStream>>,
     collector: &mut AgentCollector,
     mut mig_rt: Option<MigrationRuntime<'_>>,
+    mut updater: Option<&mut update::UpdateRuntime>,
 ) -> Result<(), String> {
     collector.network_first_ctrl = true;
+    if let Some(u) = updater.as_deref_mut() {
+        u.reset_for_session();
+    }
     let hello = collector.collect_hello();
     send_json(ws, &hello)?;
 
@@ -392,6 +428,9 @@ fn run_session_with_migration(
 
     loop {
         let now = Instant::now();
+        if let Some(u) = updater.as_deref_mut() {
+            u.poll();
+        }
 
         if collector.check_lease(now) {
             next_sample_at = next_sample_at.min(now + collector.scheduler.interval);
@@ -409,18 +448,38 @@ fn run_session_with_migration(
                 initial_snapshot_pending = false;
                 if collector.scheduler.mode == SampleMode::Idle {
                     let batch = collector.collect_hello_batch(now);
-                    send_telemetry(ws, &batch, &collector.network_quality)?;
+                    send_telemetry(
+                        ws,
+                        &batch,
+                        &collector.network_quality,
+                        updater.as_deref_mut(),
+                    )?;
                 } else {
                     let metrics = collector.collect_metrics_and_seed_edge(now);
-                    send_telemetry(ws, &metrics, &collector.network_quality)?;
+                    send_telemetry(
+                        ws,
+                        &metrics,
+                        &collector.network_quality,
+                        updater.as_deref_mut(),
+                    )?;
                 }
             } else if collector.scheduler.mode == SampleMode::Idle {
                 if let Some(edge_batch) = collector.collect_idle_tick(now) {
-                    send_telemetry(ws, &edge_batch, &collector.network_quality)?;
+                    send_telemetry(
+                        ws,
+                        &edge_batch,
+                        &collector.network_quality,
+                        updater.as_deref_mut(),
+                    )?;
                 }
             } else {
                 let metrics = collector.collect_metrics_and_seed_edge(now);
-                send_telemetry(ws, &metrics, &collector.network_quality)?;
+                send_telemetry(
+                    ws,
+                    &metrics,
+                    &collector.network_quality,
+                    updater.as_deref_mut(),
+                )?;
             }
             next_sample_at = now + collector.scheduler.interval;
         }
@@ -430,10 +489,30 @@ fn run_session_with_migration(
             && now >= next_cohort_at
         {
             if let Some(cohort_batch) = collector.take_batch(BatchReason::Cohort) {
-                send_telemetry(ws, &cohort_batch, &collector.network_quality)?;
+                send_telemetry(
+                    ws,
+                    &cohort_batch,
+                    &collector.network_quality,
+                    updater.as_deref_mut(),
+                )?;
             }
             collector.mark_cohort_fired();
             next_cohort_at = collector.next_cohort_instant(now, SystemTime::now());
+        }
+
+        if collector.scheduler.mode == SampleMode::Idle
+            && !initial_snapshot_pending
+            && updater
+                .as_deref()
+                .is_some_and(update::UpdateRuntime::has_status_change)
+        {
+            let batch = collector.collect_flush_batch(now);
+            send_telemetry(
+                ws,
+                &batch,
+                &collector.network_quality,
+                updater.as_deref_mut(),
+            )?;
         }
 
         let now_after_send = Instant::now();
@@ -444,9 +523,15 @@ fn run_session_with_migration(
         if let Some(lease_exp) = collector.scheduler.lease_expires_at {
             earliest = earliest.min(lease_exp);
         }
-        let wait = earliest
+        let mut wait = earliest
             .saturating_duration_since(now_after_send)
             .clamp(MIN_READ_TIMEOUT, MAX_READ_TIMEOUT);
+        if updater
+            .as_deref()
+            .is_some_and(update::UpdateRuntime::is_busy)
+        {
+            wait = wait.min(Duration::from_millis(250));
+        }
 
         inner_tcp(ws.get_ref())
             .set_read_timeout(Some(wait))
@@ -456,18 +541,33 @@ fn run_session_with_migration(
             Ok(Message::Text(txt)) => match CtrlFrame::parse(&txt) {
                 Ok(mut ctrl) => {
                     let migrate_opt = ctrl.migrate.take();
+                    let update_opt = ctrl.update.take();
                     let flush_now = ctrl.flush_now == Some(true);
                     let prev_mode = collector.scheduler.mode;
                     let apply_now = Instant::now();
                     collector.apply_ctrl(ctrl, apply_now);
                     let new_mode = collector.scheduler.mode;
 
+                    if let (Some(directive), Some(u)) = (update_opt, updater.as_deref_mut()) {
+                        u.handle_directive(directive);
+                    }
+
                     if flush_now {
                         let batch = collector.collect_flush_batch(apply_now);
-                        send_telemetry(ws, &batch, &collector.network_quality)?;
+                        send_telemetry(
+                            ws,
+                            &batch,
+                            &collector.network_quality,
+                            updater.as_deref_mut(),
+                        )?;
                     } else if prev_mode == SampleMode::Idle && new_mode != SampleMode::Idle {
                         if let Some(batch) = collector.take_batch(BatchReason::Flush) {
-                            send_telemetry(ws, &batch, &collector.network_quality)?;
+                            send_telemetry(
+                                ws,
+                                &batch,
+                                &collector.network_quality,
+                                updater.as_deref_mut(),
+                            )?;
                         }
                     }
 
@@ -512,17 +612,31 @@ fn run_session_with_migration(
                                     *rt.session_started_at = Instant::now();
 
                                     collector.reset_session_buffers_for_cutover();
+                                    if let Some(u) = updater.as_deref_mut() {
+                                        u.reset_for_session();
+                                    }
                                     collector.warm_baseline();
                                     let cutover_now = Instant::now();
                                     next_ping_at = cutover_now + PING_INTERVAL;
 
                                     canary_ctrl.migrate = None;
+                                    let canary_update = canary_ctrl.update.take();
                                     collector.network_first_ctrl = true;
                                     let canary_flush = canary_ctrl.flush_now == Some(true);
                                     collector.apply_ctrl(canary_ctrl, cutover_now);
+                                    if let (Some(upd_dir), Some(u)) =
+                                        (canary_update, updater.as_deref_mut())
+                                    {
+                                        u.handle_directive(upd_dir);
+                                    }
                                     if canary_flush {
                                         let batch = collector.collect_flush_batch(cutover_now);
-                                        send_telemetry(ws, &batch, &collector.network_quality)?;
+                                        send_telemetry(
+                                            ws,
+                                            &batch,
+                                            &collector.network_quality,
+                                            updater.as_deref_mut(),
+                                        )?;
                                     }
 
                                     if collector.scheduler.mode != SampleMode::Idle {
@@ -567,7 +681,7 @@ fn run_session(
     ws: &mut WebSocket<MaybeTlsStream<TcpStream>>,
     collector: &mut AgentCollector,
 ) -> Result<(), String> {
-    run_session_with_migration(ws, collector, None)
+    run_session_with_migration(ws, collector, None, None)
 }
 
 fn run_once(cfg: Config) -> Result<(), String> {
@@ -589,6 +703,7 @@ fn run_once(cfg: Config) -> Result<(), String> {
 
 fn run_daemon(cfg: Config, state_dir: PathBuf, allow_insecure_ws: bool) -> Result<(), String> {
     let tls_config = build_tls_config()?;
+    let mut upd_runtime = update::UpdateRuntime::init(&cfg, &state_dir, tls_config.clone());
     let mut mig_state = MigrationState::init(state_dir, allow_insecure_ws);
     let mut collector = AgentCollector::new(cfg.clone());
     let mut rng = XorShift64::from_entropy();
@@ -612,6 +727,7 @@ fn run_daemon(cfg: Config, state_dir: PathBuf, allow_insecure_ws: bool) -> Resul
                         state: &mut mig_state,
                         session_started_at: &mut session_started_at,
                     }),
+                    Some(&mut upd_runtime),
                 );
                 if let Err(err) = res {
                     eprintln!("session ended: {err}");
@@ -653,7 +769,7 @@ fn run_daemon(cfg: Config, state_dir: PathBuf, allow_insecure_ws: bool) -> Resul
 
 fn print_help() {
     println!(
-        "{} {}\n\nUSAGE:\n    uniob-agent [OPTIONS]\n\nOPTIONS:\n    -c, --config <PATH>            Path to TOML config (default: {DEFAULT_CONFIG_PATH})\n    --state-dir <PATH>             Directory for runtime override state (default: {DEFAULT_STATE_DIR})\n    --allow-insecure-ws-for-test   Allow ws:// and private IPs for local testing\n    --once                         Print one hello + metrics JSON snapshot and exit\n    -V, --version                  Print version and exit\n    -h, --help                     Print help and exit",
+        "{} {}\n\nUSAGE:\n    uniob-agent [OPTIONS]\n\nOPTIONS:\n    -c, --config <PATH>            Path to TOML config (default: {DEFAULT_CONFIG_PATH})\n    --state-dir <PATH>             Directory for runtime override state (default: {DEFAULT_STATE_DIR})\n    --allow-insecure-ws-for-test   Allow ws:// and private IPs for local testing\n    --verify-staged-update         Verify staged update binary + HMAC signature and exit\n    --once                         Print one hello + metrics JSON snapshot and exit\n    -V, --version                  Print version and exit\n    -h, --help                     Print help and exit",
         env!("CARGO_PKG_NAME"),
         env!("CARGO_PKG_VERSION")
     );
@@ -674,6 +790,24 @@ fn main() {
         }
         CliAction::Help => {
             print_help();
+        }
+        CliAction::VerifyStagedUpdate {
+            config_path,
+            state_dir,
+        } => {
+            let cfg = match Config::load(&config_path) {
+                Ok(c) => c,
+                Err(err) => {
+                    eprintln!("error: {err}");
+                    std::process::exit(1);
+                }
+            };
+            if let Err(err) =
+                update::verify_staged_update(&cfg.server.node_id, &cfg.server.token, &state_dir)
+            {
+                eprintln!("staged update verification failed: {err}");
+                std::process::exit(1);
+            }
         }
         CliAction::Run {
             config_path,
@@ -824,6 +958,19 @@ mod tests {
             parse_cli_args(["uniob-agent", "-h"]).unwrap(),
             CliAction::Help
         );
+        assert_eq!(
+            parse_cli_args([
+                "uniob-agent",
+                "--config",
+                "/tmp/a.toml",
+                "--verify-staged-update"
+            ])
+            .unwrap(),
+            CliAction::VerifyStagedUpdate {
+                config_path: PathBuf::from("/tmp/a.toml"),
+                state_dir: PathBuf::from(DEFAULT_STATE_DIR),
+            }
+        );
 
         assert!(parse_cli_args(["uniob-agent", "--config"]).is_err());
         assert!(parse_cli_args(["uniob-agent", "--state-dir"]).is_err());
@@ -877,7 +1024,12 @@ mod tests {
             assert_eq!(hello_val["v"], 2);
             assert_eq!(
                 hello_val["capabilities"],
-                serde_json::json!(["mb_v2", "migrate_v1", "network_quality_v1"])
+                serde_json::json!([
+                    "mb_v2",
+                    "migrate_v1",
+                    "network_quality_v1",
+                    "auto_update_v1"
+                ])
             );
 
             // 2. Send CtrlFrame switching to Live (mode 1) within 200ms
@@ -1218,6 +1370,7 @@ token = "{token}"
                 state: &mut mig_state,
                 session_started_at: &mut session_started_at,
             }),
+            None,
         );
 
         h1_thread.join().unwrap();
@@ -1391,6 +1544,7 @@ token = "{token}"
                 state: &mut mig_state,
                 session_started_at: &mut session_started_at,
             }),
+            None,
         );
 
         h1_thread.join().unwrap();
@@ -1435,6 +1589,105 @@ token = "tok_ssrf"
         let err = perform_canary_handshake(&directive, &cfg, &tls_cfg, &mut collector, &mig_state)
             .unwrap_err();
         assert!(err.contains("SSRF guard"), "unexpected error: {err}");
+
+        let _ = std::fs::remove_dir_all(&state_dir);
+    }
+
+    #[test]
+    fn ws_session_accepts_ctrl_update_and_stages_verified_binary() {
+        use std::io::{Read as _, Write as _};
+
+        let mut payload = b"\x7fELF".to_vec();
+        payload.extend_from_slice(b"ws-session-test-agent-binary");
+        let sha = crypto::sha256_hex(&payload);
+
+        let http_listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let http_addr = http_listener.local_addr().unwrap();
+        let http_thread = std::thread::spawn(move || {
+            let (mut s, _) = http_listener.accept().unwrap();
+            let mut req = [0u8; 1024];
+            let _ = s.read(&mut req);
+            let hdr = format!(
+                "HTTP/1.1 200 OK\r\nContent-Length: {}\r\n\r\n",
+                payload.len()
+            );
+            s.write_all(hdr.as_bytes()).unwrap();
+            s.write_all(&payload).unwrap();
+        });
+
+        let ws_listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let ws_addr = ws_listener.local_addr().unwrap();
+        let now_sec = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+        let dl_url = format!("http://{http_addr}/uniob-agent");
+        let hmac = update::compute_update_hmac_hex(
+            "tok_ws_upd",
+            "nd_ws_upd",
+            "0.2.1",
+            &sha,
+            now_sec,
+            &dl_url,
+            None,
+        );
+
+        let server_thread = std::thread::spawn(move || {
+            let (mut ws, _) = accept_one_ws(&ws_listener);
+            let hello = read_json_frame(&mut ws);
+            assert!(hello["capabilities"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|v| v == "auto_update_v1"));
+
+            ws.send(Message::Text(
+                serde_json::json!({
+                    "t": "ctrl",
+                    "mode": 1,
+                    "interval_ms": 1000,
+                    "top_n": 10,
+                    "lease_sec": 30,
+                    "update": {
+                        "version": "0.2.1",
+                        "sha256": sha,
+                        "url": dl_url,
+                        "issued_at": now_sec,
+                        "hmac": hmac,
+                    }
+                })
+                .to_string(),
+            ))
+            .unwrap();
+
+            let mut saw_staged = false;
+            for _ in 0..10 {
+                let frame = read_json_frame(&mut ws);
+                if frame["upd"]["st"] == "staged" {
+                    assert_eq!(frame["upd"]["ver"], "0.2.1");
+                    saw_staged = true;
+                    break;
+                }
+            }
+            assert!(saw_staged, "expected agent to report upd.st == staged");
+            let _ = ws.close(None);
+        });
+
+        let state_dir = unique_state_dir("ws_upd");
+        let cfg = Config::from_toml_str(&format!(
+            "[server]\nurl = 'ws://{ws_addr}/api/agent/ws'\nnode_id = 'nd_ws_upd'\ntoken = 'tok_ws_upd'\n"
+        ))
+        .unwrap();
+        let tls_cfg = build_tls_config().unwrap();
+        let mut ws = connect_ws(&cfg, &tls_cfg).unwrap();
+        let mut collector = AgentCollector::new(cfg.clone());
+        let mut updater = update::UpdateRuntime::init(&cfg, &state_dir, tls_cfg.clone());
+
+        let _ = run_session_with_migration(&mut ws, &mut collector, None, Some(&mut updater));
+
+        http_thread.join().unwrap();
+        server_thread.join().unwrap();
+        assert!(update::verify_staged_update("nd_ws_upd", "tok_ws_upd", &state_dir).is_ok());
 
         let _ = std::fs::remove_dir_all(&state_dir);
     }

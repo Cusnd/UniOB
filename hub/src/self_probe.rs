@@ -211,6 +211,11 @@ pub fn spawn_self_probe_loop(hub: HubState) {
         }
         let _ = hub.ingest_hello(&node_id, None, hw).await;
         let quality = crate::network_quality::ProbeRuntime::new(&node_id);
+        if let Ok(control) = hub.db.network_control(&node_id) {
+            if let Ok(value) = serde_json::to_value(control) {
+                quality.apply_control(Some(&value), true);
+            }
+        }
 
         let mut prev_cpu = read_linux_cpu();
         let mut prev_net = read_linux_net();
@@ -219,11 +224,17 @@ pub fn spawn_self_probe_loop(hub: HubState) {
         tokio::time::sleep(Duration::from_secs(1)).await;
         let mut ticker = tokio::time::interval(Duration::from_secs(30));
         loop {
-            ticker.tick().await;
-            if let Ok(control) = hub.db.network_control(&node_id) {
-                if let Ok(value) = serde_json::to_value(control) {
-                    quality.apply_control(Some(&value), false);
+            let refresh_only = tokio::select! {
+                _ = ticker.tick() => false,
+                _ = hub.self_probe_notify.notified() => true,
+            };
+            if refresh_only {
+                if let Ok(control) = hub.db.network_control(&node_id) {
+                    if let Ok(value) = serde_json::to_value(control) {
+                        quality.apply_control(Some(&value), false);
+                    }
                 }
+                continue;
             }
             let quality_payload = quality.payload();
             let curr_ms = now_ms();
@@ -297,6 +308,7 @@ pub fn spawn_self_probe_loop(hub: HubState) {
                     udp: 0,
                 },
                 procs: None,
+                upd: None,
             };
 
             let tuple = crate::protocol::metrics_frame_to_tuple(&frame);
@@ -304,6 +316,7 @@ pub fn spawn_self_probe_loop(hub: HubState) {
                 network_quality: quality_payload
                     .as_ref()
                     .and_then(|p| serde_json::to_value(p).ok()),
+                upd: None,
                 v: 2,
                 reason: "cohort".to_string(),
                 pts: vec![tuple],

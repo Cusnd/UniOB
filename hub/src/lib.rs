@@ -1,3 +1,4 @@
+pub mod agent_update;
 pub mod alerts;
 pub mod auth;
 pub mod config;

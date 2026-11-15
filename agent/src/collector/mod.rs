@@ -396,6 +396,7 @@ impl AgentCollector {
                 "mb_v2".to_string(),
                 "migrate_v1".to_string(),
                 "network_quality_v1".to_string(),
+                "auto_update_v1".to_string(),
             ],
             migrated_epoch,
         }
@@ -456,6 +457,7 @@ impl AgentCollector {
             disks,
             net,
             procs,
+            upd: None,
         }
     }
 
@@ -644,6 +646,7 @@ token = "tok_1"
                 udp: 2,
             },
             procs: None,
+            upd: None,
         }
     }
 
@@ -667,6 +670,7 @@ token = "tok_1"
                 ..Default::default()
             }),
             migrate: None,
+            update: None,
             network_quality: None,
         };
         sched.apply_ctrl(ctrl, t0);
@@ -713,6 +717,7 @@ enabled = false
                 flush_now: None,
                 watermarks: None,
                 migrate: None,
+                update: None,
                 network_quality: None,
             },
             now,
@@ -731,7 +736,8 @@ enabled = false
             vec![
                 "mb_v2".to_string(),
                 "migrate_v1".to_string(),
-                "network_quality_v1".to_string()
+                "network_quality_v1".to_string(),
+                "auto_update_v1".to_string(),
             ]
         );
         assert_eq!(h1.migrated_epoch, None);
@@ -815,6 +821,7 @@ enabled = false
                     disk: Some(90.0),
                 }),
                 migrate: None,
+                update: None,
                 network_quality: None,
             },
             Instant::now(),

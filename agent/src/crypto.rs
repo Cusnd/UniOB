@@ -15,15 +15,21 @@ const H0: [u32; 8] = [
 
 const HEX_LOWER: &[u8; 16] = b"0123456789abcdef";
 
-struct Sha256 {
+pub struct Sha256 {
     state: [u32; 8],
     buf: [u8; 64],
     buf_len: usize,
     total_len: u64,
 }
 
+impl Default for Sha256 {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl Sha256 {
-    fn new() -> Self {
+    pub fn new() -> Self {
         Self {
             state: H0,
             buf: [0u8; 64],
@@ -32,7 +38,7 @@ impl Sha256 {
         }
     }
 
-    fn update(&mut self, mut data: &[u8]) {
+    pub fn update(&mut self, mut data: &[u8]) {
         self.total_len = self.total_len.wrapping_add(data.len() as u64);
 
         if self.buf_len > 0 {
@@ -61,7 +67,7 @@ impl Sha256 {
         }
     }
 
-    fn finalize(mut self) -> [u8; 32] {
+    pub fn finalize(mut self) -> [u8; 32] {
         let bit_len = (self.total_len as u128) * 8;
         self.buf[self.buf_len] = 0x80;
         self.buf_len += 1;
@@ -83,6 +89,10 @@ impl Sha256 {
             out[i * 4..(i + 1) * 4].copy_from_slice(&word.to_be_bytes());
         }
         out
+    }
+
+    pub fn finalize_hex(self) -> String {
+        to_hex_lower(&self.finalize())
     }
 }
 
