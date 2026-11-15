@@ -1092,6 +1092,7 @@ mod tests {
             days_remaining: 10,
         };
         let metrics = NodeMetricsPayload {
+            network_quality: None,
             ts: 1000,
             up: 60,
             cpu: CpuMetrics {

@@ -566,6 +566,8 @@ impl HubDb {
         )
         .map_err(|e| format!("DB schema init failed: {e}"))?;
 
+        crate::network_quality_store::init_schema(&conn)?;
+
         Ok(Self {
             conn: Arc::new(Mutex::new(conn)),
         })
@@ -668,10 +670,11 @@ impl HubDb {
                             n.mem_total, n.swap_total, n.agent_version, n.proc_enabled,
                             n.mute_until, n.created_at, n.updated_at,
                             s.last_seen_ts, s.online, s.last_metrics_json,
-                            t.cycle_key, t.cycle_rx_bytes, t.cycle_tx_bytes
+                            t.cycle_key, t.cycle_rx_bytes, t.cycle_tx_bytes, nq.payload
                      FROM nodes n
                      LEFT JOIN node_state s ON s.node_id = n.id
                      LEFT JOIN traffic_ledgers t ON t.node_id = n.id
+                     LEFT JOIN network_quality_state nq ON nq.node_id = n.id
                      ORDER BY n.sort_order ASC, n.created_at ASC",
                 )
                 .map_err(|e| format!("list_nodes prepare error: {e}"))?;
@@ -693,9 +696,14 @@ impl HubDb {
                         compute_counted_bytes(rx_bytes, tx_bytes, &node.traffic_count_mode);
                     let tags: Vec<String> =
                         serde_json::from_str(&node.tags_json).unwrap_or_default();
-                    let metrics: Option<NodeMetricsPayload> = last_metrics_json
+                    let mut metrics: Option<NodeMetricsPayload> = last_metrics_json
                         .as_deref()
                         .and_then(|s| serde_json::from_str(s).ok());
+                    if let Some(metrics) = metrics.as_mut() {
+                        metrics.network_quality = row
+                            .get::<_, Option<String>>(28)?
+                            .and_then(|s| serde_json::from_str(&s).ok());
+                    }
 
                     Ok(NodeSummary {
                         id: node.id,
@@ -1752,7 +1760,15 @@ impl HubDb {
                     .collect(),
             };
 
-            for s in settings_entries {
+            for mut s in settings_entries {
+                if let Some(value) = crate::network_quality_store::normalize_setting(&s.key, &s.value)? {
+                    if let Some(node_id) = s.key.strip_prefix(crate::network_quality_store::NODE_PREFIX) {
+                        let exists: bool = tx.query_row("SELECT EXISTS(SELECT 1 FROM nodes WHERE id=?1)", [node_id], |r| r.get(0))
+                            .map_err(|e| e.to_string())?;
+                        if !exists { return Err("Network configuration refers to an unknown node".into()); }
+                    }
+                    s.value = value;
+                }
                 if matches!(
                     s.key.as_str(),
                     "watchdog_state"
@@ -2094,6 +2110,7 @@ mod tests {
         ];
         for (idx, &t) in timestamps.iter().enumerate() {
             let p = NodeMetricsPayload {
+                network_quality: None,
                 ts: t as u64,
                 up: (100 + idx * 30) as u64,
                 cpu: CpuMetrics {

@@ -15,11 +15,12 @@
     "typecheck:worker": "npm --prefix worker run typecheck",
     "typecheck": "npm run typecheck:web && npm run typecheck:worker",
     "test:worker": "npm --prefix worker test",
+    "test:web": "npm --prefix web test",
     "test:agent": "cargo test --manifest-path agent/Cargo.toml",
     "build:agent": "cargo build --release --manifest-path agent/Cargo.toml",
     "test:hub": "cargo test --manifest-path hub/Cargo.toml",
     "build:hub": "cargo build --release --manifest-path hub/Cargo.toml",
     "build": "npm run build:web",
-    "test": "npm run test:agent && npm run test:hub && npm run test:worker"
+    "test": "npm run test:agent && npm run test:hub && npm run test:worker && npm run test:web"
   }
 }

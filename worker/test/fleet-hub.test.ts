@@ -8,7 +8,7 @@ import { env } from "cloudflare:workers";
 import { describe, expect, it } from "vitest";
 import { sha256Hex } from "../src/crypto";
 import { payloadToCompactTuple } from "../src/do/tsdb-slab";
-import type { AgentCtrlFrame } from "../src/types";
+import type { AgentCtrlFrame, AgentWsAttachment } from "../src/types";
 import {
   authedFetch,
   connectAgentWs,
@@ -564,6 +564,136 @@ describe("FleetHubDO Multiplexed WebSocket & Watch Lease Transitions", () => {
 
     clientWs.close();
     agentWs.close();
+  });
+
+
+  it.each([
+    { scope: "fleet", cadence: 20, mode: 1, interval: 10000 },
+    { scope: "detail", cadence: 20, mode: 1, interval: 2000 },
+    { scope: "fleet", cadence: 50, mode: 1, interval: 10000 },
+    { scope: "proc", cadence: 50, mode: 2, interval: 2000 },
+  ])("renews $scope agent leases for $cadence-second clients without redundant ctrl or flush", async ({ scope, cadence, mode, interval }) => {
+    const cookie = await setupAndLogin();
+    const first = await createTestNode(cookie, { name: "watched-renew" });
+    const second = await createTestNode(cookie, { name: "scope-renew" });
+    const agentWs = await connectAgentWs(first.node.id, first.agent_token);
+    const otherWs = await connectAgentWs(second.node.id, second.agent_token);
+    for (const agent of [agentWs, otherWs]) {
+      const initial = nextWsMessage<AgentCtrlFrame>(agent, m => m.t === "ctrl");
+      agent.send(JSON.stringify(makeHelloFrame({ v: 2, capabilities: ["mb_v2", "network_quality_v1"] })));
+      await initial;
+    }
+    const clientWs = await connectClientWs(cookie);
+    const subscribed = nextWsMessage<AgentCtrlFrame>(agentWs, m => m.t === "ctrl" && m.mode === mode && m.interval_ms === interval);
+    const otherSubscribed = scope === "fleet" ? nextWsMessage<AgentCtrlFrame>(otherWs, m => m.t === "ctrl" && m.mode === 1) : null;
+    clientWs.send(JSON.stringify(scope === "fleet" ? { op: "sub_fleet" } : { op: "sub_node", nodeId: first.node.id, proc: scope === "proc" }));
+    await subscribed;
+    if (otherSubscribed) await otherSubscribed;
+    const controls: AgentCtrlFrame[] = [];
+    const otherControls: AgentCtrlFrame[] = [];
+    let batches = 0;
+    agentWs.addEventListener("message", ev => {
+      const message = JSON.parse(String(ev.data)) as AgentCtrlFrame;
+      if (message.t === "ctrl") controls.push(message);
+    });
+    otherWs.addEventListener("message", ev => {
+      const message = JSON.parse(String(ev.data)) as AgentCtrlFrame;
+      if (message.t === "ctrl") otherControls.push(message);
+    });
+    clientWs.addEventListener("message", ev => { if (JSON.parse(String(ev.data)).t === "fleet_batch") batches++; });
+    const hub = env.FLEET_HUB_DO.getByName("global");
+    const renewWithAge = async (age: number) => {
+      await runInDurableObject(hub, (_obj, state) => {
+        for (const sock of state.getWebSockets("agent")) {
+          const att = sock.deserializeAttachment() as AgentWsAttachment;
+          sock.serializeAttachment({ ...att, last_ctrl_ts: Math.floor(Date.now() / 1000) - age });
+        }
+      });
+      clientWs.send(JSON.stringify({ op: "renew" }));
+      await flushMicrotasks();
+    };
+    // Simulate elapsed time through persisted dispatch timestamps instead of
+    // sleeping or modifying the runtime clock used by WebSocket delivery.
+    for (let cycle = 0; cycle < 2; cycle++) {
+      if (cadence === 20) {
+        await renewWithAge(20);
+        expect(controls).toHaveLength(cycle);
+        expect(otherControls).toHaveLength(scope === "fleet" ? cycle : 0);
+      }
+      await renewWithAge(cadence === 20 ? 40 : 50);
+      expect(controls).toHaveLength(cycle + 1);
+      expect(otherControls).toHaveLength(scope === "fleet" ? cycle + 1 : 0);
+      expect(controls.at(-1)).toMatchObject({ t: "ctrl", mode, interval_ms: interval, lease_sec: 90 });
+      for (const frame of [...controls, ...otherControls]) {
+        expect(frame.flush_now).toBeUndefined();
+        expect(frame.network_quality).toBeUndefined();
+      }
+      // A duplicate renewal (including another viewer's renewal) must not
+      // reset the throttle and fan out another ctrl immediately.
+      clientWs.send(JSON.stringify({ op: "renew" }));
+      await flushMicrotasks();
+      expect(controls).toHaveLength(cycle + 1);
+    }
+    expect(batches).toBe(0);
+    // Eviction must preserve the timestamp and continue suppressing duplicate
+    // renewals; a fresh isolate must not broadcast controls on each renewal.
+    await evictDurableObject(hub);
+    clientWs.send(JSON.stringify({ op: "renew" }));
+    await flushMicrotasks();
+    expect(controls).toHaveLength(2);
+    await renewWithAge(50);
+    expect(controls).toHaveLength(3);
+    const persisted = await runInDurableObject(hub, (_obj, state) => {
+      const sock = state.getWebSockets(`agent:${first.node.id}`)[0]!;
+      return (sock.deserializeAttachment() as AgentWsAttachment).last_ctrl_ts ?? 0;
+    });
+    expect(persisted).toBeGreaterThanOrEqual(Math.floor(Date.now() / 1000) - 2);
+    // Resource-mode recovery also sends a ctrl. Both m and mb dispatches must
+    // reset the same gate, otherwise the next browser renew duplicates them.
+    for (const batch of [false, true]) {
+      await runInDurableObject(hub, (_obj, state) => {
+        const sock = state.getWebSockets(`agent:${first.node.id}`)[0]!;
+        const att = sock.deserializeAttachment() as AgentWsAttachment;
+        sock.serializeAttachment({ ...att, mode: 0, last_ctrl_ts: Math.floor(Date.now() / 1000) - 50 });
+      });
+      const before = controls.length;
+      const recovered = nextWsMessage<AgentCtrlFrame>(agentWs, m => m.t === "ctrl" && m.mode === mode);
+      const metrics = makeMetricsFrame(Math.floor(Date.now() / 1000));
+      const { t: _type, ...last } = metrics;
+      agentWs.send(JSON.stringify(batch ? { t: "mb", v: 2, reason: "cohort", pts: [payloadToCompactTuple(last)], last } : metrics));
+      await recovered;
+      clientWs.send(JSON.stringify({ op: "renew" }));
+      await flushMicrotasks();
+      expect(controls).toHaveLength(before + 1);
+    }
+    clientWs.close();
+    agentWs.close();
+    otherWs.close();
+  });
+
+  it("records a ctrl refresh timestamp only after a successful dispatch", async () => {
+    await setupAndLogin();
+    const result = await runInDurableObject(env.FLEET_HUB_DO.getByName("global"), (instance) => {
+      const oldTimestamp = Math.floor(Date.now() / 1000) - 50;
+      let attachment: AgentWsAttachment = { role: "agent", nodeId: "send-check", ver: 2, mode: 1, caps: [], last_ctrl_ts: oldTimestamp };
+      let fail = true;
+      let writes = 0;
+      const socket = {
+        send: () => { if (fail) throw new Error("closed during send"); },
+        deserializeAttachment: () => attachment,
+        serializeAttachment: (next: AgentWsAttachment) => { attachment = next; writes++; },
+      } as unknown as WebSocket;
+      const sender = instance as unknown as { sendAgentCtrl(ws: WebSocket, ctrl: AgentCtrlFrame): void };
+      const ctrl: AgentCtrlFrame = { t: "ctrl", mode: 1, interval_ms: 2000, top_n: 30, lease_sec: 90 };
+      sender.sendAgentCtrl(socket, ctrl);
+      const failed = { timestamp: attachment.last_ctrl_ts, writes };
+      fail = false;
+      sender.sendAgentCtrl(socket, ctrl);
+      return { oldTimestamp, failed, successful: { timestamp: attachment.last_ctrl_ts, writes } };
+    });
+    expect(result.failed).toEqual({ timestamp: result.oldTimestamp, writes: 0 });
+    expect(result.successful.writes).toBe(1);
+    expect(result.successful.timestamp).toBeGreaterThan(result.oldTimestamp);
   });
 
   it("lazily hydrates D1-inserted nodes into FleetHubDO and writes changed hardware back to D1 on hello", async () => {

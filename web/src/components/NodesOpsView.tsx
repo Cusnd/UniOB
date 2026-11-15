@@ -43,6 +43,7 @@ import {
   SegmentedControl,
   StatusDot,
 } from "./ui/Primitives";
+import { NetworkQualitySettings } from "./NetworkQualitySettings";
 
 export interface NodesOpsViewProps {
   nodes: HorizonNode[];
@@ -81,6 +82,8 @@ export function NodesOpsView(props: NodesOpsViewProps): React.JSX.Element {
   const tokenTitleId = useId();
   const deleteTitleId = useId();
   const groupDatalistId = useId();
+  const networkTitleId = useId();
+  const [networkSettingsOpen, setNetworkSettingsOpen] = useState(false);
 
   // Filter & Sort state
   const [groupFilter, setGroupFilter] = useState<string>("ALL");
@@ -304,7 +307,9 @@ export function NodesOpsView(props: NodesOpsViewProps): React.JSX.Element {
           </Badge>
         }
         actions={
-          nodes.length > 0 ? (
+          <div className="flex flex-wrap items-center gap-2">
+            <Button size="sm" variant="ghost" icon={<SlidersHorizontal className="h-3.5 w-3.5" aria-hidden="true" />} onClick={() => setNetworkSettingsOpen(true)}>网络检测</Button>
+            {nodes.length > 0 && (
             <Button
               size="sm"
               variant="ghost"
@@ -313,7 +318,8 @@ export function NodesOpsView(props: NodesOpsViewProps): React.JSX.Element {
             >
               服务与迁移
             </Button>
-          ) : undefined
+            )}
+          </div>
         }
       />
 
@@ -859,6 +865,7 @@ export function NodesOpsView(props: NodesOpsViewProps): React.JSX.Element {
         maxWidthClass="max-w-[460px]"
       >
         {editingNode && (
+          <>
           <form onSubmit={(e) => void handleSaveEdit(e)} className="space-y-4 p-5">
             <div className="flex items-center justify-between">
               <h3
@@ -1137,7 +1144,19 @@ export function NodesOpsView(props: NodesOpsViewProps): React.JSX.Element {
               </Button>
             </div>
           </form>
+          <div className="border-t border-[var(--border-hairline)] p-5">
+            <NetworkQualitySettings key={editingNode.id} nodeId={editingNode.id}
+              state={nodes.find(node => node.id === editingNode.id)?.metrics?.network_quality} />
+          </div>
+          </>
         )}
+      </NativeDialog>
+
+      <NativeDialog open={networkSettingsOpen} onClose={() => setNetworkSettingsOpen(false)} titleId={networkTitleId} maxWidthClass="max-w-[580px]">
+        {networkSettingsOpen && <div className="space-y-4 p-5">
+          <div className="flex items-center justify-between gap-3"><h2 id={networkTitleId} className="text-[15px] font-semibold">网络检测设置</h2><IconCloseButton onClick={() => setNetworkSettingsOpen(false)} /></div>
+          <NetworkQualitySettings />
+        </div>}
       </NativeDialog>
 
       {/* 2. Rotate Connection Key Modal */}

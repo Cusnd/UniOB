@@ -26,9 +26,13 @@ import type {
 } from "../hooks/useFleetSocket";
 import { api } from "../api/client";
 import { formatBytes, getMemTotalBytes } from "../utils/format";
+import { NetworkQualityPanel } from "./NetworkQualityPanel";
+import { usePageVisible } from "../hooks/usePageVisible";
 
 export interface TelemetryChartsPanelProps {
   node: HorizonNode;
+  active: boolean;
+  networkLive: boolean;
   resolvedTheme?: "dark" | "light";
   liveSeries: LiveMetricSample[];
   chartMode: "live" | MetricsRange;
@@ -168,10 +172,13 @@ function TelemetryPanelCard({
 
 export function TelemetryChartsPanel({
   node,
+  active,
+  networkLive,
   liveSeries,
   chartMode,
   onChartModeChange,
 }: TelemetryChartsPanelProps): React.JSX.Element {
+  const visible = usePageVisible();
   const [historyData, setHistoryData] =
     useState<NodeMetricsHistoryResponse | null>(null);
   const [historyLoading, setHistoryLoading] = useState(false);
@@ -184,6 +191,7 @@ export function TelemetryChartsPanel({
   }, [node.id, chartMode]);
 
   useEffect(() => {
+    if (!active || !visible) return;
     if (chartMode === "live") {
       setHistoryLoading(false);
       setHistoryError(null);
@@ -214,7 +222,7 @@ export function TelemetryChartsPanel({
     return () => {
       cancelled = true;
     };
-  }, [node.id, chartMode, refreshSeq]);
+  }, [node.id, chartMode, refreshSeq, active, visible]);
 
   const effectiveLive = useMemo<LiveMetricSample[]>(() => {
     const list = [...liveSeries];
@@ -459,6 +467,8 @@ export function TelemetryChartsPanel({
           )}
         </div>
       </div>
+
+      <NetworkQualityPanel node={node} chartMode={chartMode} active={active} live={networkLive} refreshKey={refreshSeq} />
 
       {historyError && chartMode !== "live" && (
         <div

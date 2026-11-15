@@ -1,5 +1,6 @@
 import type { FleetHubDO } from "./do/fleet-hub-do";
 import type { NodeDO } from "./do/node-do";
+import type { NqControl, NqState } from "./network-quality";
 
 export interface Env {
   DB: D1Database;
@@ -57,6 +58,7 @@ export interface AgentProcEntry {
 }
 
 export interface NodeMetricsPayload {
+  network_quality?: NqState;
   ts: number;
   up: number;
   cpu: {
@@ -84,7 +86,8 @@ export interface NodeMetricsPayload {
   };
 }
 
-export interface AgentMetricsFrame extends NodeMetricsPayload {
+export interface AgentMetricsFrame extends Omit<NodeMetricsPayload, "network_quality"> {
+  network_quality?: unknown;
   t: "m";
   procs?: AgentProcEntry[];
 }
@@ -117,6 +120,7 @@ export type CompactMetricTuple = [
 export type BatchFlushReason = "cohort" | "edge" | "flush" | "hello";
 
 export interface AgentMetricsBatchFrame {
+  network_quality?: unknown;
   t: "mb";
   v: 2;
   reason: BatchFlushReason;
@@ -140,6 +144,7 @@ export interface CtrlMigrateDirective {
 }
 
 export interface AgentCtrlFrame {
+  network_quality?: NqControl;
   t: "ctrl";
   mode: SampleMode;
   interval_ms: number;
@@ -360,6 +365,8 @@ export interface AgentWsAttachment {
   ver: number;
   mode: SampleMode;
   caps: string[];
+  /** Last resource ctrl dispatch, retained across Durable Object hibernation. */
+  last_ctrl_ts?: number;
 }
 
 export interface ClientAttachment {

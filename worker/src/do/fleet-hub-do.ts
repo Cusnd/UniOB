@@ -14,6 +14,7 @@ import {
   type AlertRuleRuntimeState,
 } from "../alert/engine";
 import { generateId } from "../crypto";
+import { NetworkQualityStore } from "./network-quality-store";
 import {
   advanceTrafficLedger,
   computeCountedBytes,
@@ -80,6 +81,7 @@ import {
 } from "./tsdb-slab";
 
 const CLIENT_LEASE_SEC = 90;
+const AGENT_LEASE_REFRESH_SEC = 30;
 const OFFLINE_THRESHOLD_SEC = 60;
 const COHORT_OFFLINE_THRESHOLD_SEC = 390; // 300s cohort batch_sec + 90s grace
 const SAFETY_ALARM_MS = 15 * 60 * 1000;
@@ -173,6 +175,7 @@ export interface MigrateDispatchResult {
 
 export class FleetHubDO extends DurableObject<Env> {
   private readonly sql: SqlStorage;
+  private readonly networkQuality: NetworkQualityStore;
   private mirrorSeeded = false;
   private nodesMirror = new Map<string, NodeRow>();
   private rulesMirror = new Map<string, AlertRuleRow>();
@@ -187,6 +190,7 @@ export class FleetHubDO extends DurableObject<Env> {
   constructor(ctx: DurableObjectState, env: Env) {
     super(ctx, env);
     this.sql = ctx.storage.sql;
+    this.networkQuality = new NetworkQualityStore(this.sql, env, fn => this.ctx.storage.transactionSync(fn));
 
     // Auto-respond to browser heartbeat pings without waking the DO isolate.
     this.ctx.setWebSocketAutoResponse(
@@ -215,7 +219,12 @@ export class FleetHubDO extends DurableObject<Env> {
           "INSERT OR REPLACE INTO hub_meta (key, value) VALUES ('schema_version', '2')",
         );
       }
+      if (schemaVersion < 3) {
+        this.networkQuality.initSchema();
+        this.sql.exec("INSERT OR REPLACE INTO hub_meta(key,value) VALUES ('schema_version','3')");
+      }
       this.loadPersistedStateIntoMemory();
+      await this.networkQuality.ensureReady();
     });
   }
 
@@ -526,12 +535,30 @@ export class FleetHubDO extends DurableObject<Env> {
 
   private persistNodeStateSql(state: PersistedNodeState): void {
     this.sql.exec(
-      `INSERT OR REPLACE INTO node_state (
+      `INSERT INTO node_state (
         node_id, online, last_seen_ts, offline_deadline_ms,
         cycle_key, last_agent_rx, last_agent_tx, cycle_rx_bytes, cycle_tx_bytes,
         traffic_updated_at, last_flush_rx_tot, last_flush_tx_tot,
         last_raw_ts, last_boot_up, last_metrics_json, welford_5m_json, welford_1h_json, hw_json
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      ON CONFLICT(node_id) DO UPDATE SET
+        online = excluded.online,
+        last_seen_ts = excluded.last_seen_ts,
+        offline_deadline_ms = excluded.offline_deadline_ms,
+        cycle_key = excluded.cycle_key,
+        last_agent_rx = excluded.last_agent_rx,
+        last_agent_tx = excluded.last_agent_tx,
+        cycle_rx_bytes = excluded.cycle_rx_bytes,
+        cycle_tx_bytes = excluded.cycle_tx_bytes,
+        traffic_updated_at = excluded.traffic_updated_at,
+        last_flush_rx_tot = excluded.last_flush_rx_tot,
+        last_flush_tx_tot = excluded.last_flush_tx_tot,
+        last_raw_ts = excluded.last_raw_ts,
+        last_boot_up = excluded.last_boot_up,
+        last_metrics_json = excluded.last_metrics_json,
+        welford_5m_json = excluded.welford_5m_json,
+        welford_1h_json = excluded.welford_1h_json,
+        hw_json = excluded.hw_json`,
       state.node_id,
       state.online,
       state.last_seen_ts,
@@ -862,10 +889,12 @@ export class FleetHubDO extends DurableObject<Env> {
       return;
     }
     if (type === "m") {
+      await this.networkQuality.ingest(att.nodeId, frame.network_quality, Math.floor(Date.now()/1000));
       await this.onAgentMetrics(ws, att, frame as unknown as AgentMetricsFrame);
       return;
     }
     if (type === "mb") {
+      await this.networkQuality.ingest(att.nodeId, frame.network_quality, Math.floor(Date.now()/1000));
       await this.onAgentBatch(ws, att, frame as unknown as AgentMetricsBatchFrame);
     }
   }
@@ -980,6 +1009,7 @@ export class FleetHubDO extends DurableObject<Env> {
     const caps = Array.isArray(hello.capabilities)
       ? hello.capabilities.filter((c): c is string => typeof c === "string").slice(0, 8)
       : [];
+    this.networkQuality.setSupported(nodeId, caps.includes("network_quality_v1"));
     const desired = this.computeCtrlForNode(nodeId, ver, nowSec);
     const nextAtt: AgentWsAttachment = {
       role: "agent",
@@ -992,7 +1022,7 @@ export class FleetHubDO extends DurableObject<Env> {
 
     // Send initial ctrl immediately for v2 agents or when browsers already watch this node.
     if (ver >= 2 || desired.mode > 0) {
-      sendJsonSafe(ws, desired);
+      this.sendAgentCtrl(ws, desired);
     }
 
     if (wasOffline && latestNode) {
@@ -1017,7 +1047,8 @@ export class FleetHubDO extends DurableObject<Env> {
     const nowSec = Math.floor(Date.now() / 1000);
     const state = this.getOrCreateNodeState(nodeId);
     const wasOffline = state.online === 0;
-    const { t: _t, procs, ...payload } = frame;
+    const { t: _t, procs, network_quality: _nq, ...resourcePayload } = frame;
+    const payload: NodeMetricsPayload = { ...resourcePayload, network_quality: this.networkQuality.state(nodeId) };
 
     const prevLedger: TrafficLedgerRow | null =
       state.cycle_key !== null && state.last_agent_rx !== null && state.last_agent_tx !== null
@@ -1106,7 +1137,7 @@ export class FleetHubDO extends DurableObject<Env> {
     if (desired.mode !== att.mode) {
       att.mode = desired.mode;
       ws.serializeAttachment(att);
-      sendJsonSafe(ws, desired);
+      this.sendAgentCtrl(ws, desired);
     }
 
     if (wasOffline) {
@@ -1128,7 +1159,8 @@ export class FleetHubDO extends DurableObject<Env> {
     const nowSec = Math.floor(Date.now() / 1000);
     const state = this.getOrCreateNodeState(nodeId);
     const wasOffline = state.online === 0;
-    const { procs: _lastProcs, ...lastPayload } = frame.last;
+    const { procs: _lastProcs, network_quality: _lastNq, ...resourcePayload } = frame.last;
+    const lastPayload: NodeMetricsPayload = { ...resourcePayload, network_quality: this.networkQuality.state(nodeId) };
 
     const validTuples: CompactMetricTuple[] = Array.isArray(frame.pts)
       ? frame.pts.filter(isValidCompactTuple)
@@ -1215,7 +1247,7 @@ export class FleetHubDO extends DurableObject<Env> {
       att.ver = 2;
       att.mode = desired.mode;
       ws.serializeAttachment(att);
-      sendJsonSafe(ws, desired);
+      this.sendAgentCtrl(ws, desired);
     }
 
     if (wasOffline) {
@@ -1225,7 +1257,6 @@ export class FleetHubDO extends DurableObject<Env> {
 
   /**
    * Appends sorted raw points into 10m ring chunks and advances 5m/1h Welford rollups
-   * using INSERT OR REPLACE exclusively (zero SQLite DELETE writes).
    */
   private ingestTsdbPointsSync(
     nodeId: string,
@@ -1274,7 +1305,7 @@ export class FleetHubDO extends DurableObject<Env> {
           : [];
       const merged = mergeSortedPoints(existingPoints, incoming);
       this.sql.exec(
-        "INSERT OR REPLACE INTO metrics_chunk_10m (node_id, slot, bucket_ts, payload) VALUES (?, ?, ?, ?)",
+        "INSERT INTO metrics_chunk_10m (node_id, slot, bucket_ts, payload) VALUES (?, ?, ?, ?) ON CONFLICT(node_id, slot) DO UPDATE SET bucket_ts = excluded.bucket_ts, payload = excluded.payload",
         nodeId,
         slot,
         bucketTs,
@@ -1323,7 +1354,7 @@ export class FleetHubDO extends DurableObject<Env> {
           : [];
       const merged = mergeSortedPoints(existingPoints, incoming);
       this.sql.exec(
-        `INSERT OR REPLACE INTO ${table} (node_id, slot, bucket_ts, payload) VALUES (?, ?, ?, ?)`,
+        `INSERT INTO ${table} (node_id, slot, bucket_ts, payload) VALUES (?, ?, ?, ?) ON CONFLICT(node_id, slot) DO UPDATE SET bucket_ts = excluded.bucket_ts, payload = excluded.payload`,
         nodeId,
         slot,
         bucketTs,
@@ -1353,6 +1384,7 @@ export class FleetHubDO extends DurableObject<Env> {
           exp: nowSec + CLIENT_LEASE_SEC,
         };
         ws.serializeAttachment(nextAtt);
+        this.reconcileAffectedAgents(att.fleet ? null : new Set(att.nodeId ? [att.nodeId] : []), undefined, true);
         await this.scheduleNextAlarm();
       }
       return;
@@ -1540,6 +1572,17 @@ export class FleetHubDO extends DurableObject<Env> {
     nowSec: number,
     excludeClientWs?: WebSocket,
   ): AgentCtrlFrame {
+    const ctrl = this.computeResourceCtrlForNode(nodeId, ver, nowSec, excludeClientWs);
+    if (this.networkQuality.state(nodeId).supported) ctrl.network_quality = this.networkQuality.control(nodeId);
+    return ctrl;
+  }
+
+  private computeResourceCtrlForNode(
+    nodeId: string,
+    ver: number,
+    nowSec: number,
+    excludeClientWs?: WebSocket,
+  ): AgentCtrlFrame {
     let hasNodeProc = false;
     let hasNodeDetail = false;
     let hasFleet = false;
@@ -1647,7 +1690,17 @@ export class FleetHubDO extends DurableObject<Env> {
     return hasAny ? watermarks : undefined;
   }
 
-  private reconcileAgentCtrl(nodeId: string, excludeClientWs?: WebSocket): void {
+  private sendAgentCtrl(ws: WebSocket, ctrl: AgentCtrlFrame): void {
+    if (!sendJsonSafe(ws, ctrl)) return;
+    const att = this.readAgentAttachment(ws);
+    if (att) {
+      att.mode = ctrl.mode;
+      att.last_ctrl_ts = Math.floor(Date.now() / 1000);
+      ws.serializeAttachment(att);
+    }
+  }
+
+  private reconcileAgentCtrl(nodeId: string, excludeClientWs?: WebSocket, renewOnly = false): void {
     const sockets = this.ctx.getWebSockets(`agent:${nodeId}`);
     if (sockets.length === 0) {
       return;
@@ -1657,38 +1710,43 @@ export class FleetHubDO extends DurableObject<Env> {
       if (!isSocketOpen(sock)) {
         continue;
       }
-      const att = this.readAgentAttachment(sock) ?? {
+      const att: AgentWsAttachment = this.readAgentAttachment(sock) ?? {
         role: "agent" as const,
         nodeId,
         ver: 1,
         mode: 0 as const,
         caps: [],
       };
-      const desired = this.computeCtrlForNode(nodeId, att.ver, nowSec, excludeClientWs);
+      // Browser renewals extend the agent's own lease as well as the watch lease.
+      // A 30s gate accommodates both 20s and 50s clients within the 90s lease.
+      const desired = renewOnly
+        ? this.computeResourceCtrlForNode(nodeId, att.ver, nowSec, excludeClientWs)
+        : this.computeCtrlForNode(nodeId, att.ver, nowSec, excludeClientWs);
+      if (renewOnly && (desired.mode === 0 || nowSec - (att.last_ctrl_ts ?? 0) < AGENT_LEASE_REFRESH_SEC)) continue;
       att.mode = desired.mode;
       sock.serializeAttachment(att);
-      sendJsonSafe(sock, desired);
+      this.sendAgentCtrl(sock, desired);
     }
   }
 
-  private reconcileAllConnectedAgents(excludeClientWs?: WebSocket): void {
+  private reconcileAllConnectedAgents(excludeClientWs?: WebSocket, renewOnly = false): void {
     const seen = new Set<string>();
     for (const sock of this.ctx.getWebSockets("agent")) {
       const att = this.readAgentAttachment(sock);
       if (att && !seen.has(att.nodeId)) {
         seen.add(att.nodeId);
-        this.reconcileAgentCtrl(att.nodeId, excludeClientWs);
+        this.reconcileAgentCtrl(att.nodeId, excludeClientWs, renewOnly);
       }
     }
   }
 
-  private reconcileAffectedAgents(nodeIds: Set<string> | null, excludeClientWs?: WebSocket): void {
+  private reconcileAffectedAgents(nodeIds: Set<string> | null, excludeClientWs?: WebSocket, renewOnly = false): void {
     if (nodeIds === null) {
-      this.reconcileAllConnectedAgents(excludeClientWs);
+      this.reconcileAllConnectedAgents(excludeClientWs, renewOnly);
       return;
     }
     for (const nodeId of nodeIds) {
-      this.reconcileAgentCtrl(nodeId, excludeClientWs);
+      this.reconcileAgentCtrl(nodeId, excludeClientWs, renewOnly);
     }
   }
 
@@ -2180,6 +2238,54 @@ export class FleetHubDO extends DurableObject<Env> {
 
   // ---- RPC Methods Called by index.ts ----
 
+  async getNetworkQualityConfig(nodeId?: string) {
+    await this.ensureMirrorSeeded();
+    return this.networkQuality.configResponse(nodeId);
+  }
+
+  async saveNetworkQualityConfig(value: unknown, nodeId?: string) {
+    await this.ensureMirrorSeeded();
+    await this.networkQuality.saveConfig(value, nodeId);
+    this.pushNetworkQualityConfig(nodeId);
+    return this.networkQuality.configResponse(nodeId);
+  }
+
+  async refreshNetworkQualitySettings(): Promise<void> {
+    await this.networkQuality.reloadSettings();
+    this.pushNetworkQualityConfig();
+  }
+
+  private pushNetworkQualityConfig(nodeId?: string): void {
+    const now = Math.floor(Date.now()/1000);
+    for (const sock of this.ctx.getWebSockets("agent")) {
+      const att = this.readAgentAttachment(sock);
+      if (att && (!nodeId || att.nodeId === nodeId) && att.caps?.includes("network_quality_v1") && isSocketOpen(sock)) {
+        this.sendAgentCtrl(sock, this.computeCtrlForNode(att.nodeId, att.ver, now));
+      }
+    }
+  }
+
+  async queryNetworkQuality(nodeId: string, range: string, cursor?: string) {
+    await this.ensureMirrorSeeded();
+    const state = this.networkQuality.state(nodeId);
+    const newest = state.latest.reduce((v,p) => Math.max(v,p.measured_at),0);
+    if (!cursor && state.supported && this.networkQuality.control(nodeId).enabled && Math.floor(Date.now()/1000)-newest > STALE_COHORT_FLUSH_SEC) {
+      const sock = this.ctx.getWebSockets(`agent:${nodeId}`).find(isSocketOpen);
+      const att = sock ? this.readAgentAttachment(sock) : null;
+      if (sock && att?.mode === 0) {
+        this.sendAgentCtrl(sock,{...this.computeCtrlForNode(nodeId,att.ver,Math.floor(Date.now()/1000)),flush_now:true});
+        await this.waitForFlush(nodeId,FLUSH_NOW_WAIT_MS);
+      }
+    }
+    try { return this.networkQuality.query(nodeId,range,cursor); }
+    catch (e) {
+      // Expected client validation errors should not surface as uncaught RPC
+      // exceptions in Durable Object logs.
+      if (e instanceof Error && e.message.includes("cursor")) return { error: e.message };
+      throw e;
+    }
+  }
+
   async getFleetSnapshot(): Promise<Record<string, NodeSnapshot>> {
     await this.ensureMirrorSeeded();
     const out: Record<string, NodeSnapshot> = {};
@@ -2212,7 +2318,7 @@ export class FleetHubDO extends DurableObject<Env> {
       if (openAgent && att && att.ver >= 2 && att.mode === 0) {
         const ctrl = this.computeCtrlForNode(nodeId, att.ver, nowSec);
         ctrl.flush_now = true;
-        sendJsonSafe(openAgent, ctrl);
+        this.sendAgentCtrl(openAgent, ctrl);
         await this.waitForFlush(nodeId, FLUSH_NOW_WAIT_MS);
       }
     }
@@ -2354,6 +2460,7 @@ export class FleetHubDO extends DurableObject<Env> {
     }
 
     this.ctx.storage.transactionSync(() => {
+      this.networkQuality.removeNode(nodeId);
       this.sql.exec("DELETE FROM nodes_mirror WHERE id = ?", nodeId);
       this.sql.exec("DELETE FROM node_state WHERE node_id = ?", nodeId);
       this.sql.exec("DELETE FROM alert_rule_states WHERE node_id = ?", nodeId);
@@ -2411,7 +2518,7 @@ export class FleetHubDO extends DurableObject<Env> {
       }
       const att = this.readAgentAttachment(sock);
       if (att && att.ver >= 2 && att.mode === 0) {
-        sendJsonSafe(sock, this.computeCtrlForNode(att.nodeId, att.ver, nowSec));
+        this.sendAgentCtrl(sock, this.computeCtrlForNode(att.nodeId, att.ver, nowSec));
       }
     }
   }
@@ -2528,7 +2635,7 @@ export class FleetHubDO extends DurableObject<Env> {
         epoch: target.epoch,
         sig: target.sig,
       };
-      sendJsonSafe(openSocket, ctrl);
+      this.sendAgentCtrl(openSocket, ctrl);
       dispatched.push(target.nodeId);
     }
 
@@ -2591,14 +2698,16 @@ function isSocketOpen(ws: WebSocket): boolean {
   }
 }
 
-function sendJsonSafe(ws: WebSocket, data: unknown): void {
-  sendRawSafe(ws, JSON.stringify(data));
+function sendJsonSafe(ws: WebSocket, data: unknown): boolean {
+  return sendRawSafe(ws, JSON.stringify(data));
 }
 
-function sendRawSafe(ws: WebSocket, payload: string): void {
+function sendRawSafe(ws: WebSocket, payload: string): boolean {
   try {
     ws.send(payload);
+    return true;
   } catch {
     // Socket closed mid-turn; webSocketClose handles cleanup.
+    return false;
   }
 }

@@ -69,6 +69,24 @@ Each element of `points` contains:
 
 ---
 
+## 2.1 Network Quality (optional v1 extension)
+
+Both backends expose these authenticated endpoints:
+
+| Method | Path | Body / result |
+| :--- | :--- | :--- |
+| `GET` / `PUT` | `/api/network-quality/config` | Global `{enabled, targets}`; disabled by default |
+| `GET` / `PUT` | `/api/nodes/:id/network-quality/config` | `{mode:"inherit"}`, `{mode:"off"}`, or `{mode:"custom",config:{enabled,targets}}` |
+| `GET` | `/api/nodes/:id/network-quality?range=1h&cursor=...` | `{node_id,range,resolution_sec,server_time,state,series,next_cursor}` |
+
+Targets have `id` (`ct`, `cu`, `cm`), `enabled`, `label`, `region`, `host`, `port`, and `address_family:"ipv4"`. Exactly three slots are required; host syntax and public IPv4 literals are validated. Responses include `config`, normalized `effective_config`, `config_id`, `applied_config_id`, and `supported`. A successful save can precede Agent acknowledgement; clients must compare configuration IDs.
+
+History ranges `1h`/`24h` return real 20-second attempts with trailing 120-second failure rates; `7d`/`30d` return 5-minute per-segment weighted aggregates. All-failure latency is `null` and failure rate is `100`. Missing attempts and changed segments are gaps. Invalid ranges (including `1y`) and invalid/expired cursors return `400`; unknown nodes return `404`. Follow every `next_cursor` until null; pages are limited to 3,000 points and 1,000,000 UTF-8 bytes of serialized points. Cursors expire after 30 minutes and pin the query end time.
+
+Agents advertise `network_quality_v1` in `hello.capabilities`. Supporting hubs send `ctrl.network_quality`; omission in the first control stops inherited probing, while omission in later controls means unchanged. Optional `network_quality` data is carried at the top level of existing `m`/`mb` frames, never inside resource tuples or `mb.last`. Failed parsing of this extension must leave existing resource/control fields usable. Raw points are deduplicated by sample identity. Node snapshots contain only compact latest state, without the raw batch. Normal Idle upload cadence remains 300 seconds.
+
+The exact schemas, deterministic identity encoding, public IP policy, shared fixture and compatibility rules are documented in the [implementation contract](features/network-quality-contract.md). Only configuration is included in export/migration bundles; retained network history stays on its original hub.
+
 ## 3. Alert Channels, Rules & Incidents
 
 | Method | Path | Auth | Availability | Description |
@@ -146,7 +164,7 @@ Self-hosted `uniob-hub` signs the exact request body with the shared Watchdog se
   - `{"op":"ping"}` -> Cloudflare Edge AutoResponse replies `{"t":"pong"}` without waking DO compute.
   - `{"op":"sub_fleet"}` / `{"op":"unsub_fleet"}`: Subscribe/unsubscribe to fleet-wide `fleet_batch` / `fleet_tick` updates.
   - `{"op":"sub_node","nodeId":"<id>","proc":true|false}` / `{"op":"unsub_node"}`: Request 2s high-resolution detail frames (`node_detail`) and optional live process list (`procs`) for one node.
-  - `{"op":"renew"}`: Renews active client lease window.
+  - `{"op":"renew"}`: Renews the active client lease and, when the watched Agent's last control dispatch is at least 30 seconds old, its 90-second resource lease. Multiple viewers share this throttle. Renewal does not request a flush, resend network configuration or start a network probe.
 - **Hub -> Client frames**:
   - `t: "fleet_batch"`: `{ t: "fleet_batch", ticks: FleetTickMessage[] }`
   - `t: "fleet_tick"`: `{ t: "fleet_tick", nodeId, online, last_seen_ts, traffic, metrics, hardware? }`

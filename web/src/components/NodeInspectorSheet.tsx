@@ -35,6 +35,7 @@ export interface NodeInspectorSheetProps {
   liveSeries: LiveMetricSample[];
   procsPacket: ProcsPacket | null;
   wsStatus: WsConnectionStatus;
+  liveNodeId: string | null;
   subNode: (nodeId: string, proc: boolean) => void;
   unsubNode: (nodeId: string) => void;
   onClose: () => void;
@@ -72,6 +73,7 @@ export function NodeInspectorSheet({
   liveSeries,
   procsPacket,
   wsStatus,
+  liveNodeId,
   subNode,
   unsubNode,
   onClose,
@@ -343,6 +345,8 @@ export function NodeInspectorSheet({
               {activeTab === "charts" && (
                 <TelemetryChartsPanel
                   node={activeNode}
+                  active={node !== null && activeTab === "charts"}
+                  networkLive={liveNodeId === node?.id}
                   resolvedTheme={resolvedTheme}
                   liveSeries={liveSeries}
                   chartMode={chartMode}

@@ -96,6 +96,8 @@ pub struct NodeMetricsPayload {
     #[serde(default)]
     pub disks: Vec<AgentDiskEntry>,
     pub net: NetMetrics,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub network_quality: Option<crate::network_quality::State>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -109,6 +111,9 @@ pub struct AgentMetricsFrame {
     pub net: NetMetrics,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub procs: Option<Vec<AgentProcEntry>>,
+    // Decode the optional extension independently so malformed data cannot drop resource metrics.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub network_quality: Option<serde_json::Value>,
 }
 
 impl From<&AgentMetricsFrame> for NodeMetricsPayload {
@@ -120,6 +125,7 @@ impl From<&AgentMetricsFrame> for NodeMetricsPayload {
             mem: f.mem.clone(),
             disks: f.disks.clone(),
             net: f.net.clone(),
+            network_quality: None,
         }
     }
 }
@@ -133,6 +139,8 @@ pub struct AgentMetricsBatchFrame {
     #[serde(default)]
     pub pts: Vec<CompactMetricTuple>,
     pub last: AgentMetricsFrame,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub network_quality: Option<serde_json::Value>,
 }
 
 fn default_v2() -> u8 {
@@ -198,6 +206,8 @@ pub struct AgentCtrlFrame {
     pub watermarks: Option<CtrlWatermarks>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub migrate: Option<CtrlMigrateDirective>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub network_quality: Option<crate::network_quality::Control>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -717,4 +727,46 @@ pub fn metrics_payload_to_tuple(m: &NodeMetricsPayload) -> CompactMetricTuple {
         m.net.tx_tot as f64,
         m.net.tcp_est as f64,
     ]
+}
+
+#[cfg(test)]
+mod network_extension_compatibility_tests {
+    use super::*;
+    use serde_json::{json, Value};
+
+    fn resource() -> Value {
+        json!({"ts":100,"up":5,"cpu":{"all":12,"steal":0,"iowait":0},
+            "mem":{"used":1,"avail":2,"cached":0,"swap_used":0},
+            "net":{"rx_bps":0,"tx_bps":0,"rx_tot":0,"tx_tot":0,"tcp_est":0,"tcp_tw":0,"udp":0}})
+    }
+
+    #[test]
+    fn old_resource_snapshots_and_malformed_extensions_preserve_sixteen_item_tuple() {
+        let old = resource();
+        let snapshot: NodeMetricsPayload = serde_json::from_value(old.clone()).unwrap();
+        assert!(snapshot.network_quality.is_none());
+        let expected = metrics_payload_to_tuple(&snapshot);
+        assert_eq!(expected.len(), 16);
+        for extension in [
+            json!(null),
+            json!("bad"),
+            json!({"schema_version":"bad"}),
+            json!({"points":[{"result":"unexpected"}]}),
+        ] {
+            let mut frame = old.clone();
+            frame["t"] = json!("m");
+            frame["network_quality"] = extension.clone();
+            let AgentInboundFrame::Metrics(decoded) = serde_json::from_value(frame).unwrap() else {
+                panic!("Expected metric frame")
+            };
+            assert_eq!(metrics_frame_to_tuple(&decoded), expected);
+            let batch = json!({"t":"mb","pts":[expected],"last":old,"network_quality":extension});
+            let AgentInboundFrame::MetricsBatch(decoded) = serde_json::from_value(batch).unwrap()
+            else {
+                panic!("Expected batch frame")
+            };
+            assert_eq!(decoded.pts, [expected]);
+            assert_eq!(metrics_frame_to_tuple(&decoded.last), expected);
+        }
+    }
 }

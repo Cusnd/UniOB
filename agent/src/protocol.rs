@@ -383,6 +383,14 @@ pub struct CtrlFrame {
     pub watermarks: Option<Watermarks>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub migrate: Option<MigrateDirective>,
+    // Keep this as raw JSON so a malformed optional extension never rejects a
+    // valid resource scheduler, lease, flush or migration control.
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "optional_json_value"
+    )]
+    pub network_quality: Option<serde_json::Value>,
 }
 
 impl Default for CtrlFrame {
@@ -397,8 +405,15 @@ impl Default for CtrlFrame {
             flush_now: None,
             watermarks: None,
             migrate: None,
+            network_quality: None,
         }
     }
+}
+
+fn optional_json_value<'de, D: Deserializer<'de>>(
+    deserializer: D,
+) -> Result<Option<serde_json::Value>, D::Error> {
+    serde_json::Value::deserialize(deserializer).map(Some)
 }
 
 impl CtrlFrame {
@@ -493,6 +508,28 @@ fn deserialize_lease_sec<'de, D: Deserializer<'de>>(deserializer: D) -> Result<u
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn malformed_network_extension_does_not_reject_valid_control_or_migration() {
+        for extension in [
+            serde_json::json!(null),
+            serde_json::json!("bad"),
+            serde_json::json!({"schema_version":99}),
+            serde_json::json!([1, 2, 3]),
+        ] {
+            let raw = serde_json::json!({"t":"ctrl","mode":1,"interval_ms":2000,"lease_sec":60,"flush_now":true,
+                "migrate":{"url":"wss://example.com/ws","epoch":1234,"sig":"abc"},"network_quality":extension});
+            let ctrl = CtrlFrame::parse(&raw.to_string()).unwrap();
+            assert_eq!(ctrl.mode, SampleMode::Live);
+            assert_eq!(ctrl.flush_now, Some(true));
+            assert_eq!(ctrl.migrate.unwrap().epoch, 1234);
+            assert_eq!(ctrl.network_quality, Some(extension));
+        }
+        assert!(CtrlFrame::parse(r#"{"t":"ctrl","mode":0}"#)
+            .unwrap()
+            .network_quality
+            .is_none());
+    }
 
     fn sample_metrics_frame() -> MetricsFrame {
         MetricsFrame {

@@ -250,6 +250,7 @@ async fn full_rest_agent_v2_client_ws_bundle_migrate_and_static_flow() {
 
     let ts = now_sec() as u64;
     let last_frame = AgentMetricsFrame {
+        network_quality: None,
         ts,
         up: 1200,
         cpu: CpuMetrics {
@@ -553,6 +554,344 @@ async fn login_cookie(client: &reqwest::Client, base: &str, password: &str) -> S
         .to_string()
 }
 
+#[tokio::test]
+async fn network_quality_config_wire_history_and_bundle_lifecycle() {
+    let (addr, hub) = spawn_test_hub(HubConfig::default(), None).await;
+    let base = format!("http://{addr}");
+    let client = reqwest::Client::new();
+    let cookie = login_cookie(&client, &base, "NetworkQualityTest123!").await;
+    let config_url = format!("{base}/api/network-quality/config");
+    assert_eq!(client.get(&config_url).send().await.unwrap().status(), 401);
+    let initial: Value = client
+        .get(&config_url)
+        .header("Cookie", &cookie)
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(initial["config"]["enabled"], false);
+    let mut config = initial["config"].clone();
+    config["enabled"] = json!(true);
+    let enabled: Value = client
+        .put(&config_url)
+        .header("Cookie", &cookie)
+        .json(&config)
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let effective = enabled["effective_config"].clone();
+    assert_ne!(initial["config_id"], enabled["config_id"]);
+    let mut invalid = config.clone();
+    invalid["targets"][0]["host"] = json!("127.0.0.1");
+    assert_eq!(
+        client
+            .put(&config_url)
+            .header("Cookie", &cookie)
+            .json(&invalid)
+            .send()
+            .await
+            .unwrap()
+            .status(),
+        400
+    );
+    let created: Value = client
+        .post(format!("{base}/api/nodes"))
+        .header("Cookie", &cookie)
+        .json(&json!({"name":"Quality Test"}))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let id = created["node"]["id"].as_str().unwrap();
+    let token = created["agent_token"].as_str().unwrap();
+    let node_config_url = format!("{base}/api/nodes/{id}/network-quality/config");
+    let quality_url = format!("{base}/api/nodes/{id}/network-quality");
+    let before: Value = client
+        .get(&node_config_url)
+        .header("Cookie", &cookie)
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(before["config"]["mode"], "inherit");
+    assert_eq!(before["supported"], false);
+    let mut req = format!("ws://{addr}/api/agent/ws")
+        .into_client_request()
+        .unwrap();
+    req.headers_mut()
+        .insert("X-UniOB-Node-Id", HeaderValue::from_str(id).unwrap());
+    req.headers_mut().insert(
+        "Authorization",
+        HeaderValue::from_str(&format!("Bearer {token}")).unwrap(),
+    );
+    let (mut ws, _) = tokio_tungstenite::connect_async(req).await.unwrap();
+    ws.send(WsMsg::Text(
+        json!({"t":"hello","v":2,"capabilities":["mb_v2","network_quality_v1"]})
+            .to_string()
+            .into(),
+    ))
+    .await
+    .unwrap();
+    let msg = timeout(Duration::from_secs(2), ws.next())
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap();
+    let ctrl: Value = serde_json::from_str(msg.to_text().unwrap()).unwrap();
+    assert_eq!(ctrl["network_quality"], effective);
+    let ts = now_sec() as u64;
+    let resource = json!({"ts":ts,"up":5,"cpu":{"all":12.,"steal":0.,"iowait":0.},"mem":{"used":1,"avail":2,"cached":0,"swap_used":0},"disks":[],"net":{"rx_bps":0,"tx_bps":0,"rx_tot":0,"tx_tot":0,"tcp_est":0,"tcp_tw":0,"udp":0}});
+    let mut malformed = resource.clone();
+    malformed["t"] = json!("m");
+    malformed["network_quality"] = json!("bad");
+    ws.send(WsMsg::Text(malformed.to_string().into()))
+        .await
+        .unwrap();
+    let mut target = effective["targets"][0].clone();
+    let revision = target
+        .as_object_mut()
+        .unwrap()
+        .remove("target_revision")
+        .unwrap();
+    let points: Vec<Value> = (0..15u64).map(|i| json!({"sample_id":format!("session:{i}:ct"),"round_seq":i,"config_id":effective["config_id"],"target_id":"ct","target_revision":revision,"segment_id":"session:ct:1","ts":ts-280+i*20,"result":"ok","connect_ms":i as f64+1.,"remote_ip":"1.1.1.1","target":target})).collect();
+    let extension = json!({"schema_version":1,"enabled":true,"applied_config_id":effective["config_id"],"config_error":null,"dropped_samples":0,"latest":[],"points":points});
+    let batch = json!({"t":"mb","v":2,"pts":[],"last":resource,"network_quality":extension});
+    ws.send(WsMsg::Text(batch.to_string().into()))
+        .await
+        .unwrap();
+    ws.send(WsMsg::Text(batch.to_string().into()))
+        .await
+        .unwrap();
+    for _ in 0..100 {
+        if hub
+            .db
+            .network_state(id)
+            .unwrap()
+            .latest
+            .first()
+            .is_some_and(|l| l.measured_at == ts)
+        {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    let history: Value = client
+        .get(format!("{quality_url}?range=1h"))
+        .header("Cookie", &cookie)
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(history["series"][0]["points"].as_array().unwrap().len(), 15);
+    assert_eq!(history["state"]["latest"][0]["attempts"], 6);
+    assert_eq!(history["state"]["latest"][0]["latency_median_ms"], 12.5);
+    assert_eq!(
+        history["state"]["applied_config_id"],
+        effective["config_id"]
+    );
+    let summary = hub.db.get_node_summary(id, now_sec()).unwrap().unwrap();
+    let metrics = summary.metrics.unwrap();
+    assert_eq!(metrics.cpu.all, 12.);
+    assert_eq!(metrics.network_quality.unwrap().latest[0].attempts, 6);
+    // A real reconnect keeps process-scoped sample identities and statistics.
+    ws.close(None).await.unwrap();
+    let mut req = format!("ws://{addr}/api/agent/ws")
+        .into_client_request()
+        .unwrap();
+    req.headers_mut()
+        .insert("X-UniOB-Node-Id", HeaderValue::from_str(id).unwrap());
+    req.headers_mut().insert(
+        "Authorization",
+        HeaderValue::from_str(&format!("Bearer {token}")).unwrap(),
+    );
+    let (mut ws, _) = tokio_tungstenite::connect_async(req).await.unwrap();
+    ws.send(WsMsg::Text(
+        json!({"t":"hello","v":2,"capabilities":["mb_v2","network_quality_v1"]})
+            .to_string()
+            .into(),
+    ))
+    .await
+    .unwrap();
+    let msg = timeout(Duration::from_secs(2), ws.next())
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap();
+    let reconnected: Value = serde_json::from_str(msg.to_text().unwrap()).unwrap();
+    assert_eq!(reconnected["network_quality"], effective);
+    let mut retransmission = batch.clone();
+    retransmission["last"]["up"] = json!(6);
+    ws.send(WsMsg::Text(retransmission.to_string().into()))
+        .await
+        .unwrap();
+    for _ in 0..100 {
+        if hub
+            .db
+            .get_node_summary(id, now_sec())
+            .unwrap()
+            .and_then(|s| s.metrics)
+            .is_some_and(|m| m.up == 6)
+        {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    let repeated: Value = client
+        .get(format!("{quality_url}?range=1h"))
+        .header("Cookie", &cookie)
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(repeated["series"], history["series"]);
+    assert_eq!(repeated["state"]["latest"], history["state"]["latest"]);
+    assert_eq!(
+        client
+            .get(format!("{quality_url}?range=1y"))
+            .header("Cookie", &cookie)
+            .send()
+            .await
+            .unwrap()
+            .status(),
+        400
+    );
+    assert_eq!(
+        client
+            .get(format!("{base}/api/nodes/missing/network-quality/config"))
+            .header("Cookie", &cookie)
+            .send()
+            .await
+            .unwrap()
+            .status(),
+        404
+    );
+    let off: Value = client
+        .put(&node_config_url)
+        .header("Cookie", &cookie)
+        .json(&json!({"mode":"off"}))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(off["effective_config"]["enabled"], false);
+    let msg = timeout(Duration::from_secs(2), ws.next())
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap();
+    let ctrl: Value = serde_json::from_str(msg.to_text().unwrap()).unwrap();
+    assert_eq!(ctrl["network_quality"]["enabled"], false);
+    let mut disabled = resource.clone();
+    disabled["t"] = json!("m");
+    disabled["network_quality"] = json!({"schema_version":1,"enabled":false,"applied_config_id":off["config_id"],"config_error":null,"dropped_samples":0,"latest":[],"points":[]});
+    ws.send(WsMsg::Text(disabled.to_string().into()))
+        .await
+        .unwrap();
+    for _ in 0..100 {
+        if hub
+            .db
+            .network_state(id)
+            .unwrap()
+            .applied_config_id
+            .as_deref()
+            == off["config_id"].as_str()
+        {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    assert!(!hub.db.network_state(id).unwrap().enabled);
+    assert_eq!(hub.db.network_state(id).unwrap().latest[0].measured_at, ts);
+    ws.close(None).await.unwrap();
+    let mut legacy = connect_and_hello_agent(&format!("ws://{addr}/api/agent/ws"), id, token).await;
+    let mut old_resource = resource.clone();
+    old_resource["t"] = json!("m");
+    old_resource["cpu"]["all"] = json!(21.);
+    legacy
+        .send(WsMsg::Text(old_resource.to_string().into()))
+        .await
+        .unwrap();
+    for _ in 0..100 {
+        if hub
+            .db
+            .get_node_summary(id, now_sec())
+            .unwrap()
+            .and_then(|s| s.metrics)
+            .is_some_and(|m| m.cpu.all == 21.)
+        {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    let unsupported = hub.db.network_state(id).unwrap();
+    assert!(!unsupported.supported);
+    assert!(!unsupported.enabled);
+    assert!(unsupported.latest.is_empty());
+    assert_eq!(
+        hub.db
+            .get_node_summary(id, now_sec())
+            .unwrap()
+            .unwrap()
+            .metrics
+            .unwrap()
+            .cpu
+            .all,
+        21.
+    );
+    let retained: Value = client
+        .get(format!("{quality_url}?range=1h"))
+        .header("Cookie", &cookie)
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(retained["series"], history["series"]);
+    let bundle = hub.db.export_bundle(now_sec()).unwrap();
+    assert!(bundle
+        .system_settings
+        .iter()
+        .any(|s| s.key == format!("network_quality_node:{id}")));
+    let imported: uniob_hub::protocol::ImportBundlePayload =
+        serde_json::from_value(serde_json::to_value(bundle).unwrap()).unwrap();
+    let new_db = HubDb::open_in_memory().unwrap();
+    new_db.import_bundle(&imported, now_sec()).unwrap();
+    assert!(!new_db.network_control(id).unwrap().enabled);
+    assert!(new_db.network_state(id).unwrap().latest.is_empty());
+    assert_eq!(
+        client
+            .delete(format!("{base}/api/nodes/{id}"))
+            .header("Cookie", &cookie)
+            .send()
+            .await
+            .unwrap()
+            .status(),
+        200
+    );
+    assert!(hub
+        .db
+        .get_setting(&format!("network_quality_node:{id}"))
+        .unwrap()
+        .is_none());
+    assert!(hub.db.network_state(id).unwrap().latest.is_empty());
+}
+
 async fn connect_and_hello_agent(
     ws_url: &str,
     node_id: &str,
@@ -600,6 +939,7 @@ async fn connect_and_hello_agent(
     };
     let ctrl: Value = serde_json::from_str(&ctrl_txt).unwrap();
     assert_eq!(ctrl["t"], "ctrl");
+    assert!(ctrl.get("network_quality").is_none());
     agent_ws
 }
 

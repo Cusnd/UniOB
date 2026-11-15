@@ -5,6 +5,9 @@ pub mod crypto;
 pub mod db;
 pub mod hub_state;
 pub mod install_scripts;
+#[path = "../../shared/network_quality.rs"]
+pub mod network_quality;
+pub mod network_quality_store;
 pub mod protocol;
 pub mod routes;
 pub mod self_probe;

@@ -32,6 +32,8 @@ import {
   sanitizeTrafficMode,
 } from "./migration";
 import { computeTrafficCycle } from "./traffic";
+import { nqParseConfig, nqParseOverride } from "./network-quality";
+import { NQ_RANGE_SECONDS } from "./do/network-quality-store";
 import type {
   AlertMetric,
   AlertOperator,
@@ -719,6 +721,7 @@ app.delete("/api/nodes/:id", async (c) => {
 
   await c.env.DB.batch([
     c.env.DB.prepare("DELETE FROM alert_incidents WHERE node_id = ?").bind(id),
+    c.env.DB.prepare("DELETE FROM system_settings WHERE key = ?").bind(`network_quality_node:${id}`),
     c.env.DB.prepare("DELETE FROM nodes WHERE id = ?").bind(id),
   ]);
   invalidateAgentTokenCache(id);
@@ -742,6 +745,35 @@ app.get("/api/nodes/:id/metrics", async (c) => {
   }
   const range: MetricRange = (rawRange as MetricRange | undefined) ?? "1h";
   const result = await getFleetHub(c.env).queryMetrics(id, range);
+  return c.json(result);
+});
+
+// Network quality uses admin auth already applied to /api/* above.
+app.get("/api/network-quality/config", async c => c.json(await getFleetHub(c.env).getNetworkQualityConfig()));
+app.put("/api/network-quality/config", async c => {
+  let config;
+  try { config = nqParseConfig(await c.req.json()); } catch (e) { return c.json({error: e instanceof Error ? e.message : "Invalid configuration"},400); }
+  return c.json(await getFleetHub(c.env).saveNetworkQualityConfig(config));
+});
+app.get("/api/nodes/:id/network-quality/config", async c => {
+  const id = c.req.param("id");
+  if (!await c.env.DB.prepare("SELECT id FROM nodes WHERE id=?").bind(id).first()) return c.json({error:"Node not found"},404);
+  return c.json(await getFleetHub(c.env).getNetworkQualityConfig(id));
+});
+app.put("/api/nodes/:id/network-quality/config", async c => {
+  const id = c.req.param("id");
+  if (!await c.env.DB.prepare("SELECT id FROM nodes WHERE id=?").bind(id).first()) return c.json({error:"Node not found"},404);
+  let config;
+  try { config = nqParseOverride(await c.req.json()); } catch (e) { return c.json({error: e instanceof Error ? e.message : "Invalid configuration"},400); }
+  return c.json(await getFleetHub(c.env).saveNetworkQualityConfig(config,id));
+});
+app.get("/api/nodes/:id/network-quality", async c => {
+  const id = c.req.param("id");
+  if (!await c.env.DB.prepare("SELECT id FROM nodes WHERE id=?").bind(id).first()) return c.json({error:"Node not found"},404);
+  const range = c.req.query("range") ?? "1h";
+  if (!Object.hasOwn(NQ_RANGE_SECONDS,range)) return c.json({error:"Invalid network quality range"},400);
+  const result = await getFleetHub(c.env).queryNetworkQuality(id,range,c.req.query("cursor"));
+  if ("error" in result) return c.json({error:result.error},400);
   return c.json(result);
 });
 

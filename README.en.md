@@ -14,11 +14,12 @@ UniOB is a secure, read-only Linux server fleet monitoring, on-demand process in
 
 | Document | Description |
 | :--- | :--- |
-| **[☁️ Cloudflare Workers Deployment Guide (ZH)](./docs/deploy-cloudflare.md)** | Step-by-step setup for zero-server `$0/mo` edge monitoring on Workers Free + Zero Trust Access |
+| **[☁️ Cloudflare Workers Deployment Guide (ZH)](./docs/deploy-cloudflare.md)** | SCCH edge deployment, Zero Trust Access, and usage planning |
 | **[🖥️ Self-Hosted `uniob-hub` & Migration Guide (ZH)](./docs/deploy-self-hosted.md)** | Dedicated VPS setup with Cloudflare Tunnel, Caddy/Nginx, external Watchdog, and live migration |
 | **[🏗️ Architecture Deep-Dive (ZH)](./docs/ARCHITECTURE.md)** | v1 cost bottlenecks, 6 SCCH cost optimizations, smart migration protocol, and resolved engineering traps |
 | **[🔌 HTTP & WebSocket API Reference](./docs/API.md)** | Complete REST API routes, Watchdog HMAC signatures, and Agent / Dashboard WebSocket protocols |
-| **[📐 Technical Spec & 7-Dimension Cost Model (ZH)](./docs/SPEC.md)** | Data structures, ring-slab TSDB layout, and 10 / 50 / 200-node Cloudflare billing comparisons |
+| **[📐 Technical Spec & Resource Cost Model (ZH)](./docs/SPEC.md)** | Data structures, ring-slab TSDB layout, and operating cost assumptions |
+| **[Network quality (ZH)](./docs/features/network-quality.md)** | Optional TCP/IPv4 probes, settings, and history |
 | **[🤝 Contributing](./CONTRIBUTING.md) · [🔒 Security Policy](./SECURITY.md) · [📝 Changelog](./CHANGELOG.md)** | Local checks, security boundaries, and release history |
 
 ---
@@ -27,12 +28,13 @@ UniOB is a secure, read-only Linux server fleet monitoring, on-demand process in
 
 UniOB runs identically in **Direction B (Cloudflare SCCH Edge Hub)** and **Direction A (Self-Hosted `uniob-hub` + Cloudflare Watchdog)** modes:
 
-- **`agent/` (`uniob-agent`)**: Static `musl` Rust agent reading `/proc` and `statvfs` directly (no `fork`/`exec` child shells). Strictly capped at `<= 2,621,440` bytes (`<= 2.5 MB`, enforced in CI), ~`3–6 MB` RSS, outbound-only `WSS (443)` with:
+- **`agent/` (`uniob-agent`)**: Static `musl` Rust agent reading `/proc` and `statvfs` directly (no `fork`/`exec` child shells). Strictly capped at `<= 2,621,440` bytes (`<= 2.5 MB`, enforced in CI), ~`3–6 MB` RSS, outbound `WSS (443)` telemetry. Enabling network quality additionally requires DNS and outbound TCP to configured target ports (80 by default), with:
+  - **Network quality**: Disabled by default; global settings and per-node inherit/custom/off. Three public IPv4 targets are probed every 20 seconds. The dashboard shows TCP connect latency, rolling failure rate, 24 hours of raw history and 30 days of five-minute aggregates. Idle telemetry retains its five-minute batch cadence. Budget for the additional message bytes, SQLite reads/writes, and retained history according to enabled targets and dashboard activity.
   - **Protocol v2 Cohort Batching & Edge Alert Flushing**: In Idle (`mode = 0`), buffers up to 12 `CompactMetricTuple` (16-number) points in memory and flushes one `mb` batch frame every 5 minutes aligned to UTC boundaries + deterministic `[0, 400)` ms jitter. Immediately flushes (`reason = "edge"`) on watermark crossings, `|Δcpu| >= 35%`, or host reboot so critical alerts suffer zero artificial delay.
   - **Two-Stage Canary Hot Migration (`agent/src/migrate.rs`)**: Verifies HMAC-SHA256 `ctrl.migrate` directives, timestamp window, monotonic `epoch` replay protection, and SSRF guards. Opens a canary connection to the target hub first, promotes once a valid `ctrl` frame arrives within `10s`, persists `/var/lib/uniob/endpoint_override.toml` (`StateDirectory=uniob`), and automatically rolls back to `fallback_url` if the new hub remains unreachable (`>= 300s` or `>= 10` failed reconnects).
   - **Read-Only Security Boundary**: Enumerated sampling modes (`0`/`1`/`2`), regex-free lexical `cmdline` sanitization, and `90s` client subscription leases that automatically downshift back to idle cohort batching.
 - **`worker/` (`uniob-worker`)**: Built with Hono, Cloudflare D1, SQLite Durable Objects, and the WebSocket Hibernation API:
-  - **Co-Located Single DO (`FleetHubDO`)**: Converges Agent WebSockets and Dashboard Client WebSockets in a single `FleetHubDO("global")` instance (**0 cross-DO RPCs**, `1 × 128 MB` instance billing), handles heartbeats at the edge via `setWebSocketAutoResponse` (`{"op":"ping"}` -> `{"t":"pong"}`), guards cold starts with `hub_meta.schema_version` (`0` repeated DDL), mirrors D1 config tables locally (`0` hot-path D1 queries), and writes ring-slab circular TSDB chunks (`metrics_chunk_10m` / `metrics_5m_chunk_1h` / `metrics_1h_chunk_1d`) with Welford streaming aggregation — letting **Cloudflare Workers Free (`100k` SQLite row writes/day) run up to ~112 Idle nodes or ~75 nodes with 2h/day live dashboard viewing**.
+  - **Co-Located Single DO (`FleetHubDO`)**: Converges Agent WebSockets and Dashboard Client WebSockets in a single `FleetHubDO("global")` instance (**0 cross-DO RPCs**, `1 × 128 MB` instance billing), handles heartbeats at the edge via `setWebSocketAutoResponse` (`{"op":"ping"}` -> `{"t":"pong"}`), guards cold starts with `hub_meta.schema_version` (`0` repeated DDL), mirrors D1 config tables locally (`0` hot-path D1 queries), and writes ring-slab circular TSDB chunks (`metrics_chunk_10m` / `metrics_5m_chunk_1h` / `metrics_1h_chunk_1d`) with Welford streaming aggregation to reduce resource history and state storage overhead. Capacity depends on enabled features, dashboard activity, and the account’s request, compute, read/write, and storage quotas.
   - **Cloudflare Watchdog (`worker/src/watchdog.ts`)**: `*/5 * * * *` Cron Trigger + HMAC-SHA256 `POST /api/watchdog/ping` endpoint (`576` Worker requests/day on Free tier, 0 DO calls).
   - **D1 (`uniob-meta`)**: Stores node registry, notification channels, alert rules, incident history, and system settings.
 - **`hub/` (`uniob-hub`)**: Standalone Rust Hub powered by Axum, Tokio-Tungstenite, and local SQLite WAL with zero cloud cost:

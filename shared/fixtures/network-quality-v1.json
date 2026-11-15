@@ -1,0 +1,997 @@
+{
+  "schema_version": 1,
+  "config": {
+    "enabled": true,
+    "targets": [
+      {
+        "id": "ct",
+        "enabled": true,
+        "label": "电信",
+        "region": "广东",
+        "host": "gd-ct-v4.ip.zstaticcdn.com",
+        "port": 80,
+        "address_family": "ipv4"
+      },
+      {
+        "id": "cu",
+        "enabled": true,
+        "label": "联通",
+        "region": "广东",
+        "host": "gd-cu-v4.ip.zstaticcdn.com",
+        "port": 80,
+        "address_family": "ipv4"
+      },
+      {
+        "id": "cm",
+        "enabled": true,
+        "label": "移动",
+        "region": "广东",
+        "host": "gd-cm-v4.ip.zstaticcdn.com",
+        "port": 80,
+        "address_family": "ipv4"
+      }
+    ]
+  },
+  "control": {
+    "schema_version": 1,
+    "config_id": "d6c085f8db78d6a142cd0ca0583a406cb638d90f5bc6c7c5a0e0d38e0ab1d38d",
+    "enabled": true,
+    "targets": [
+      {
+        "id": "ct",
+        "enabled": true,
+        "label": "电信",
+        "region": "广东",
+        "host": "gd-ct-v4.ip.zstaticcdn.com",
+        "port": 80,
+        "address_family": "ipv4",
+        "target_revision": "b07e74c290e241967ad3cbc63c0de6bf268eb921d125fe2fd3a259277a468efe"
+      },
+      {
+        "id": "cu",
+        "enabled": true,
+        "label": "联通",
+        "region": "广东",
+        "host": "gd-cu-v4.ip.zstaticcdn.com",
+        "port": 80,
+        "address_family": "ipv4",
+        "target_revision": "621e9786777a015006890f46afb5a5be9a0b5fb1f1c04bdb6431ae805cc7ed3a"
+      },
+      {
+        "id": "cm",
+        "enabled": true,
+        "label": "移动",
+        "region": "广东",
+        "host": "gd-cm-v4.ip.zstaticcdn.com",
+        "port": 80,
+        "address_family": "ipv4",
+        "target_revision": "94df6732049d950fa786eaabee300c988e39d7c90c18af29dcc286f2e62de3b7"
+      }
+    ]
+  },
+  "points": [
+    {
+      "sample_id": "fixture:ct:1",
+      "round_seq": 1,
+      "config_id": "d6c085f8db78d6a142cd0ca0583a406cb638d90f5bc6c7c5a0e0d38e0ab1d38d",
+      "target_id": "ct",
+      "target_revision": "b07e74c290e241967ad3cbc63c0de6bf268eb921d125fe2fd3a259277a468efe",
+      "segment_id": "fixture:ct:1",
+      "ts": 1700000100,
+      "result": "ok",
+      "connect_ms": 70,
+      "remote_ip": "1.1.1.1",
+      "target": {
+        "id": "ct",
+        "enabled": true,
+        "label": "电信",
+        "region": "广东",
+        "host": "gd-ct-v4.ip.zstaticcdn.com",
+        "port": 80,
+        "address_family": "ipv4"
+      }
+    },
+    {
+      "sample_id": "fixture:ct:2",
+      "round_seq": 2,
+      "config_id": "d6c085f8db78d6a142cd0ca0583a406cb638d90f5bc6c7c5a0e0d38e0ab1d38d",
+      "target_id": "ct",
+      "target_revision": "b07e74c290e241967ad3cbc63c0de6bf268eb921d125fe2fd3a259277a468efe",
+      "segment_id": "fixture:ct:1",
+      "ts": 1700000120,
+      "result": "ok",
+      "connect_ms": 72,
+      "remote_ip": "1.1.1.1",
+      "target": {
+        "id": "ct",
+        "enabled": true,
+        "label": "电信",
+        "region": "广东",
+        "host": "gd-ct-v4.ip.zstaticcdn.com",
+        "port": 80,
+        "address_family": "ipv4"
+      }
+    },
+    {
+      "sample_id": "fixture:ct:3",
+      "round_seq": 3,
+      "config_id": "d6c085f8db78d6a142cd0ca0583a406cb638d90f5bc6c7c5a0e0d38e0ab1d38d",
+      "target_id": "ct",
+      "target_revision": "b07e74c290e241967ad3cbc63c0de6bf268eb921d125fe2fd3a259277a468efe",
+      "segment_id": "fixture:ct:1",
+      "ts": 1700000140,
+      "result": "connect_timeout",
+      "connect_ms": null,
+      "remote_ip": "1.1.1.1",
+      "target": {
+        "id": "ct",
+        "enabled": true,
+        "label": "电信",
+        "region": "广东",
+        "host": "gd-ct-v4.ip.zstaticcdn.com",
+        "port": 80,
+        "address_family": "ipv4"
+      }
+    },
+    {
+      "sample_id": "fixture:ct:4",
+      "round_seq": 4,
+      "config_id": "d6c085f8db78d6a142cd0ca0583a406cb638d90f5bc6c7c5a0e0d38e0ab1d38d",
+      "target_id": "ct",
+      "target_revision": "b07e74c290e241967ad3cbc63c0de6bf268eb921d125fe2fd3a259277a468efe",
+      "segment_id": "fixture:ct:1",
+      "ts": 1700000160,
+      "result": "ok",
+      "connect_ms": 74,
+      "remote_ip": "1.1.1.1",
+      "target": {
+        "id": "ct",
+        "enabled": true,
+        "label": "电信",
+        "region": "广东",
+        "host": "gd-ct-v4.ip.zstaticcdn.com",
+        "port": 80,
+        "address_family": "ipv4"
+      }
+    },
+    {
+      "sample_id": "fixture:ct:5",
+      "round_seq": 5,
+      "config_id": "d6c085f8db78d6a142cd0ca0583a406cb638d90f5bc6c7c5a0e0d38e0ab1d38d",
+      "target_id": "ct",
+      "target_revision": "b07e74c290e241967ad3cbc63c0de6bf268eb921d125fe2fd3a259277a468efe",
+      "segment_id": "fixture:ct:1",
+      "ts": 1700000180,
+      "result": "ok",
+      "connect_ms": 71,
+      "remote_ip": "1.1.1.1",
+      "target": {
+        "id": "ct",
+        "enabled": true,
+        "label": "电信",
+        "region": "广东",
+        "host": "gd-ct-v4.ip.zstaticcdn.com",
+        "port": 80,
+        "address_family": "ipv4"
+      }
+    },
+    {
+      "sample_id": "fixture:ct:6",
+      "round_seq": 6,
+      "config_id": "d6c085f8db78d6a142cd0ca0583a406cb638d90f5bc6c7c5a0e0d38e0ab1d38d",
+      "target_id": "ct",
+      "target_revision": "b07e74c290e241967ad3cbc63c0de6bf268eb921d125fe2fd3a259277a468efe",
+      "segment_id": "fixture:ct:1",
+      "ts": 1700000200,
+      "result": "ok",
+      "connect_ms": 73,
+      "remote_ip": "1.1.1.1",
+      "target": {
+        "id": "ct",
+        "enabled": true,
+        "label": "电信",
+        "region": "广东",
+        "host": "gd-ct-v4.ip.zstaticcdn.com",
+        "port": 80,
+        "address_family": "ipv4"
+      }
+    },
+    {
+      "sample_id": "fixture:cu:1",
+      "round_seq": 1,
+      "config_id": "d6c085f8db78d6a142cd0ca0583a406cb638d90f5bc6c7c5a0e0d38e0ab1d38d",
+      "target_id": "cu",
+      "target_revision": "621e9786777a015006890f46afb5a5be9a0b5fb1f1c04bdb6431ae805cc7ed3a",
+      "segment_id": "fixture:cu:1",
+      "ts": 1700000100,
+      "result": "ok",
+      "connect_ms": 12,
+      "remote_ip": "1.1.1.1",
+      "target": {
+        "id": "cu",
+        "enabled": true,
+        "label": "联通",
+        "region": "广东",
+        "host": "gd-cu-v4.ip.zstaticcdn.com",
+        "port": 80,
+        "address_family": "ipv4"
+      }
+    },
+    {
+      "sample_id": "fixture:cu:2",
+      "round_seq": 2,
+      "config_id": "d6c085f8db78d6a142cd0ca0583a406cb638d90f5bc6c7c5a0e0d38e0ab1d38d",
+      "target_id": "cu",
+      "target_revision": "621e9786777a015006890f46afb5a5be9a0b5fb1f1c04bdb6431ae805cc7ed3a",
+      "segment_id": "fixture:cu:1",
+      "ts": 1700000120,
+      "result": "dns_error",
+      "connect_ms": null,
+      "remote_ip": null,
+      "target": {
+        "id": "cu",
+        "enabled": true,
+        "label": "联通",
+        "region": "广东",
+        "host": "gd-cu-v4.ip.zstaticcdn.com",
+        "port": 80,
+        "address_family": "ipv4"
+      }
+    },
+    {
+      "sample_id": "fixture:cu:3",
+      "round_seq": 3,
+      "config_id": "d6c085f8db78d6a142cd0ca0583a406cb638d90f5bc6c7c5a0e0d38e0ab1d38d",
+      "target_id": "cu",
+      "target_revision": "621e9786777a015006890f46afb5a5be9a0b5fb1f1c04bdb6431ae805cc7ed3a",
+      "segment_id": "fixture:cu:2",
+      "ts": 1700000140,
+      "result": "ok",
+      "connect_ms": 30,
+      "remote_ip": "8.8.8.8",
+      "target": {
+        "id": "cu",
+        "enabled": true,
+        "label": "联通",
+        "region": "广东",
+        "host": "gd-cu-v4.ip.zstaticcdn.com",
+        "port": 80,
+        "address_family": "ipv4"
+      }
+    },
+    {
+      "sample_id": "fixture:cu:4",
+      "round_seq": 4,
+      "config_id": "d6c085f8db78d6a142cd0ca0583a406cb638d90f5bc6c7c5a0e0d38e0ab1d38d",
+      "target_id": "cu",
+      "target_revision": "621e9786777a015006890f46afb5a5be9a0b5fb1f1c04bdb6431ae805cc7ed3a",
+      "segment_id": "fixture:cu:3",
+      "ts": 1700000160,
+      "result": "ok",
+      "connect_ms": 14,
+      "remote_ip": "1.1.1.1",
+      "target": {
+        "id": "cu",
+        "enabled": true,
+        "label": "联通",
+        "region": "广东",
+        "host": "gd-cu-v4.ip.zstaticcdn.com",
+        "port": 80,
+        "address_family": "ipv4"
+      }
+    },
+    {
+      "sample_id": "fixture:cm:1",
+      "round_seq": 1,
+      "config_id": "d6c085f8db78d6a142cd0ca0583a406cb638d90f5bc6c7c5a0e0d38e0ab1d38d",
+      "target_id": "cm",
+      "target_revision": "94df6732049d950fa786eaabee300c988e39d7c90c18af29dcc286f2e62de3b7",
+      "segment_id": "fixture:cm:1",
+      "ts": 1700000100,
+      "result": "connect_timeout",
+      "connect_ms": null,
+      "remote_ip": "1.1.1.1",
+      "target": {
+        "id": "cm",
+        "enabled": true,
+        "label": "移动",
+        "region": "广东",
+        "host": "gd-cm-v4.ip.zstaticcdn.com",
+        "port": 80,
+        "address_family": "ipv4"
+      }
+    },
+    {
+      "sample_id": "fixture:cm:2",
+      "round_seq": 2,
+      "config_id": "d6c085f8db78d6a142cd0ca0583a406cb638d90f5bc6c7c5a0e0d38e0ab1d38d",
+      "target_id": "cm",
+      "target_revision": "94df6732049d950fa786eaabee300c988e39d7c90c18af29dcc286f2e62de3b7",
+      "segment_id": "fixture:cm:1",
+      "ts": 1700000120,
+      "result": "connect_timeout",
+      "connect_ms": null,
+      "remote_ip": "1.1.1.1",
+      "target": {
+        "id": "cm",
+        "enabled": true,
+        "label": "移动",
+        "region": "广东",
+        "host": "gd-cm-v4.ip.zstaticcdn.com",
+        "port": 80,
+        "address_family": "ipv4"
+      }
+    },
+    {
+      "sample_id": "fixture:cm:3",
+      "round_seq": 3,
+      "config_id": "d6c085f8db78d6a142cd0ca0583a406cb638d90f5bc6c7c5a0e0d38e0ab1d38d",
+      "target_id": "cm",
+      "target_revision": "94df6732049d950fa786eaabee300c988e39d7c90c18af29dcc286f2e62de3b7",
+      "segment_id": "fixture:cm:1",
+      "ts": 1700000140,
+      "result": "connect_timeout",
+      "connect_ms": null,
+      "remote_ip": "1.1.1.1",
+      "target": {
+        "id": "cm",
+        "enabled": true,
+        "label": "移动",
+        "region": "广东",
+        "host": "gd-cm-v4.ip.zstaticcdn.com",
+        "port": 80,
+        "address_family": "ipv4"
+      }
+    },
+    {
+      "sample_id": "fixture:cm:4",
+      "round_seq": 4,
+      "config_id": "d6c085f8db78d6a142cd0ca0583a406cb638d90f5bc6c7c5a0e0d38e0ab1d38d",
+      "target_id": "cm",
+      "target_revision": "94df6732049d950fa786eaabee300c988e39d7c90c18af29dcc286f2e62de3b7",
+      "segment_id": "fixture:cm:1",
+      "ts": 1700000160,
+      "result": "connect_timeout",
+      "connect_ms": null,
+      "remote_ip": "1.1.1.1",
+      "target": {
+        "id": "cm",
+        "enabled": true,
+        "label": "移动",
+        "region": "广东",
+        "host": "gd-cm-v4.ip.zstaticcdn.com",
+        "port": 80,
+        "address_family": "ipv4"
+      }
+    },
+    {
+      "sample_id": "fixture:cm:5",
+      "round_seq": 5,
+      "config_id": "d6c085f8db78d6a142cd0ca0583a406cb638d90f5bc6c7c5a0e0d38e0ab1d38d",
+      "target_id": "cm",
+      "target_revision": "94df6732049d950fa786eaabee300c988e39d7c90c18af29dcc286f2e62de3b7",
+      "segment_id": "fixture:cm:1",
+      "ts": 1700000180,
+      "result": "connect_timeout",
+      "connect_ms": null,
+      "remote_ip": "1.1.1.1",
+      "target": {
+        "id": "cm",
+        "enabled": true,
+        "label": "移动",
+        "region": "广东",
+        "host": "gd-cm-v4.ip.zstaticcdn.com",
+        "port": 80,
+        "address_family": "ipv4"
+      }
+    },
+    {
+      "sample_id": "fixture:cm:6",
+      "round_seq": 6,
+      "config_id": "d6c085f8db78d6a142cd0ca0583a406cb638d90f5bc6c7c5a0e0d38e0ab1d38d",
+      "target_id": "cm",
+      "target_revision": "94df6732049d950fa786eaabee300c988e39d7c90c18af29dcc286f2e62de3b7",
+      "segment_id": "fixture:cm:1",
+      "ts": 1700000200,
+      "result": "connect_timeout",
+      "connect_ms": null,
+      "remote_ip": "1.1.1.1",
+      "target": {
+        "id": "cm",
+        "enabled": true,
+        "label": "移动",
+        "region": "广东",
+        "host": "gd-cm-v4.ip.zstaticcdn.com",
+        "port": 80,
+        "address_family": "ipv4"
+      }
+    }
+  ],
+  "expected": {
+    "latest": [
+      {
+        "target_id": "ct",
+        "target_revision": "b07e74c290e241967ad3cbc63c0de6bf268eb921d125fe2fd3a259277a468efe",
+        "segment_id": "fixture:ct:1",
+        "target": {
+          "id": "ct",
+          "enabled": true,
+          "label": "电信",
+          "region": "广东",
+          "host": "gd-ct-v4.ip.zstaticcdn.com",
+          "port": 80,
+          "address_family": "ipv4"
+        },
+        "measured_at": 1700000200,
+        "result": "ok",
+        "remote_ip": "1.1.1.1",
+        "latency_median_ms": 72,
+        "attempts": 6,
+        "failures": 1,
+        "failure_rate_pct": 16.666666666666668
+      },
+      {
+        "target_id": "cu",
+        "target_revision": "621e9786777a015006890f46afb5a5be9a0b5fb1f1c04bdb6431ae805cc7ed3a",
+        "segment_id": "fixture:cu:3",
+        "target": {
+          "id": "cu",
+          "enabled": true,
+          "label": "联通",
+          "region": "广东",
+          "host": "gd-cu-v4.ip.zstaticcdn.com",
+          "port": 80,
+          "address_family": "ipv4"
+        },
+        "measured_at": 1700000160,
+        "result": "ok",
+        "remote_ip": "1.1.1.1",
+        "latency_median_ms": 14,
+        "attempts": 1,
+        "failures": 0,
+        "failure_rate_pct": 0.0
+      },
+      {
+        "target_id": "cm",
+        "target_revision": "94df6732049d950fa786eaabee300c988e39d7c90c18af29dcc286f2e62de3b7",
+        "segment_id": "fixture:cm:1",
+        "target": {
+          "id": "cm",
+          "enabled": true,
+          "label": "移动",
+          "region": "广东",
+          "host": "gd-cm-v4.ip.zstaticcdn.com",
+          "port": 80,
+          "address_family": "ipv4"
+        },
+        "measured_at": 1700000200,
+        "result": "connect_timeout",
+        "remote_ip": "1.1.1.1",
+        "latency_median_ms": null,
+        "attempts": 6,
+        "failures": 6,
+        "failure_rate_pct": 100.0
+      }
+    ],
+    "raw_by_target": {
+      "ct": [
+        {
+          "ts": 1700000100,
+          "segment_id": "fixture:ct:1",
+          "target_revision": "b07e74c290e241967ad3cbc63c0de6bf268eb921d125fe2fd3a259277a468efe",
+          "target": {
+            "id": "ct",
+            "enabled": true,
+            "label": "电信",
+            "region": "广东",
+            "host": "gd-ct-v4.ip.zstaticcdn.com",
+            "port": 80,
+            "address_family": "ipv4"
+          },
+          "remote_ip": "1.1.1.1",
+          "round_seq": 1,
+          "result": "ok",
+          "latency_ms": 70,
+          "latency_max_ms": 70,
+          "attempts": 1,
+          "failures": 0,
+          "success_count": 1,
+          "latency_sum_ms": 70,
+          "failure_rate_pct": 0.0
+        },
+        {
+          "ts": 1700000120,
+          "segment_id": "fixture:ct:1",
+          "target_revision": "b07e74c290e241967ad3cbc63c0de6bf268eb921d125fe2fd3a259277a468efe",
+          "target": {
+            "id": "ct",
+            "enabled": true,
+            "label": "电信",
+            "region": "广东",
+            "host": "gd-ct-v4.ip.zstaticcdn.com",
+            "port": 80,
+            "address_family": "ipv4"
+          },
+          "remote_ip": "1.1.1.1",
+          "round_seq": 2,
+          "result": "ok",
+          "latency_ms": 72,
+          "latency_max_ms": 72,
+          "attempts": 2,
+          "failures": 0,
+          "success_count": 2,
+          "latency_sum_ms": 142,
+          "failure_rate_pct": 0.0
+        },
+        {
+          "ts": 1700000140,
+          "segment_id": "fixture:ct:1",
+          "target_revision": "b07e74c290e241967ad3cbc63c0de6bf268eb921d125fe2fd3a259277a468efe",
+          "target": {
+            "id": "ct",
+            "enabled": true,
+            "label": "电信",
+            "region": "广东",
+            "host": "gd-ct-v4.ip.zstaticcdn.com",
+            "port": 80,
+            "address_family": "ipv4"
+          },
+          "remote_ip": "1.1.1.1",
+          "round_seq": 3,
+          "result": "connect_timeout",
+          "latency_ms": null,
+          "latency_max_ms": 72,
+          "attempts": 3,
+          "failures": 1,
+          "success_count": 2,
+          "latency_sum_ms": 142,
+          "failure_rate_pct": 33.333333333333336
+        },
+        {
+          "ts": 1700000160,
+          "segment_id": "fixture:ct:1",
+          "target_revision": "b07e74c290e241967ad3cbc63c0de6bf268eb921d125fe2fd3a259277a468efe",
+          "target": {
+            "id": "ct",
+            "enabled": true,
+            "label": "电信",
+            "region": "广东",
+            "host": "gd-ct-v4.ip.zstaticcdn.com",
+            "port": 80,
+            "address_family": "ipv4"
+          },
+          "remote_ip": "1.1.1.1",
+          "round_seq": 4,
+          "result": "ok",
+          "latency_ms": 74,
+          "latency_max_ms": 74,
+          "attempts": 4,
+          "failures": 1,
+          "success_count": 3,
+          "latency_sum_ms": 216,
+          "failure_rate_pct": 25.0
+        },
+        {
+          "ts": 1700000180,
+          "segment_id": "fixture:ct:1",
+          "target_revision": "b07e74c290e241967ad3cbc63c0de6bf268eb921d125fe2fd3a259277a468efe",
+          "target": {
+            "id": "ct",
+            "enabled": true,
+            "label": "电信",
+            "region": "广东",
+            "host": "gd-ct-v4.ip.zstaticcdn.com",
+            "port": 80,
+            "address_family": "ipv4"
+          },
+          "remote_ip": "1.1.1.1",
+          "round_seq": 5,
+          "result": "ok",
+          "latency_ms": 71,
+          "latency_max_ms": 74,
+          "attempts": 5,
+          "failures": 1,
+          "success_count": 4,
+          "latency_sum_ms": 287,
+          "failure_rate_pct": 20.0
+        },
+        {
+          "ts": 1700000200,
+          "segment_id": "fixture:ct:1",
+          "target_revision": "b07e74c290e241967ad3cbc63c0de6bf268eb921d125fe2fd3a259277a468efe",
+          "target": {
+            "id": "ct",
+            "enabled": true,
+            "label": "电信",
+            "region": "广东",
+            "host": "gd-ct-v4.ip.zstaticcdn.com",
+            "port": 80,
+            "address_family": "ipv4"
+          },
+          "remote_ip": "1.1.1.1",
+          "round_seq": 6,
+          "result": "ok",
+          "latency_ms": 73,
+          "latency_max_ms": 74,
+          "attempts": 6,
+          "failures": 1,
+          "success_count": 5,
+          "latency_sum_ms": 360,
+          "failure_rate_pct": 16.666666666666668
+        }
+      ],
+      "cu": [
+        {
+          "ts": 1700000100,
+          "segment_id": "fixture:cu:1",
+          "target_revision": "621e9786777a015006890f46afb5a5be9a0b5fb1f1c04bdb6431ae805cc7ed3a",
+          "target": {
+            "id": "cu",
+            "enabled": true,
+            "label": "联通",
+            "region": "广东",
+            "host": "gd-cu-v4.ip.zstaticcdn.com",
+            "port": 80,
+            "address_family": "ipv4"
+          },
+          "remote_ip": "1.1.1.1",
+          "round_seq": 1,
+          "result": "ok",
+          "latency_ms": 12,
+          "latency_max_ms": 12,
+          "attempts": 1,
+          "failures": 0,
+          "success_count": 1,
+          "latency_sum_ms": 12,
+          "failure_rate_pct": 0.0
+        },
+        {
+          "ts": 1700000120,
+          "segment_id": "fixture:cu:1",
+          "target_revision": "621e9786777a015006890f46afb5a5be9a0b5fb1f1c04bdb6431ae805cc7ed3a",
+          "target": {
+            "id": "cu",
+            "enabled": true,
+            "label": "联通",
+            "region": "广东",
+            "host": "gd-cu-v4.ip.zstaticcdn.com",
+            "port": 80,
+            "address_family": "ipv4"
+          },
+          "remote_ip": null,
+          "round_seq": 2,
+          "result": "dns_error",
+          "latency_ms": null,
+          "latency_max_ms": 12,
+          "attempts": 2,
+          "failures": 1,
+          "success_count": 1,
+          "latency_sum_ms": 12,
+          "failure_rate_pct": 50.0
+        },
+        {
+          "ts": 1700000140,
+          "segment_id": "fixture:cu:2",
+          "target_revision": "621e9786777a015006890f46afb5a5be9a0b5fb1f1c04bdb6431ae805cc7ed3a",
+          "target": {
+            "id": "cu",
+            "enabled": true,
+            "label": "联通",
+            "region": "广东",
+            "host": "gd-cu-v4.ip.zstaticcdn.com",
+            "port": 80,
+            "address_family": "ipv4"
+          },
+          "remote_ip": "8.8.8.8",
+          "round_seq": 3,
+          "result": "ok",
+          "latency_ms": 30,
+          "latency_max_ms": 30,
+          "attempts": 1,
+          "failures": 0,
+          "success_count": 1,
+          "latency_sum_ms": 30,
+          "failure_rate_pct": 0.0
+        },
+        {
+          "ts": 1700000160,
+          "segment_id": "fixture:cu:3",
+          "target_revision": "621e9786777a015006890f46afb5a5be9a0b5fb1f1c04bdb6431ae805cc7ed3a",
+          "target": {
+            "id": "cu",
+            "enabled": true,
+            "label": "联通",
+            "region": "广东",
+            "host": "gd-cu-v4.ip.zstaticcdn.com",
+            "port": 80,
+            "address_family": "ipv4"
+          },
+          "remote_ip": "1.1.1.1",
+          "round_seq": 4,
+          "result": "ok",
+          "latency_ms": 14,
+          "latency_max_ms": 14,
+          "attempts": 1,
+          "failures": 0,
+          "success_count": 1,
+          "latency_sum_ms": 14,
+          "failure_rate_pct": 0.0
+        }
+      ],
+      "cm": [
+        {
+          "ts": 1700000100,
+          "segment_id": "fixture:cm:1",
+          "target_revision": "94df6732049d950fa786eaabee300c988e39d7c90c18af29dcc286f2e62de3b7",
+          "target": {
+            "id": "cm",
+            "enabled": true,
+            "label": "移动",
+            "region": "广东",
+            "host": "gd-cm-v4.ip.zstaticcdn.com",
+            "port": 80,
+            "address_family": "ipv4"
+          },
+          "remote_ip": "1.1.1.1",
+          "round_seq": 1,
+          "result": "connect_timeout",
+          "latency_ms": null,
+          "latency_max_ms": null,
+          "attempts": 1,
+          "failures": 1,
+          "success_count": 0,
+          "latency_sum_ms": 0,
+          "failure_rate_pct": 100.0
+        },
+        {
+          "ts": 1700000120,
+          "segment_id": "fixture:cm:1",
+          "target_revision": "94df6732049d950fa786eaabee300c988e39d7c90c18af29dcc286f2e62de3b7",
+          "target": {
+            "id": "cm",
+            "enabled": true,
+            "label": "移动",
+            "region": "广东",
+            "host": "gd-cm-v4.ip.zstaticcdn.com",
+            "port": 80,
+            "address_family": "ipv4"
+          },
+          "remote_ip": "1.1.1.1",
+          "round_seq": 2,
+          "result": "connect_timeout",
+          "latency_ms": null,
+          "latency_max_ms": null,
+          "attempts": 2,
+          "failures": 2,
+          "success_count": 0,
+          "latency_sum_ms": 0,
+          "failure_rate_pct": 100.0
+        },
+        {
+          "ts": 1700000140,
+          "segment_id": "fixture:cm:1",
+          "target_revision": "94df6732049d950fa786eaabee300c988e39d7c90c18af29dcc286f2e62de3b7",
+          "target": {
+            "id": "cm",
+            "enabled": true,
+            "label": "移动",
+            "region": "广东",
+            "host": "gd-cm-v4.ip.zstaticcdn.com",
+            "port": 80,
+            "address_family": "ipv4"
+          },
+          "remote_ip": "1.1.1.1",
+          "round_seq": 3,
+          "result": "connect_timeout",
+          "latency_ms": null,
+          "latency_max_ms": null,
+          "attempts": 3,
+          "failures": 3,
+          "success_count": 0,
+          "latency_sum_ms": 0,
+          "failure_rate_pct": 100.0
+        },
+        {
+          "ts": 1700000160,
+          "segment_id": "fixture:cm:1",
+          "target_revision": "94df6732049d950fa786eaabee300c988e39d7c90c18af29dcc286f2e62de3b7",
+          "target": {
+            "id": "cm",
+            "enabled": true,
+            "label": "移动",
+            "region": "广东",
+            "host": "gd-cm-v4.ip.zstaticcdn.com",
+            "port": 80,
+            "address_family": "ipv4"
+          },
+          "remote_ip": "1.1.1.1",
+          "round_seq": 4,
+          "result": "connect_timeout",
+          "latency_ms": null,
+          "latency_max_ms": null,
+          "attempts": 4,
+          "failures": 4,
+          "success_count": 0,
+          "latency_sum_ms": 0,
+          "failure_rate_pct": 100.0
+        },
+        {
+          "ts": 1700000180,
+          "segment_id": "fixture:cm:1",
+          "target_revision": "94df6732049d950fa786eaabee300c988e39d7c90c18af29dcc286f2e62de3b7",
+          "target": {
+            "id": "cm",
+            "enabled": true,
+            "label": "移动",
+            "region": "广东",
+            "host": "gd-cm-v4.ip.zstaticcdn.com",
+            "port": 80,
+            "address_family": "ipv4"
+          },
+          "remote_ip": "1.1.1.1",
+          "round_seq": 5,
+          "result": "connect_timeout",
+          "latency_ms": null,
+          "latency_max_ms": null,
+          "attempts": 5,
+          "failures": 5,
+          "success_count": 0,
+          "latency_sum_ms": 0,
+          "failure_rate_pct": 100.0
+        },
+        {
+          "ts": 1700000200,
+          "segment_id": "fixture:cm:1",
+          "target_revision": "94df6732049d950fa786eaabee300c988e39d7c90c18af29dcc286f2e62de3b7",
+          "target": {
+            "id": "cm",
+            "enabled": true,
+            "label": "移动",
+            "region": "广东",
+            "host": "gd-cm-v4.ip.zstaticcdn.com",
+            "port": 80,
+            "address_family": "ipv4"
+          },
+          "remote_ip": "1.1.1.1",
+          "round_seq": 6,
+          "result": "connect_timeout",
+          "latency_ms": null,
+          "latency_max_ms": null,
+          "attempts": 6,
+          "failures": 6,
+          "success_count": 0,
+          "latency_sum_ms": 0,
+          "failure_rate_pct": 100.0
+        }
+      ]
+    },
+    "rollup_by_target": {
+      "ct": [
+        {
+          "ts": 1700000100,
+          "segment_id": "fixture:ct:1",
+          "target_revision": "b07e74c290e241967ad3cbc63c0de6bf268eb921d125fe2fd3a259277a468efe",
+          "target": {
+            "id": "ct",
+            "enabled": true,
+            "label": "电信",
+            "region": "广东",
+            "host": "gd-ct-v4.ip.zstaticcdn.com",
+            "port": 80,
+            "address_family": "ipv4"
+          },
+          "remote_ip": "1.1.1.1",
+          "round_seq": null,
+          "result": null,
+          "latency_ms": 72.0,
+          "latency_max_ms": 74,
+          "attempts": 6,
+          "failures": 1,
+          "success_count": 5,
+          "latency_sum_ms": 360,
+          "failure_rate_pct": 16.666666666666668
+        }
+      ],
+      "cu": [
+        {
+          "ts": 1700000100,
+          "segment_id": "fixture:cu:1",
+          "target_revision": "621e9786777a015006890f46afb5a5be9a0b5fb1f1c04bdb6431ae805cc7ed3a",
+          "target": {
+            "id": "cu",
+            "enabled": true,
+            "label": "联通",
+            "region": "广东",
+            "host": "gd-cu-v4.ip.zstaticcdn.com",
+            "port": 80,
+            "address_family": "ipv4"
+          },
+          "remote_ip": "1.1.1.1",
+          "round_seq": null,
+          "result": null,
+          "latency_ms": 12.0,
+          "latency_max_ms": 12,
+          "attempts": 2,
+          "failures": 1,
+          "success_count": 1,
+          "latency_sum_ms": 12,
+          "failure_rate_pct": 50.0
+        },
+        {
+          "ts": 1700000100,
+          "segment_id": "fixture:cu:2",
+          "target_revision": "621e9786777a015006890f46afb5a5be9a0b5fb1f1c04bdb6431ae805cc7ed3a",
+          "target": {
+            "id": "cu",
+            "enabled": true,
+            "label": "联通",
+            "region": "广东",
+            "host": "gd-cu-v4.ip.zstaticcdn.com",
+            "port": 80,
+            "address_family": "ipv4"
+          },
+          "remote_ip": "8.8.8.8",
+          "round_seq": null,
+          "result": null,
+          "latency_ms": 30.0,
+          "latency_max_ms": 30,
+          "attempts": 1,
+          "failures": 0,
+          "success_count": 1,
+          "latency_sum_ms": 30,
+          "failure_rate_pct": 0.0
+        },
+        {
+          "ts": 1700000100,
+          "segment_id": "fixture:cu:3",
+          "target_revision": "621e9786777a015006890f46afb5a5be9a0b5fb1f1c04bdb6431ae805cc7ed3a",
+          "target": {
+            "id": "cu",
+            "enabled": true,
+            "label": "联通",
+            "region": "广东",
+            "host": "gd-cu-v4.ip.zstaticcdn.com",
+            "port": 80,
+            "address_family": "ipv4"
+          },
+          "remote_ip": "1.1.1.1",
+          "round_seq": null,
+          "result": null,
+          "latency_ms": 14.0,
+          "latency_max_ms": 14,
+          "attempts": 1,
+          "failures": 0,
+          "success_count": 1,
+          "latency_sum_ms": 14,
+          "failure_rate_pct": 0.0
+        }
+      ],
+      "cm": [
+        {
+          "ts": 1700000100,
+          "segment_id": "fixture:cm:1",
+          "target_revision": "94df6732049d950fa786eaabee300c988e39d7c90c18af29dcc286f2e62de3b7",
+          "target": {
+            "id": "cm",
+            "enabled": true,
+            "label": "移动",
+            "region": "广东",
+            "host": "gd-cm-v4.ip.zstaticcdn.com",
+            "port": 80,
+            "address_family": "ipv4"
+          },
+          "remote_ip": "1.1.1.1",
+          "round_seq": null,
+          "result": null,
+          "latency_ms": null,
+          "latency_max_ms": null,
+          "attempts": 6,
+          "failures": 6,
+          "success_count": 0,
+          "latency_sum_ms": 0,
+          "failure_rate_pct": 100.0
+        }
+      ]
+    }
+  }
+}

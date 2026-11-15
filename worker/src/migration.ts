@@ -1,4 +1,5 @@
 import { clearSessionSecretCache, invalidateAgentTokenCache } from "./auth";
+import { nqValidateSetting } from "./network-quality";
 import {
   base64UrlDecode,
   base64UrlEncode,
@@ -613,6 +614,12 @@ export async function importBundle(
   }
 
   const normalizedLedgers: ExportTrafficLedgerEntry[] = [];
+  // Validate the optional active-probing configuration before writing any bundle state.
+  try {
+    for (const entry of normalizedSettings) nqValidateSetting(entry.key, entry.value);
+  } catch {
+    return { ok: false, status: 400, error: "Invalid network quality configuration in bundle" };
+  }
   if (Array.isArray(body.traffic_ledgers)) {
     for (const item of body.traffic_ledgers) {
       if (
@@ -801,6 +808,7 @@ export async function importBundle(
     channels: allChannelsRes.results ?? normalizedChannels,
     trafficLedgers: normalizedLedgers,
   });
+  await getFleetHub(env).refreshNetworkQualitySettings();
 
   return {
     ok: true,

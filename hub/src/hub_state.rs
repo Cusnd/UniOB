@@ -16,16 +16,20 @@ use std::collections::HashMap;
 use std::net::{IpAddr, Ipv4Addr};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 use tokio::sync::{mpsc, RwLock};
 use url::Url;
 
 pub const CLIENT_LEASE_SEC: u64 = 90;
+// Current browsers renew every 50s. This threshold also coalesces clients using
+// a 20s interval, while allowing refresh before the Agent's 90s lease expires.
+const AGENT_LEASE_REFRESH_AFTER: Duration = Duration::from_secs(30);
 pub const RAW_SAMPLE_MIN_GAP_SEC: i64 = 25;
 pub const WS_CLOSE_SUPERSEDED: u16 = 4000;
 
 #[derive(Debug, Clone)]
 pub enum AgentOutboundCmd {
-    Ctrl(AgentCtrlFrame),
+    Ctrl(Box<AgentCtrlFrame>),
     Close(u16, String),
 }
 
@@ -34,6 +38,7 @@ pub struct AgentSessionHandle {
     pub conn_id: u64,
     pub tx: mpsc::UnboundedSender<AgentOutboundCmd>,
     pub capabilities: Vec<String>,
+    last_ctrl_at: Option<Instant>,
 }
 
 #[derive(Clone)]
@@ -163,6 +168,7 @@ impl HubState {
                 conn_id,
                 tx,
                 capabilities: Vec::new(),
+                last_ctrl_at: None,
             },
         ) {
             let _ = prev.tx.send(AgentOutboundCmd::Close(
@@ -203,7 +209,16 @@ impl HubState {
     }
 
     pub async fn compute_ctrl_for_node(&self, node_id: &str, flush_now: bool) -> AgentCtrlFrame {
-        let now = now_sec();
+        self.compute_ctrl_for_node_at(node_id, flush_now, now_sec())
+            .await
+    }
+
+    async fn compute_ctrl_for_node_at(
+        &self,
+        node_id: &str,
+        flush_now: bool,
+        now: i64,
+    ) -> AgentCtrlFrame {
         let (any_fleet, any_detail, any_proc) = {
             let guard = self.clients.read().await;
             let mut fleet = false;
@@ -249,14 +264,104 @@ impl HubState {
             flush_now: if flush_now { Some(true) } else { None },
             watermarks,
             migrate: None,
+            network_quality: if self
+                .agents
+                .read()
+                .await
+                .get(node_id)
+                .is_some_and(|a| a.capabilities.iter().any(|c| c == "network_quality_v1"))
+            {
+                self.db.network_control(node_id).ok()
+            } else {
+                None
+            },
         }
     }
 
     pub async fn push_ctrl_to_agent(&self, node_id: &str, flush_now: bool) {
         let ctrl = self.compute_ctrl_for_node(node_id, flush_now).await;
-        let guard = self.agents.read().await;
-        if let Some(handle) = guard.get(node_id) {
-            let _ = handle.tx.send(AgentOutboundCmd::Ctrl(ctrl));
+        self.send_ctrl_to_agent(node_id, None, ctrl).await;
+    }
+
+    pub async fn send_ctrl_to_agent(
+        &self,
+        node_id: &str,
+        conn_id: Option<u64>,
+        ctrl: AgentCtrlFrame,
+    ) -> bool {
+        self.queue_ctrl_at(node_id, conn_id, ctrl, Instant::now(), false)
+            .await
+    }
+
+    async fn queue_ctrl_at(
+        &self,
+        node_id: &str,
+        conn_id: Option<u64>,
+        ctrl: AgentCtrlFrame,
+        at: Instant,
+        lease_refresh: bool,
+    ) -> bool {
+        let mut guard = self.agents.write().await;
+        let Some(handle) = guard.get_mut(node_id) else {
+            return false;
+        };
+        if conn_id.is_some_and(|id| id != handle.conn_id) {
+            return false;
+        }
+        if lease_refresh
+            && handle
+                .last_ctrl_at
+                .is_some_and(|last| at.saturating_duration_since(last) < AGENT_LEASE_REFRESH_AFTER)
+        {
+            return false;
+        }
+        let active_lease = ctrl.mode > 0 && ctrl.lease_sec > 0;
+        if handle
+            .tx
+            .send(AgentOutboundCmd::Ctrl(Box::new(ctrl)))
+            .is_err()
+        {
+            return false;
+        }
+        handle.last_ctrl_at = active_lease.then_some(at);
+        true
+    }
+
+    async fn renew_client_lease_at(&self, client_id: u64, now: i64, at: Instant) {
+        let subscription = {
+            let mut clients = self.clients.write().await;
+            clients.get_mut(&client_id).and_then(|client| {
+                if !client.fleet && client.node_id.is_none() {
+                    return None;
+                }
+                client.lease_expires_at = now + CLIENT_LEASE_SEC as i64;
+                Some((client.fleet, client.node_id.clone()))
+            })
+        };
+        let Some((fleet, node_id)) = subscription else {
+            return;
+        };
+        let targets: Vec<(String, u64)> = self
+            .agents
+            .read()
+            .await
+            .iter()
+            .filter(|(id, handle)| {
+                (fleet || node_id.as_ref() == Some(*id))
+                    && handle.last_ctrl_at.is_none_or(|last| {
+                        at.saturating_duration_since(last) >= AGENT_LEASE_REFRESH_AFTER
+                    })
+            })
+            .map(|(id, handle)| (id.clone(), handle.conn_id))
+            .collect();
+        for (id, conn_id) in targets {
+            let mut ctrl = self.compute_ctrl_for_node_at(&id, false, now).await;
+            ctrl.network_quality = None;
+            if ctrl.mode > 0 {
+                // Recheck under the sender lock: concurrent viewers must share
+                // one lease renewal, and a replaced connection gets a fresh clock.
+                self.queue_ctrl_at(&id, Some(conn_id), ctrl, at, true).await;
+            }
         }
     }
 
@@ -313,12 +418,8 @@ impl HubState {
                 }
             }
             ClientInboundMessage::Renew => {
-                let mut guard = self.clients.write().await;
-                if let Some(c) = guard.get_mut(&client_id) {
-                    if c.fleet || c.node_id.is_some() {
-                        c.lease_expires_at = now + CLIENT_LEASE_SEC as i64;
-                    }
-                }
+                self.renew_client_lease_at(client_id, now, Instant::now())
+                    .await;
             }
             ClientInboundMessage::SubFleet => {
                 let tx_opt = {
@@ -432,10 +533,8 @@ impl HubState {
         let now = now_sec();
         self.touch_agent_alive(node_id, now).await;
         if let Some(cid) = conn_id {
-            if !hello.capabilities.is_empty() {
-                self.set_agent_capabilities(node_id, cid, hello.capabilities.clone())
-                    .await;
-            }
+            self.set_agent_capabilities(node_id, cid, hello.capabilities.clone())
+                .await;
         }
 
         let hw = NodeHardwareInfo {
@@ -451,6 +550,10 @@ impl HubState {
             proc_enabled: hello.proc_enabled,
         };
         self.db.update_node_hello(node_id, &hw, now)?;
+        self.db.network_set_supported(
+            node_id,
+            hello.capabilities.iter().any(|c| c == "network_quality_v1"),
+        )?;
 
         if let Some(node) = self.db.get_node_row(node_id)? {
             let resolved = resolve_offline_rules_if_firing(&self.db, &self.http, &node, now)?;
@@ -486,6 +589,8 @@ impl HubState {
             return Err("Unknown node".to_string());
         };
         let mut payload = NodeMetricsPayload::from(&frame);
+        payload.network_quality =
+            self.accept_network_quality(node_id, frame.network_quality.as_ref(), wall_sec);
         if payload.ts == 0 {
             payload.ts = wall_sec as u64;
         }
@@ -532,6 +637,8 @@ impl HubState {
         };
 
         let mut latest_payload = NodeMetricsPayload::from(&batch.last);
+        latest_payload.network_quality =
+            self.accept_network_quality(node_id, batch.network_quality.as_ref(), wall_sec);
         if latest_payload.ts == 0 {
             latest_payload.ts = wall_sec as u64;
         }
@@ -568,6 +675,23 @@ impl HubState {
             wall_sec,
         )
         .await
+    }
+
+    fn accept_network_quality(
+        &self,
+        node_id: &str,
+        extension: Option<&serde_json::Value>,
+        wall_sec: i64,
+    ) -> Option<crate::network_quality::State> {
+        if let Some(value) = extension {
+            if let Ok(state) = self
+                .db
+                .ingest_network_quality(node_id, value, wall_sec as u64)
+            {
+                return Some(state);
+            }
+        }
+        self.db.network_state(node_id).ok()
     }
 
     async fn after_metrics_persisted(
@@ -823,11 +947,8 @@ impl HubState {
                 epoch,
                 sig,
             });
-            let agents = self.agents.read().await;
-            if let Some(handle) = agents.get(&node_id) {
-                if handle.tx.send(AgentOutboundCmd::Ctrl(ctrl)).is_ok() {
-                    dispatched += 1;
-                }
+            if self.send_ctrl_to_agent(&node_id, None, ctrl).await {
+                dispatched += 1;
             }
         }
 
@@ -1133,5 +1254,188 @@ mod tests {
         assert!(extended_node >= now_sec() + CLIENT_LEASE_SEC as i64 - 2);
         assert!(client_rx.try_recv().is_err());
         assert!(agent_rx.try_recv().is_err());
+    }
+
+    fn take_ctrl(rx: &mut mpsc::UnboundedReceiver<AgentOutboundCmd>) -> AgentCtrlFrame {
+        match rx.try_recv().unwrap() {
+            AgentOutboundCmd::Ctrl(ctrl) => *ctrl,
+            other => panic!("Expected ctrl, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn repeated_renew_keeps_agent_live_beyond_ninety_seconds_without_flush_or_quality_config()
+    {
+        use crate::protocol::ClientInboundMessage;
+        for interval in [20u64, 50] {
+            let hub = HubState::new(
+                HubConfig::default(),
+                HubDb::open_in_memory().unwrap(),
+                reqwest::Client::new(),
+            );
+            let (agent_tx, mut agent_rx) = mpsc::unbounded_channel();
+            let conn = hub.register_agent("watched", agent_tx).await;
+            hub.set_agent_capabilities("watched", conn, vec!["network_quality_v1".into()])
+                .await;
+            let (other_tx, mut other_rx) = mpsc::unbounded_channel();
+            hub.register_agent("unwatched", other_tx).await;
+            let (client_tx, mut client_rx) = mpsc::unbounded_channel();
+            let client = hub.register_client(client_tx).await;
+            hub.handle_client_command(
+                client,
+                ClientInboundMessage::SubNode {
+                    node_id: "watched".into(),
+                    proc: true,
+                },
+            )
+            .await;
+            let initial = take_ctrl(&mut agent_rx);
+            assert_eq!(initial.mode, 2);
+            assert_eq!(initial.flush_now, Some(true));
+            assert!(initial.network_quality.is_some());
+            let start = hub
+                .agents
+                .read()
+                .await
+                .get("watched")
+                .unwrap()
+                .last_ctrl_at
+                .unwrap();
+            let wall = now_sec();
+            let mut last_refresh = 0;
+            for tick in 1..=10 {
+                let elapsed = tick * interval;
+                // Simulate the Agent's deadline as well as both Hub clocks.
+                assert!(elapsed < last_refresh + CLIENT_LEASE_SEC);
+                hub.renew_client_lease_at(
+                    client,
+                    wall + elapsed as i64,
+                    start + Duration::from_secs(elapsed),
+                )
+                .await;
+                if elapsed - last_refresh >= AGENT_LEASE_REFRESH_AFTER.as_secs() {
+                    let ctrl = take_ctrl(&mut agent_rx);
+                    assert_eq!(ctrl.mode, 2);
+                    assert_eq!(ctrl.interval_ms, 2000);
+                    assert_eq!(ctrl.lease_sec, CLIENT_LEASE_SEC);
+                    assert!(ctrl.flush_now.is_none());
+                    assert!(ctrl.network_quality.is_none());
+                    assert!(ctrl.migrate.is_none());
+                    last_refresh = elapsed;
+                }
+                assert!(agent_rx.try_recv().is_err());
+                assert!(other_rx.try_recv().is_err());
+                assert!(client_rx.try_recv().is_err());
+            }
+            assert!(last_refresh > CLIENT_LEASE_SEC);
+            hub.handle_client_command(client, ClientInboundMessage::UnsubNode { node_id: None })
+                .await;
+            assert_eq!(take_ctrl(&mut agent_rx).mode, 0);
+            let prior_expiry = hub
+                .clients
+                .read()
+                .await
+                .get(&client)
+                .unwrap()
+                .lease_expires_at;
+            hub.renew_client_lease_at(client, wall + 1000, start + Duration::from_secs(1000))
+                .await;
+            assert_eq!(
+                hub.clients
+                    .read()
+                    .await
+                    .get(&client)
+                    .unwrap()
+                    .lease_expires_at,
+                prior_expiry
+            );
+            assert!(agent_rx.try_recv().is_err());
+        }
+    }
+
+    #[tokio::test]
+    async fn concurrent_fleet_renewals_share_one_refresh_and_normal_ctrl_resets_the_clock() {
+        use crate::protocol::ClientInboundMessage;
+        let hub = HubState::new(
+            HubConfig::default(),
+            HubDb::open_in_memory().unwrap(),
+            reqwest::Client::new(),
+        );
+        let (agent_tx, mut agent_rx) = mpsc::unbounded_channel();
+        let conn = hub.register_agent("n1", agent_tx).await;
+        let (other_tx, mut other_rx) = mpsc::unbounded_channel();
+        hub.register_agent("n2", other_tx).await;
+        let (client_tx, mut client_rx) = mpsc::unbounded_channel();
+        let first = hub.register_client(client_tx).await;
+        let (second_tx, mut second_rx) = mpsc::unbounded_channel();
+        let second = hub.register_client(second_tx).await;
+        hub.handle_client_command(first, ClientInboundMessage::SubFleet)
+            .await;
+        hub.handle_client_command(second, ClientInboundMessage::SubFleet)
+            .await;
+        while agent_rx.try_recv().is_ok() {}
+        while other_rx.try_recv().is_ok() {}
+        while client_rx.try_recv().is_ok() {}
+        while second_rx.try_recv().is_ok() {}
+        let start = Instant::now();
+        let wall = now_sec();
+        let ctrl = hub.compute_ctrl_for_node("n1", false).await;
+        assert!(
+            hub.queue_ctrl_at(
+                "n1",
+                Some(conn),
+                ctrl.clone(),
+                start + Duration::from_secs(25),
+                false
+            )
+            .await
+        );
+        take_ctrl(&mut agent_rx);
+        hub.renew_client_lease_at(first, wall + 50, start + Duration::from_secs(50))
+            .await;
+        assert!(agent_rx.try_recv().is_err()); // The config/control update is only 25s old.
+        assert_eq!(take_ctrl(&mut other_rx).interval_ms, 10000);
+        tokio::join!(
+            hub.renew_client_lease_at(first, wall + 100, start + Duration::from_secs(100)),
+            hub.renew_client_lease_at(second, wall + 100, start + Duration::from_secs(100))
+        );
+        for rx in [&mut agent_rx, &mut other_rx] {
+            let refreshed = take_ctrl(rx);
+            assert_eq!(refreshed.mode, 1);
+            assert_eq!(refreshed.interval_ms, 10000);
+            assert_eq!(refreshed.lease_sec, 90);
+            assert!(refreshed.flush_now.is_none());
+            assert!(refreshed.network_quality.is_none());
+            assert!(rx.try_recv().is_err());
+        }
+        assert!(client_rx.try_recv().is_err());
+        assert!(second_rx.try_recv().is_err());
+
+        // A superseded socket cannot send or reset the replacement's lease clock.
+        let (new_tx, mut new_rx) = mpsc::unbounded_channel();
+        let replacement = hub.register_agent("n1", new_tx).await;
+        assert!(!hub.send_ctrl_to_agent("n1", Some(conn), ctrl.clone()).await);
+        assert!(new_rx.try_recv().is_err());
+        assert!(
+            hub.send_ctrl_to_agent("n1", Some(replacement), ctrl.clone())
+                .await
+        );
+        take_ctrl(&mut new_rx);
+        let fresh = hub.agents.read().await.get("n1").unwrap().last_ctrl_at;
+        drop(new_rx);
+        assert!(
+            !hub.queue_ctrl_at(
+                "n1",
+                Some(replacement),
+                ctrl,
+                start + Duration::from_secs(500),
+                false
+            )
+            .await
+        );
+        assert_eq!(
+            hub.agents.read().await.get("n1").unwrap().last_ctrl_at,
+            fresh
+        );
     }
 }

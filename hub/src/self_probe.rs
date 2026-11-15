@@ -210,6 +210,7 @@ pub fn spawn_self_probe_loop(hub: HubState) {
             return;
         }
         let _ = hub.ingest_hello(&node_id, None, hw).await;
+        let quality = crate::network_quality::ProbeRuntime::new(&node_id);
 
         let mut prev_cpu = read_linux_cpu();
         let mut prev_net = read_linux_net();
@@ -219,6 +220,12 @@ pub fn spawn_self_probe_loop(hub: HubState) {
         let mut ticker = tokio::time::interval(Duration::from_secs(30));
         loop {
             ticker.tick().await;
+            if let Ok(control) = hub.db.network_control(&node_id) {
+                if let Ok(value) = serde_json::to_value(control) {
+                    quality.apply_control(Some(&value), false);
+                }
+            }
+            let quality_payload = quality.payload();
             let curr_ms = now_ms();
             let elapsed_sec = ((curr_ms.saturating_sub(prev_ms)) as f64 / 1000.0).max(0.5);
             prev_ms = curr_ms;
@@ -268,6 +275,7 @@ pub fn spawn_self_probe_loop(hub: HubState) {
             let ts = now_sec() as u64;
 
             let frame = AgentMetricsFrame {
+                network_quality: None,
                 ts,
                 up,
                 cpu: CpuMetrics {
@@ -293,12 +301,19 @@ pub fn spawn_self_probe_loop(hub: HubState) {
 
             let tuple = crate::protocol::metrics_frame_to_tuple(&frame);
             let mb = AgentMetricsBatchFrame {
+                network_quality: quality_payload
+                    .as_ref()
+                    .and_then(|p| serde_json::to_value(p).ok()),
                 v: 2,
                 reason: "cohort".to_string(),
                 pts: vec![tuple],
                 last: frame,
             };
-            let _ = hub.ingest_metrics_v2_mb(&node_id, mb).await;
+            if hub.ingest_metrics_v2_mb(&node_id, mb).await.is_ok() {
+                if let Some(payload) = quality_payload.as_ref() {
+                    quality.mark_sent(payload);
+                }
+            }
         }
     });
 }
@@ -459,7 +474,7 @@ fn read_linux_hardware() -> AgentHelloFrame {
         swap_total,
         boot_time,
         proc_enabled: false,
-        capabilities: vec!["mb_v2".to_string()],
+        capabilities: vec!["mb_v2".to_string(), "network_quality_v1".to_string()],
         migrated_epoch: None,
     }
 }

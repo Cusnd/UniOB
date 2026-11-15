@@ -62,6 +62,15 @@ pub fn build_router(hub: HubState) -> Router {
         )
         .route("/api/nodes/{id}/metrics", get(node_metrics_handler))
         .route(
+            "/api/network-quality/config",
+            get(network_global_config_get).put(network_global_config_put),
+        )
+        .route(
+            "/api/nodes/{id}/network-quality/config",
+            get(network_node_config_get).put(network_node_config_put),
+        )
+        .route("/api/nodes/{id}/network-quality", get(network_history_get))
+        .route(
             "/api/alerts/channels",
             get(list_channels_handler).post(create_channel_handler),
         )
@@ -402,7 +411,7 @@ async fn handle_agent_socket(hub: HubState, node_id: String, socket: WebSocket) 
                         AgentInboundFrame::Hello(hello) => {
                             if let Ok(ctrl) = hub.ingest_hello(&node_id, Some(conn_id), hello).await
                             {
-                                let _ = tx.send(AgentOutboundCmd::Ctrl(ctrl));
+                                hub.send_ctrl_to_agent(&node_id, Some(conn_id), ctrl).await;
                             }
                         }
                         AgentInboundFrame::Metrics(m) => {
@@ -1558,6 +1567,15 @@ async fn delete_node_handler(
             .map_err(|e| format!("resolve incidents error: {e}"))?;
         tx.execute("DELETE FROM alert_rules WHERE node_id = ?1", params![id])
             .map_err(|e| format!("delete rules error: {e}"))?;
+        tx.execute(
+            "DELETE FROM system_settings WHERE key=?1",
+            [format!(
+                "{}{}",
+                crate::network_quality_store::NODE_PREFIX,
+                id
+            )],
+        )
+        .map_err(|e| format!("delete network override error: {e}"))?;
         tx.execute("DELETE FROM nodes WHERE id = ?1", params![id])
             .map_err(|e| format!("delete node error: {e}"))?;
         tx.commit()
@@ -1650,6 +1668,128 @@ async fn node_metrics_handler(
 }
 
 // ---- Notification Channels & Rules & Incidents ----
+
+fn network_config_response(hub: &HubState, node: Option<&str>) -> Response {
+    let result = (|| -> Result<Value, String> {
+        let global = hub.db.network_config()?;
+        if let Some(node_id) = node {
+            let config = hub.db.network_override(node_id)?;
+            let effective = crate::network_quality::effective_control(&global, &config)?;
+            let state = hub.db.network_state(node_id)?;
+            Ok(
+                json!({"config":config,"config_id":effective.config_id,"effective_config":effective,
+                "applied_config_id":state.applied_config_id,"supported":state.supported}),
+            )
+        } else {
+            let inherit = crate::network_quality::parse_override(&json!({"mode":"inherit"}))?;
+            let effective = crate::network_quality::effective_control(&global, &inherit)?;
+            Ok(
+                json!({"config":global,"config_id":effective.config_id,"effective_config":effective,
+                "applied_config_id":null,"supported":true}),
+            )
+        }
+    })();
+    match result {
+        Ok(value) => Json(value).into_response(),
+        Err(e) => json_error(StatusCode::INTERNAL_SERVER_ERROR, &e),
+    }
+}
+
+fn check_network_node(hub: &HubState, node: &str) -> Result<(), (StatusCode, String)> {
+    match hub.db.get_node_row(node) {
+        Ok(Some(_)) => Ok(()),
+        Ok(None) => Err((StatusCode::NOT_FOUND, "Node not found".into())),
+        Err(e) => Err((StatusCode::INTERNAL_SERVER_ERROR, e)),
+    }
+}
+
+async fn network_global_config_get(State(hub): State<HubState>) -> Response {
+    network_config_response(&hub, None)
+}
+
+async fn network_global_config_put(
+    State(hub): State<HubState>,
+    Json(body): Json<Value>,
+) -> Response {
+    let config = match crate::network_quality::parse_config(&body) {
+        Ok(c) => c,
+        Err(e) => return json_error(StatusCode::BAD_REQUEST, &e),
+    };
+    let value = match serde_json::to_string(&config) {
+        Ok(v) => v,
+        Err(e) => return json_error(StatusCode::BAD_REQUEST, &e.to_string()),
+    };
+    if let Err(e) = hub
+        .db
+        .set_setting(crate::network_quality_store::GLOBAL_KEY, &value, now_sec())
+    {
+        return json_error(StatusCode::INTERNAL_SERVER_ERROR, &e);
+    }
+    hub.sync_ctrl_to_all_agents(false).await;
+    network_config_response(&hub, None)
+}
+
+async fn network_node_config_get(
+    State(hub): State<HubState>,
+    AxumPath(id): AxumPath<String>,
+) -> Response {
+    if let Err((status, error)) = check_network_node(&hub, &id) {
+        return json_error(status, &error);
+    }
+    network_config_response(&hub, Some(&id))
+}
+
+async fn network_node_config_put(
+    State(hub): State<HubState>,
+    AxumPath(id): AxumPath<String>,
+    Json(body): Json<Value>,
+) -> Response {
+    if let Err((status, error)) = check_network_node(&hub, &id) {
+        return json_error(status, &error);
+    }
+    let config = match crate::network_quality::parse_override(&body) {
+        Ok(c) => c,
+        Err(e) => return json_error(StatusCode::BAD_REQUEST, &e),
+    };
+    let value = match serde_json::to_string(&config) {
+        Ok(v) => v,
+        Err(e) => return json_error(StatusCode::BAD_REQUEST, &e.to_string()),
+    };
+    if let Err(e) = hub.db.set_setting(
+        &format!("{}{}", crate::network_quality_store::NODE_PREFIX, id),
+        &value,
+        now_sec(),
+    ) {
+        return json_error(StatusCode::INTERNAL_SERVER_ERROR, &e);
+    }
+    hub.push_ctrl_to_agent(&id, false).await;
+    network_config_response(&hub, Some(&id))
+}
+
+#[derive(Deserialize)]
+struct QualityRangeQuery {
+    #[serde(default = "default_range")]
+    range: String,
+    cursor: Option<String>,
+}
+
+async fn network_history_get(
+    State(hub): State<HubState>,
+    AxumPath(id): AxumPath<String>,
+    Query(q): Query<QualityRangeQuery>,
+) -> Response {
+    if let Err((status, error)) = check_network_node(&hub, &id) {
+        return json_error(status, &error);
+    }
+    match hub
+        .db
+        .query_network_quality(&id, &q.range, q.cursor.as_deref(), now_sec() as u64)
+    {
+        Ok(data) => Json(data).into_response(),
+        Err(e) if e.starts_with("Invalid") => json_error(StatusCode::BAD_REQUEST, &e),
+        Err(e) => json_error(StatusCode::INTERNAL_SERVER_ERROR, &e),
+    }
+}
 
 fn format_channel_view(r: NotificationChannelRow) -> NotificationChannelView {
     let config: Value = serde_json::from_str(&r.config_json).unwrap_or_else(|_| json!({}));

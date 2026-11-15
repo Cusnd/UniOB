@@ -69,7 +69,7 @@ describe("FleetHubDO SCCH SQLite, Ring-Slab TSDB, Traffic Ledger, and Offline Al
         .one().value;
       return { schemaVer, seeded };
     });
-    expect(meta.schemaVer).toBe("2");
+    expect(meta.schemaVer).toBe("3");
     expect(meta.seeded).toBe("1");
 
     // Evict DO -> cold wake skips DDL and skips D1 mirror seeding because schema_version='2' & mirror_seeded='1'.

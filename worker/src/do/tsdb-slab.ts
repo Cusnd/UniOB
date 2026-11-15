@@ -70,7 +70,7 @@ export function sumDiskTotals(
   return { diskUsed, diskRBps, diskWBps };
 }
 
-export function payloadToCompactTuple(payload: NodeMetricsPayload): CompactMetricTuple {
+export function payloadToCompactTuple(payload: Omit<NodeMetricsPayload, "network_quality">): CompactMetricTuple {
   const { diskUsed, diskRBps, diskWBps } = sumDiskTotals(payload.disks);
   return [
     Math.floor(payload.ts),

@@ -21,6 +21,10 @@ import type {
   UpdateNodePayload,
   WatchdogConfig,
 } from "../types";
+import type {
+  NetworkNodeOverride, NetworkQualityConfig, NetworkQualityConfigResponse,
+  NetworkQualityQuery, NetworkQualityRange,
+} from "../types/network-quality";
 
 export class ApiError extends Error {
   status: number;
@@ -209,6 +213,28 @@ export const api = {
     return request<NodeMetricsHistoryResponse>(
       `/api/nodes/${encodeURIComponent(id)}/metrics?range=${encodeURIComponent(range)}`,
     );
+  },
+
+  getNetworkQualityConfig(signal?: AbortSignal): Promise<NetworkQualityConfigResponse<NetworkQualityConfig>> {
+    return request("/api/network-quality/config", { signal });
+  },
+
+  updateNetworkQualityConfig(config: NetworkQualityConfig): Promise<NetworkQualityConfigResponse<NetworkQualityConfig>> {
+    return request("/api/network-quality/config", { method: "PUT", body: JSON.stringify(config) });
+  },
+
+  getNodeNetworkQualityConfig(id: string, signal?: AbortSignal): Promise<NetworkQualityConfigResponse<NetworkNodeOverride>> {
+    return request(`/api/nodes/${encodeURIComponent(id)}/network-quality/config`, { signal });
+  },
+
+  updateNodeNetworkQualityConfig(id: string, config: NetworkNodeOverride): Promise<NetworkQualityConfigResponse<NetworkNodeOverride>> {
+    return request(`/api/nodes/${encodeURIComponent(id)}/network-quality/config`, { method: "PUT", body: JSON.stringify(config) });
+  },
+
+  getNodeNetworkQuality(id: string, range: NetworkQualityRange, cursor?: string, signal?: AbortSignal): Promise<NetworkQualityQuery> {
+    const query = new URLSearchParams({ range });
+    if (cursor) query.set("cursor", cursor);
+    return request(`/api/nodes/${encodeURIComponent(id)}/network-quality?${query}`, { signal });
   },
 
   getChannels(): Promise<{ channels: NotificationChannel[] }> {

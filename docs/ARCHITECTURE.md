@@ -1,27 +1,23 @@
 # UniOB Architecture (v2)
 
-> 本文档记录了 UniOB 从初代架构（Per-node `NodeDO` + `30s` 行写 + `60s` `setAlarm` + `2s` 跨 DO RPC）演进至 **Architecture v2**（**方向 B：SCCH 协同休眠单 DO** + **方向 A：独立 `uniob-hub` 自建中枢与 CF Watchdog 看门狗** + **同构智能迁移协议**）的完整设计决策、工程落地细节与避坑清单。完整 7 维度 Cloudflare 计费精算见 [SPEC.md](SPEC.md)。
+网络质量作为可选扩展接入：共享 Rust 探测器每 20 秒采集，复用原有 `m`/`mb` 发送；两端独立维护 146 个 10 分钟原始块及 721 个一小时聚合块。Worker schema 升至 3，配置镜像在保存或导入时更新，日常采集不查询 D1。网络历史查询按块分页，内存不随整段 30 天历史增长。原资源环块与 16 元 tuple 不变。网络检测的存储和计算开销应与资源监控分别计入运行预算。
+
+> 本文档记录了 UniOB 从初代架构（Per-node `NodeDO` + `30s` 行写 + `60s` `setAlarm` + `2s` 跨 DO RPC）演进至 **Architecture v2**（**方向 B：SCCH 协同休眠单 DO** + **方向 A：独立 `uniob-hub` 自建中枢与 CF Watchdog 看门狗** + **同构智能迁移协议**）的完整设计决策、工程落地细节与避坑清单。资源成本口径见 [SPEC.md](SPEC.md)。
 
 ---
 
 ## 1. v1 基线成本瓶颈复盘（已解决）
 
-在初代实现中（兼容导出保留于 [../worker/src/do/node-do.ts](../worker/src/do/node-do.ts)），单台在线节点每天固定产生 **`13,584–15,127` 行 DO SQLite 写入**：
+初代实现保留于 [NodeDO](../worker/src/do/node-do.ts)，其主要开销来自逐节点高频写入与重复唤醒：
 
-| 写入来源（v1 `NodeDO`） | 频率与机制 | 单台日写入行数 | 10 台 Idle 日写入 |
-| :--- | :--- | ---: | ---: |
-| `metrics_raw` 插入 | 每 `30s` 写入 `1` 行（`shouldWriteRaw`） | `2,880` | `28,800` |
-| `traffic_state` upsert | 每 `30s` 覆盖 `1` 行独立表记录 | `2,880` | `28,800` |
-| `node_meta` upsert | 每 `30s` 更新 `last_seen_ts` 与快照 JSON | `2,880` | `28,800` |
-| `metrics_5m` / `metrics_1h` 聚合 | 每 `5m` (`288`) + 每 `1h` (`24`) `GROUP BY` 写入 | `312` | `3,120` |
-| 24h / 30d / 365d TTL `DELETE` | 均摊每日过期行清理（`2880 + 288 + 24`） | `3,192` | `31,920` |
-| `ctx.storage.setAlarm` | `ALARM_SLACK_MS = 35s`，每 `60s`（Idle）或 `56s`（Live）续期 `1` 次 | `1,440` | `14,400` |
-| **合计（Idle 无看盘基线）** | **10 台即突破 Workers Free `100k` 行/日上限（仅能承载 `<= 7` 台）** | **`13,584`** | **`135,840`** |
-
-此外，v1 基线还存在两项隐性账单与配额风险：
-
-1. **高并发跨 DO RPC 放大**：`2h/day` 看盘时每 `2s` 发生 `NodeDO -> FleetHubDO` `pushFleetTick` RPC（`3,600 * N / 日`），`24x7` 墙板模式下 `200` 台每天高达 `965 万` DO 请求、`$60.78/月`。
-2. **冷唤醒 D1 规则重读**：`NodeDO` 每次跨越 `10s` 休眠窗冷唤醒后丢失内存 `rulesCache`，导致 `Idle` 下每 `30s` 重读 D1 `alert_rules` 与 `notification_channels`（`200` 台 `345.6 万` 读/日）。
+| 路径 | 成本来源 |
+| :--- | :--- |
+| 原始指标、流量状态与节点快照 | 每次资源落盘分别更新多张表 |
+| 5 分钟与 1 小时聚合 | 周期性扫描原始记录并写入统计结果 |
+| 历史过期清理 | 定期删除过期时序行 |
+| 节点闹钟 | 每个节点单独维护周期性闹钟 |
+| 跨 DO 广播 | 节点向 FleetHub 转发实时状态，随节点数与看盘时长增长 |
+| 冷唤醒配置加载 | 内存规则缓存失效后重新读取 D1 配置 |
 
 ---
 
@@ -63,13 +59,13 @@ UniOB 实现 **Self-Hosted Node Hub（自建节点中枢）** 与 **Cloudflare E
 
 ## 3. 方向 B：Cloudflare SCCH（Synchronized Cohort Co-Located Hibernation）架构
 
-在保留零运维 Cloudflare 全托管能力的同时，以全局同址 **`FleetHubDO`**（[../worker/src/do/fleet-hub-do.ts](../worker/src/do/fleet-hub-do.ts)）与分块环存引擎（[../worker/src/do/tsdb-slab.ts](../worker/src/do/tsdb-slab.ts)）落地 **6 大核心降本机制**，将 Idle 日写入从 `13,584` 行/节点降至 **`888` 行/节点 + `96` 集群安全闹钟（10 节点实测 `-93.4%`）**：
+在保留零运维 Cloudflare 全托管能力的同时，以全局同址 **`FleetHubDO`**（[../worker/src/do/fleet-hub-do.ts](../worker/src/do/fleet-hub-do.ts)）与分块环存引擎（[../worker/src/do/tsdb-slab.ts](../worker/src/do/tsdb-slab.ts)）实现以下 **6 大核心降本机制**：
 
 1. **Co-Located 单 DO 同址架构 (`FleetHubDO`)**：Agent WS 与管理员 Browser WS 同址接入单一 `FleetHubDO("global")`，`Idle / 2h Ops / 24x7` 全工况 **0 跨 DO RPC**，所有节点共享 `1 × 128 MB` DO 内存与单一 `fleet_batch` 广播通道。Legacy `NodeDO` 保留导出以维持 wrangler `v1` migration 兼容。
 2. **`setWebSocketAutoResponse` + 紧凑 Attachment (`< 512 B`)**：浏览器 `25s` 应用心跳（`{"op":"ping"}` -> `{"t":"pong"}`）与探针 `20s` RFC 6455 Ping/Pong 均由 Cloudflare 边缘自动应答，**0 次 DO 请求、0 GB-s 唤醒计费**。
 3. **UTC 相位锁定 `5m` Cohort 批量帧 (`mb`) + 边缘水位瞬时冲刷**：Idle（`mode = 0`）下探针仅在 **UTC 5 分钟整点 + `[0, 400)` ms 确定性抖动** 唤醒一次中枢发送 `t = "mb"`（`288` 帧/节点/天 = `14.4` DO 请求/节点/天）；若 `EdgeDetector` 命中 `watermarks`（含恢复滞回）、`|Δcpu| >= 35%` 或检测到系统重启，立即发送 `reason = "edge"` 保留危急告警即时响应；管理员查看详情时如尾点滞后 `> 35s`，DO 下发 `flush_now: true` 实时补齐最新点。
 4. **Zero-DDL 冷唤醒检查 + Push-Invalidated 本地 D1 镜像**：`FleetHubDO` 冷启动校验 `hub_meta.schema_version >= '2'` 跳过重复建表；`nodes_mirror`、`alert_rules_mirror`、`channels_mirror` 首次从 D1 灌入后仅由管理端写操作经 DO RPC 主动失效推送，**稳态心跳路径 `0` 次 D1 查询**。
-5. **Zero-DELETE Ring-Slab 分块环存 + Welford 流式聚合 + 惰性状态合表**：`metrics_chunk_10m`（`144` 槽 × `10m` = `24h`，每点 `76 B` LE）、`metrics_5m_chunk_1h`（`720` 槽 × `1h` = `30d`，每点 `88 B` LE）与 `metrics_1h_chunk_1d`（`366` 槽 × `1d` = `366d`，每点 `88 B` LE）100% 通过 `INSERT OR REPLACE ON (node_id, slot)` 循环覆写，**0 次时序 `DELETE`**、**0 次 `SELECT ... GROUP BY`**；`node_state` 单行合并在线状态、快照、Welford 累加器与月流量账本。
+5. **Zero-DELETE Ring-Slab 分块环存 + Welford 流式聚合 + 惰性状态合表**：`metrics_chunk_10m`（`144` 槽 × `10m` = `24h`，每点 `76 B` LE）、`metrics_5m_chunk_1h`（`720` 槽 × `1h` = `30d`，每点 `88 B` LE）与 `metrics_1h_chunk_1d`（`366` 槽 × `1d` = `366d`，每点 `88 B` LE）以 `(node_id, slot)` 为冲突键，仅更新 `bucket_ts` 与 `payload` 循环覆写，**0 次时序 `DELETE`**、**0 次 `SELECT ... GROUP BY`**；`node_state` 单行合并在线状态、快照、Welford 累加器与月流量账本。
 6. **事件驱动断连闹钟 + 4 挡自适应租约 + Page Visibility 生命周期**：无在线节点时调用 `deleteAlarm()`（`0` 闹钟）；有在线探针时仅设 `15m` 安全兜底（`96` 次/集群/天）；仅断连时设精准 `60s` 判定闹钟（对连接中的 `v2 mode = 0` 探针采用 `390s` 宽限防止假离线）。前端 `useFleetSocket.ts` 在标签页可见时每 `50s` 发 `{"op":"renew"}` 续期 `90s` 租约，隐藏或闲置超时立即 `unsub_fleet`。
 
 ---
@@ -88,16 +84,8 @@ UniOB 实现 **Self-Hosted Node Hub（自建节点中枢）** 与 **Cloudflare E
 
 ---
 
-## 5. 核心量化对比（10 台典型规模，30 天/月）
+## 5. 运行成本口径
 
-> 以下数据由实装代码路径计算并核验（10 / 50 / 200 节点与 3 种负载完整精算见 [SPEC.md](SPEC.md)）：
+在历史环槽已建立、每五分钟上报一次、无实时订阅的条件下，资源监控路径的 SQLite 写入基线为 **888 行/节点/日**。此值不含三网检测、初始化、配置变更、告警、重连、强制刷新及集群闹钟等额外事件。网络检测和持续看盘应单独计入预算，不能由该基线推导通用免费节点上限。
 
-| 对比维度（10 台规模） | v1 Cloudflare 基线 | 方向 B：SCCH 边缘中枢 | 方向 A：自建 `uniob-hub` + CF 看门狗 |
-| :--- | :--- | :--- | :--- |
-| **DO SQLite 日写入（Idle）** | `135,840` 行/日 | **`8,976` 行/日（-93.4%）** | **`0` 行/日** |
-| **DO SQLite 日写入（2h 运维）** | `138,326` 行/日 | **`13,440` 行/日（-90.3%）** | **`0` 行/日** |
-| **DO 月计费请求（2h 运维）** | `1.25M / 月`（`41,805`/日） | **`0.02M / 月`（`618`/日，-98.5%）** | **`0` 次/月** |
-| **DO 月计算时长（2h 运维）** | `4.1k GB-s / 月` | **`0.1k GB-s / 月`（-97.5%）** | **`0 GB-s / 月`** |
-| **D1 日读写（Idle，Watchdog 开启 cron）** | `0` 写 / `172,800` 读 | `0` 写 / **`576` 读** | `288` 写 / **`1,152` 读** |
-| **Workers Free（`100k` 写入/日）可达上限** | ❌ 最多 ~7 台（10 台超限） | ✅ **Idle 可达 ~112 台 / 2h 运维可达 ~75 台** | ✅ **无节点数限制（`O(1)` 消耗）** |
-| **月账单预估（10 台 Idle / 2h Ops / 24x7）** | `$5.00` / `$5.04` / `$7.03` | **`$0.00` / `$0.00` / `$0.00`（Free 可运行）** | **`$0.00` / `$0.00` / `$0.00`（Free 看门狗）** |
+Cloudflare 部署需要同时核对请求、计算时长、SQL 读写、存储及账户其他业务的用量；自建 Hub 的历史写入由本机 SQLite 承担，外部 Watchdog 的云端用量另计。具体模型见 [SPEC.md](SPEC.md)。

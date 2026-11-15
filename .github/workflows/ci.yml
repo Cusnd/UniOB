@@ -55,6 +55,9 @@ jobs:
       - name: Run worker tests
         run: npm run test:worker
 
+      - name: Run web logic tests
+        run: npm --prefix web test
+
   rust:
     name: Rust Fmt, Clippy & Tests
     runs-on: ubuntu-latest

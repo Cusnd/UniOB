@@ -2,6 +2,8 @@ mod collector;
 mod config;
 mod crypto;
 mod migrate;
+#[path = "../../shared/network_quality.rs"]
+mod network_quality;
 mod protocol;
 mod sanitize;
 
@@ -273,6 +275,25 @@ fn send_json<T: serde::Serialize>(
         .map_err(|e| format!("WebSocket send error: {e}"))
 }
 
+/// Piggyback network results on existing m/mb messages. Release only the exact
+/// transmitted prefix after a successful send; failures keep the queue intact.
+fn send_telemetry<T: serde::Serialize>(
+    ws: &mut WebSocket<MaybeTlsStream<TcpStream>>,
+    frame: &T,
+    quality: &network_quality::ProbeRuntime,
+) -> Result<(), String> {
+    let extension = quality.payload();
+    let mut value = serde_json::to_value(frame).map_err(|e| e.to_string())?;
+    if let Some(ref payload) = extension {
+        value["network_quality"] = serde_json::to_value(payload).map_err(|e| e.to_string())?;
+    }
+    send_json(ws, &value)?;
+    if let Some(ref payload) = extension {
+        quality.mark_sent(payload);
+    }
+    Ok(())
+}
+
 fn perform_canary_handshake(
     directive: &MigrateDirective,
     cfg: &Config,
@@ -358,6 +379,7 @@ fn run_session_with_migration(
     collector: &mut AgentCollector,
     mut mig_rt: Option<MigrationRuntime<'_>>,
 ) -> Result<(), String> {
+    collector.network_first_ctrl = true;
     let hello = collector.collect_hello();
     send_json(ws, &hello)?;
 
@@ -387,18 +409,18 @@ fn run_session_with_migration(
                 initial_snapshot_pending = false;
                 if collector.scheduler.mode == SampleMode::Idle {
                     let batch = collector.collect_hello_batch(now);
-                    send_json(ws, &batch)?;
+                    send_telemetry(ws, &batch, &collector.network_quality)?;
                 } else {
                     let metrics = collector.collect_metrics_and_seed_edge(now);
-                    send_json(ws, &metrics)?;
+                    send_telemetry(ws, &metrics, &collector.network_quality)?;
                 }
             } else if collector.scheduler.mode == SampleMode::Idle {
                 if let Some(edge_batch) = collector.collect_idle_tick(now) {
-                    send_json(ws, &edge_batch)?;
+                    send_telemetry(ws, &edge_batch, &collector.network_quality)?;
                 }
             } else {
                 let metrics = collector.collect_metrics_and_seed_edge(now);
-                send_json(ws, &metrics)?;
+                send_telemetry(ws, &metrics, &collector.network_quality)?;
             }
             next_sample_at = now + collector.scheduler.interval;
         }
@@ -408,7 +430,7 @@ fn run_session_with_migration(
             && now >= next_cohort_at
         {
             if let Some(cohort_batch) = collector.take_batch(BatchReason::Cohort) {
-                send_json(ws, &cohort_batch)?;
+                send_telemetry(ws, &cohort_batch, &collector.network_quality)?;
             }
             collector.mark_cohort_fired();
             next_cohort_at = collector.next_cohort_instant(now, SystemTime::now());
@@ -442,10 +464,10 @@ fn run_session_with_migration(
 
                     if flush_now {
                         let batch = collector.collect_flush_batch(apply_now);
-                        send_json(ws, &batch)?;
+                        send_telemetry(ws, &batch, &collector.network_quality)?;
                     } else if prev_mode == SampleMode::Idle && new_mode != SampleMode::Idle {
                         if let Some(batch) = collector.take_batch(BatchReason::Flush) {
-                            send_json(ws, &batch)?;
+                            send_telemetry(ws, &batch, &collector.network_quality)?;
                         }
                     }
 
@@ -495,11 +517,12 @@ fn run_session_with_migration(
                                     next_ping_at = cutover_now + PING_INTERVAL;
 
                                     canary_ctrl.migrate = None;
+                                    collector.network_first_ctrl = true;
                                     let canary_flush = canary_ctrl.flush_now == Some(true);
                                     collector.apply_ctrl(canary_ctrl, cutover_now);
                                     if canary_flush {
                                         let batch = collector.collect_flush_batch(cutover_now);
-                                        send_json(ws, &batch)?;
+                                        send_telemetry(ws, &batch, &collector.network_quality)?;
                                     }
 
                                     if collector.scheduler.mode != SampleMode::Idle {
@@ -854,7 +877,7 @@ mod tests {
             assert_eq!(hello_val["v"], 2);
             assert_eq!(
                 hello_val["capabilities"],
-                serde_json::json!(["mb_v2", "migrate_v1"])
+                serde_json::json!(["mb_v2", "migrate_v1", "network_quality_v1"])
             );
 
             // 2. Send CtrlFrame switching to Live (mode 1) within 200ms
@@ -890,6 +913,122 @@ token = "uob_live_testtok"
         assert!(session_res.is_err());
         assert_eq!(collector.scheduler.mode, SampleMode::Live);
         server_thread.join().unwrap();
+    }
+
+    #[test]
+    fn websocket_network_extension_piggybacks_batch_and_live_with_error_isolation() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let control = network_quality::make_control(&network_quality::default_config());
+        let expected_id = control.config_id.clone();
+        let server = std::thread::spawn(move || {
+            let (mut ws, _) = accept_one_ws(&listener);
+            let hello = read_json_frame(&mut ws);
+            assert!(hello["capabilities"]
+                .as_array()
+                .unwrap()
+                .contains(&serde_json::json!("network_quality_v1")));
+            ws.send(Message::Text(serde_json::json!({"t":"ctrl","mode":0,"interval_ms":30000,"flush_now":true,"network_quality":control}).to_string())).unwrap();
+            let batch = read_json_frame(&mut ws);
+            assert_eq!(batch["t"], "mb");
+            assert_eq!(batch["pts"][0].as_array().unwrap().len(), 16);
+            assert!(batch["last"].get("network_quality").is_none());
+            assert_eq!(batch["network_quality"]["enabled"], false);
+            assert_eq!(batch["network_quality"]["applied_config_id"], expected_id);
+            ws.send(Message::Text(serde_json::json!({"t":"ctrl","mode":1,"interval_ms":1000,"lease_sec":30,"network_quality":{"schema_version":99}}).to_string())).unwrap();
+            let live = loop {
+                let f = read_json_frame(&mut ws);
+                if f["t"] == "m" {
+                    break f;
+                }
+            };
+            assert!(live["cpu"].is_object());
+            assert_eq!(live["network_quality"]["enabled"], false);
+            assert!(live["network_quality"]["config_error"].is_string());
+            let _ = ws.close(None);
+        });
+        let cfg = Config::from_toml_str(&format!(
+            "[server]\nurl='ws://{addr}'\nnode_id='network-loop'\ntoken='token'\n"
+        ))
+        .unwrap();
+        let tls = build_tls_config().unwrap();
+        let mut ws = connect_ws(&cfg, &tls).unwrap();
+        let mut collector = AgentCollector::new(cfg);
+        assert!(run_session(&mut ws, &mut collector).is_err());
+        assert_eq!(collector.scheduler.mode, SampleMode::Live);
+        server.join().unwrap();
+    }
+
+    #[test]
+    fn canary_network_control_is_only_applied_after_cutover() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let cfg = Config::from_toml_str(
+            "[server]\nurl='ws://127.0.0.1:1'\nnode_id='canary-quality'\ntoken='canary-token'\n",
+        )
+        .unwrap();
+        let tls = build_tls_config().unwrap();
+        let mut collector = AgentCollector::new(cfg.clone());
+        let old = network_quality::make_control(&network_quality::default_config());
+        collector.apply_ctrl(
+            CtrlFrame {
+                network_quality: Some(serde_json::to_value(&old).unwrap()),
+                ..Default::default()
+            },
+            Instant::now(),
+        );
+        let mut config = network_quality::default_config();
+        config.targets[0].label = "candidate".into();
+        let candidate = network_quality::make_control(&config);
+        let expected_candidate = candidate.config_id.clone();
+        let server = std::thread::spawn(move || {
+            let (mut ws, _) = accept_one_ws(&listener);
+            let _ = read_json_frame(&mut ws);
+            ws.send(Message::Text(
+                serde_json::json!({"t":"ctrl","mode":0,"network_quality":candidate}).to_string(),
+            ))
+            .unwrap();
+        });
+        let state_dir = unique_state_dir("quality_canary");
+        let state = MigrationState::init(state_dir.clone(), true);
+        let epoch = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+        let url = format!("ws://{addr}");
+        let directive = MigrateDirective {
+            sig: migrate::compute_migrate_hmac_hex(
+                &cfg.server.token,
+                &cfg.server.node_id,
+                epoch,
+                &url,
+            ),
+            url,
+            fallback_url: None,
+            epoch,
+        };
+        let (_, candidate_ctrl) =
+            perform_canary_handshake(&directive, &cfg, &tls, &mut collector, &state).unwrap();
+        assert_eq!(
+            collector
+                .network_quality
+                .payload()
+                .unwrap()
+                .applied_config_id,
+            Some(old.config_id)
+        );
+        collector.network_first_ctrl = true;
+        collector.apply_ctrl(candidate_ctrl, Instant::now());
+        assert_eq!(
+            collector
+                .network_quality
+                .payload()
+                .unwrap()
+                .applied_config_id,
+            Some(expected_candidate)
+        );
+        server.join().unwrap();
+        let _ = std::fs::remove_dir_all(state_dir);
     }
 
     #[test]

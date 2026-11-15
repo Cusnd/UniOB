@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from "react";
+import { mergeMetricsNetworkState } from "../utils/networkQuality";
 import type {
   FleetTickData,
   HardwarePatch,
@@ -78,7 +79,7 @@ function applyFleetTicks(
           ? { ...existing.hardware, ...tick.hardware }
           : existing.hardware,
         traffic: tick.traffic ?? existing.traffic,
-        metrics: tick.metrics ?? existing.metrics,
+        metrics: mergeMetricsNetworkState(existing.metrics, tick.metrics),
       });
     }
   }
@@ -95,7 +96,7 @@ function applyFleetTicks(
       online: tick.online,
       last_seen_ts: tick.last_seen_ts,
       traffic: tick.traffic ?? patched.traffic,
-      metrics: tick.metrics ?? patched.metrics,
+      metrics: mergeMetricsNetworkState(patched.metrics, tick.metrics),
     };
   });
   return changed ? next : prev;
@@ -120,6 +121,7 @@ export function useFleetSocket({
     Record<string, LiveMetricSample[]>
   >({});
   const [procsPacket, setProcsPacket] = useState<ProcsPacket | null>(null);
+  const [liveNodeId, setLiveNodeId] = useState<string | null>(null);
 
   const wsRef = useRef<WebSocket | null>(null);
   const activeNodeSubRef = useRef<{ nodeId: string; proc: boolean } | null>(null);
@@ -301,6 +303,7 @@ export function useFleetSocket({
         idleTimerRef.current = null;
       }
       setWsStatus("disconnected");
+      setLiveNodeId(null);
       return;
     }
 
@@ -372,6 +375,7 @@ export function useFleetSocket({
         isVisibleRef.current &&
         !isIdleRef.current &&
         hasActiveSub;
+      setLiveNodeId(shouldRenew ? activeNodeSubRef.current?.nodeId ?? null : null);
 
       if (!shouldRenew) {
         clearLeaseRenew();
@@ -455,7 +459,7 @@ export function useFleetSocket({
                       ...node,
                       online: msg.online,
                       last_seen_ts: msg.ts,
-                      metrics: msg.metrics,
+                      metrics: mergeMetricsNetworkState(node.metrics, msg.metrics),
                     }
                   : node,
               ),
@@ -520,6 +524,7 @@ export function useFleetSocket({
         }
         if (disposed) return;
         setWsStatus("reconnecting");
+        setLiveNodeId(null);
         if (!isVisibleRef.current || isIdleRef.current) {
           return;
         }
@@ -624,6 +629,7 @@ export function useFleetSocket({
 
   return {
     wsStatus,
+    liveNodeId,
     liveSeriesByNode,
     procsPacket,
     subNode,

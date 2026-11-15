@@ -261,6 +261,8 @@ impl EdgeDetector {
 
 pub struct AgentCollector {
     config: Config,
+    pub network_quality: crate::network_quality::ProbeRuntime,
+    pub network_first_ctrl: bool,
     pub scheduler: SchedulerState,
     prev_cpu: Option<ProcStatData>,
     last_sample_at: Option<Instant>,
@@ -282,6 +284,8 @@ impl AgentCollector {
     pub fn new(config: Config) -> Self {
         let jitter = deterministic_hash_jitter(&config.server.node_id);
         Self {
+            network_quality: crate::network_quality::ProbeRuntime::new(&config.server.node_id),
+            network_first_ctrl: true,
             config,
             scheduler: SchedulerState::default(),
             prev_cpu: None,
@@ -334,6 +338,9 @@ impl AgentCollector {
     }
 
     pub fn apply_ctrl(&mut self, ctrl: CtrlFrame, now: Instant) {
+        self.network_quality
+            .apply_control(ctrl.network_quality.as_ref(), self.network_first_ctrl);
+        self.network_first_ctrl = false;
         let prev_mode = self.scheduler.mode;
         self.scheduler.apply_ctrl(ctrl, now);
         if prev_mode == SampleMode::LiveProc && self.scheduler.mode != SampleMode::LiveProc {
@@ -385,7 +392,11 @@ impl AgentCollector {
             swap_total: mem.swap_total,
             boot_time: host.boot_time,
             proc_enabled: self.config.process.enabled,
-            capabilities: vec!["mb_v2".to_string(), "migrate_v1".to_string()],
+            capabilities: vec![
+                "mb_v2".to_string(),
+                "migrate_v1".to_string(),
+                "network_quality_v1".to_string(),
+            ],
             migrated_epoch,
         }
     }
@@ -656,6 +667,7 @@ token = "tok_1"
                 ..Default::default()
             }),
             migrate: None,
+            network_quality: None,
         };
         sched.apply_ctrl(ctrl, t0);
         assert_eq!(sched.mode, SampleMode::LiveProc);
@@ -701,6 +713,7 @@ enabled = false
                 flush_now: None,
                 watermarks: None,
                 migrate: None,
+                network_quality: None,
             },
             now,
         );
@@ -715,7 +728,11 @@ enabled = false
         assert_eq!(h1.v, 2);
         assert_eq!(
             h1.capabilities,
-            vec!["mb_v2".to_string(), "migrate_v1".to_string()]
+            vec![
+                "mb_v2".to_string(),
+                "migrate_v1".to_string(),
+                "network_quality_v1".to_string()
+            ]
         );
         assert_eq!(h1.migrated_epoch, None);
 
@@ -798,6 +815,7 @@ enabled = false
                     disk: Some(90.0),
                 }),
                 migrate: None,
+                network_quality: None,
             },
             Instant::now(),
         );

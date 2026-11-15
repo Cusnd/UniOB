@@ -231,6 +231,7 @@ function AppContent() {
 
   const {
     wsStatus,
+    liveNodeId,
     liveSeriesByNode,
     procsPacket,
     subNode,
@@ -539,6 +540,7 @@ function AppContent() {
       </AppShell>
 
       <NodeInspectorSheet
+        liveNodeId={liveNodeId}
         node={inspectedNode}
         initialTab={inspectorTab}
         resolvedTheme={resolvedTheme}

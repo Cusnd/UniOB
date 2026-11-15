@@ -1,3 +1,5 @@
+import type { NetworkQualityState } from "./types/network-quality";
+
 export interface AuthStatus {
   authenticated: boolean;
   needsSetup: boolean;
@@ -41,6 +43,7 @@ export interface NetMetrics {
 }
 
 export interface NodeMetricsSnapshot {
+  network_quality?: NetworkQualityState;
   ts: number;
   up: number;
   cpu: CpuMetrics;
