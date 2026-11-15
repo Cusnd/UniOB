@@ -2049,3 +2049,47 @@ export function GroupCombobox({
     </div>
   );
 }
+
+/* ============================================================================
+ * 14. Select · Branded Top-Layer Customizable <select>
+ * Uses `appearance: base-select` + `::picker(select)` where supported, with
+ * progressive enhancement fallback on browsers without customizable select.
+ * ============================================================================ */
+const SelectedContentElement = "selectedcontent" as unknown as React.ElementType;
+
+const SUPPORTS_BASE_SELECT =
+  typeof CSS !== "undefined" &&
+  typeof CSS.supports === "function" &&
+  CSS.supports("appearance", "base-select");
+
+export interface SelectProps
+  extends Omit<React.SelectHTMLAttributes<HTMLSelectElement>, "size"> {
+  size?: "sm" | "md";
+}
+
+export function Select({
+  size = "md",
+  className = "",
+  children,
+  ...rest
+}: SelectProps): React.JSX.Element {
+  const sizeClass = size === "sm" ? "uniob-select-sm" : "uniob-select-md";
+  return (
+    <select
+      className={`uniob-select ${sizeClass} ${className}`.trim()}
+      {...rest}
+    >
+      {SUPPORTS_BASE_SELECT && (
+        <button type="button">
+          <SelectedContentElement className="uniob-select-value" />
+          <ChevronDown
+            strokeWidth={2}
+            className="uniob-select-chevron"
+            aria-hidden="true"
+          />
+        </button>
+      )}
+      {children}
+    </select>
+  );
+}

@@ -50,6 +50,7 @@ import {
   NativeDialog,
   SectionHeader,
   SegmentedControl,
+  Select,
   StatusDot,
   TabBar,
 } from "./ui/Primitives";
@@ -776,20 +777,18 @@ export function NodesOpsView(props: NodesOpsViewProps): React.JSX.Element {
 
                       <td>
                         {groups.length > 0 ? (
-                          <select
+                          <Select
+                            size="sm"
+                            name="group_name"
                             aria-label={`${node.name} 分组`}
+                            data-muted={node.group_name ? undefined : "true"}
                             value={node.group_name}
                             onChange={(e) => {
                               void onUpdateNode(node.id, {
                                 group_name: e.target.value,
                               });
                             }}
-                            style={{
-                              backgroundColor: "var(--bg-subtle)",
-                              color: "var(--text-secondary)",
-                              border: "1px solid var(--border-hairline)",
-                            }}
-                            className="h-7 max-w-[132px] cursor-pointer truncate rounded-[6px] px-2 text-[12px]"
+                            className="min-w-[96px] max-w-[140px]"
                           >
                             <option value="">未分组</option>
                             {groups.map((grp) => (
@@ -797,7 +796,7 @@ export function NodesOpsView(props: NodesOpsViewProps): React.JSX.Element {
                                 {grp}
                               </option>
                             ))}
-                          </select>
+                          </Select>
                         ) : (
                           <Badge tone="neutral">
                             {node.group_name || "未分组"}
@@ -1177,23 +1176,19 @@ export function NodesOpsView(props: NodesOpsViewProps): React.JSX.Element {
                     >
                       流量计费方式
                     </label>
-                    <select
+                    <Select
                       id="edit-node-mode"
+                      name="traffic_count_mode"
                       value={editCountMode}
                       onChange={(e) =>
                         setEditCountMode(e.target.value as TrafficCountMode)
                       }
-                      style={{
-                        backgroundColor: "var(--bg-subtle)",
-                        color: "var(--text-primary)",
-                        border: "1px solid var(--border-subtle)",
-                      }}
-                      className="h-9 w-full rounded-[8px] px-3 text-[13px] outline-none"
+                      className="w-full"
                     >
                       <option value="both">双向计费（上传 + 下载）</option>
                       <option value="tx_only">仅计上传（出向流量）</option>
                       <option value="max">双向取大（较高一侧）</option>
-                    </select>
+                    </Select>
                   </div>
                 </div>
 

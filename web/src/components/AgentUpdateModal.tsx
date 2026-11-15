@@ -22,6 +22,7 @@ import {
   IconCloseButton,
   NativeDialog,
   SegmentedControl,
+  Select,
   StatusDot,
   Switch,
 } from "./ui/Primitives";
@@ -574,8 +575,13 @@ export function AgentUpdateModal({
                           </div>
 
                           <div className="flex items-center gap-2">
-                            <select
+                            <Select
+                              size="sm"
+                              name="auto_update_override"
                               aria-label={`${node.name} 自动更新策略（当前：${effective.label}）`}
+                              data-muted={
+                                overrideVal === "inherit" ? "true" : undefined
+                              }
                               value={overrideVal}
                               disabled={busy}
                               onChange={(e) =>
@@ -584,17 +590,12 @@ export function AgentUpdateModal({
                                   e.target.value as "inherit" | "on" | "off",
                                 )
                               }
-                              style={{
-                                backgroundColor: "var(--bg-subtle)",
-                                border: "1px solid var(--border-subtle)",
-                                color: "var(--text-secondary)",
-                              }}
-                              className="h-7 cursor-pointer rounded-[6px] px-2 text-[11.5px] outline-none"
+                              className="min-w-[92px] text-[11.5px]"
                             >
                               <option value="inherit">跟随全局</option>
                               <option value="on">强制开启</option>
                               <option value="off">禁用</option>
-                            </select>
+                            </Select>
 
                             <Button
                               size="xs"

@@ -27,6 +27,7 @@ import {
   IconCloseButton,
   Kbd,
   NativeDialog,
+  Select,
   StatusDot,
   type StatusDotTone,
 } from "./ui/Primitives";
@@ -598,22 +599,20 @@ export function AppShell({
             className="flex h-[52px] min-w-0 shrink-0 items-center justify-between gap-3 px-4 sm:px-6"
           >
             <div className="flex min-w-0 items-center gap-3">
-              <select
+              <Select
+                size="sm"
+                name="app_route"
                 aria-label="页面导航"
                 value={route}
                 onChange={(e) => onRouteChange(e.target.value as AppRoute)}
-                style={{
-                  backgroundColor: "var(--bg-subtle)",
-                  border: "1px solid var(--border-subtle)",
-                }}
-                className="h-8 max-w-[140px] rounded-[7px] px-2.5 text-[12.5px] font-medium md:hidden"
+                className="h-8 min-w-[112px] max-w-[148px] text-[12.5px] md:hidden"
               >
                 {navItems.map((n) => (
                   <option key={n.id} value={n.id}>
                     {n.label}
                   </option>
                 ))}
-              </select>
+              </Select>
 
               <h1 className="hidden truncate text-[15px] font-semibold tracking-[-0.015em] md:block">
                 {currentNav.label}

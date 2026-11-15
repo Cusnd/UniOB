@@ -13,6 +13,7 @@ import {
   GroupCombobox,
   IconCloseButton,
   NativeDialog,
+  Select,
 } from "./ui/Primitives";
 
 export interface AddServerWizardModalProps {
@@ -465,24 +466,19 @@ export function AddServerWizardModal(
                     >
                       计费方向
                     </label>
-                    <select
+                    <Select
                       id="add-srv-count-mode"
                       name="traffic_count_mode"
                       value={countMode}
                       onChange={(e) =>
                         setCountMode(e.target.value as TrafficCountMode)
                       }
-                      style={{
-                        backgroundColor: "var(--bg-subtle)",
-                        color: "var(--text-primary)",
-                        border: "1px solid var(--border-subtle)",
-                      }}
-                      className="h-8 w-full rounded-[7px] px-2 text-[12px] outline-none"
+                      className="h-8 w-full rounded-[7px] text-[12px]"
                     >
                       <option value="both">双向计费</option>
                       <option value="tx_only">仅计上传</option>
                       <option value="max">双向取大</option>
-                    </select>
+                    </Select>
                   </div>
                 </div>
               )}

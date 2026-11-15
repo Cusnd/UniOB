@@ -39,6 +39,7 @@ import {
   NativeDialog,
   SectionHeader,
   SegmentedControl,
+  Select,
   StatusDot,
   Switch,
   TabBar,
@@ -1114,8 +1115,9 @@ export function AlertsCenterView(
                 >
                   监控项
                 </label>
-                <select
+                <Select
                   id="rule-metric"
+                  name="metric"
                   value={ruleMetric}
                   onChange={(e) => {
                     const nextMetric = e.target.value as AlertMetric;
@@ -1125,12 +1127,7 @@ export function AlertsCenterView(
                       setRuleThreshold(nextMetric === "offline" ? 180 : 90);
                     }
                   }}
-                  style={{
-                    backgroundColor: "var(--bg-subtle)",
-                    color: "var(--text-primary)",
-                    border: "1px solid var(--border-subtle)",
-                  }}
-                  className="h-9 w-full rounded-[8px] px-3 text-[13px]"
+                  className="w-full"
                 >
                   <option value="cpu">CPU 使用率</option>
                   <option value="mem">内存使用率</option>
@@ -1139,7 +1136,7 @@ export function AlertsCenterView(
                   <option value="steal">CPU 争抢率</option>
                   <option value="traffic_pct">月流量占比</option>
                   <option value="offline">离线时长</option>
-                </select>
+                </Select>
               </div>
 
               <div className="space-y-1">
@@ -1150,16 +1147,12 @@ export function AlertsCenterView(
                 >
                   适用范围
                 </label>
-                <select
+                <Select
                   id="rule-scope"
+                  name="node_id"
                   value={ruleNodeId}
                   onChange={(e) => setRuleNodeId(e.target.value)}
-                  style={{
-                    backgroundColor: "var(--bg-subtle)",
-                    color: "var(--text-primary)",
-                    border: "1px solid var(--border-subtle)",
-                  }}
-                  className="h-9 w-full rounded-[8px] px-3 text-[13px]"
+                  className="w-full"
                 >
                   <option value="">全部服务器</option>
                   {nodes.map((n) => (
@@ -1167,7 +1160,7 @@ export function AlertsCenterView(
                       {n.name}
                     </option>
                   ))}
-                </select>
+                </Select>
               </div>
             </div>
 
@@ -1432,22 +1425,18 @@ export function AlertsCenterView(
               >
                 渠道类型
               </label>
-              <select
+              <Select
                 id="ch-type"
+                name="channel_type"
                 value={chType}
                 onChange={(e) =>
                   setChType(e.target.value as "telegram" | "webhook")
                 }
-                style={{
-                  backgroundColor: "var(--bg-subtle)",
-                  color: "var(--text-primary)",
-                  border: "1px solid var(--border-subtle)",
-                }}
-                className="h-9 w-full rounded-[8px] px-3 text-[13px]"
+                className="w-full"
               >
                 <option value="telegram">Telegram 机器人</option>
                 <option value="webhook">Webhook（飞书 / 企业微信 / Bark）</option>
-              </select>
+              </Select>
             </div>
 
             <div className="space-y-1">

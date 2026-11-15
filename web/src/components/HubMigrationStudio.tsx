@@ -40,6 +40,7 @@ import {
   NativeDialog,
   SectionHeader,
   SegmentedControl,
+  Select,
   StatusDot,
   Switch,
 } from "./ui/Primitives";
@@ -1223,23 +1224,20 @@ export function HubMigrationStudio(
                         先用 1 台服务器试迁
                       </span>
                       {pilotOnly && (
-                        <select
+                        <Select
+                          size="sm"
+                          name="pilot_node_id"
                           aria-label="选择试迁服务器"
                           value={pilotNodeId}
                           onChange={(e) => setPilotNodeId(e.target.value)}
-                          style={{
-                            backgroundColor: "var(--bg-subtle)",
-                            color: "var(--text-primary)",
-                            border: "1px solid var(--border-hairline)",
-                          }}
-                          className="h-7 rounded-[6px] px-2 text-[12px]"
+                          className="min-w-[128px] max-w-[220px]"
                         >
                           {orderedNodes.map((n) => (
                             <option key={n.id} value={n.id}>
                               {n.name}
                             </option>
                           ))}
-                        </select>
+                        </Select>
                       )}
                     </div>
                   )}
