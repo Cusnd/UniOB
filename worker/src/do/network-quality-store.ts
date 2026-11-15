@@ -1,6 +1,6 @@
+import { base64UrlDecode, base64UrlEncode } from "../crypto";
 import type { Env } from "../types";
 import {
-  NQ_IDS,
   nqDefaultConfig,
   nqEmptyState,
   nqLatest,
@@ -8,9 +8,9 @@ import {
   nqParseConfig,
   nqParseOverride,
   nqParsePayload,
-  nqParseTarget,
   nqRawQuery,
   nqRollup,
+  nqSortTargetIds,
   type NqConfig,
   type NqControl,
   type NqOverride,
@@ -34,6 +34,22 @@ export const NQ_RANGE_SECONDS: Record<string, number> = {
   "7d": 604800,
   "30d": 2592000,
 };
+const NQ_MAX_RAW_BLOCK_POINTS = 720;
+const NQ_MAX_ROLLUP_BLOCK_POINTS = 2880;
+const cursorEncoder = new TextEncoder();
+const cursorDecoder = new TextDecoder();
+function encodeCursor(cursorObj: Record<string, unknown>): string {
+  return base64UrlEncode(cursorEncoder.encode(JSON.stringify(cursorObj)));
+}
+function decodeCursor(cursor: string): Record<string, unknown> {
+  const bytes = base64UrlDecode(cursor);
+  if (!bytes) throw new Error("Invalid or expired cursor");
+  const parsed = JSON.parse(cursorDecoder.decode(bytes));
+  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+    throw new Error("Invalid or expired cursor");
+  }
+  return parsed as Record<string, unknown>;
+}
 const bucket = (ts: number, seconds: number) =>
   Math.floor(ts / seconds) * seconds;
 const slot = (ts: number, seconds: number, count: number) =>
@@ -45,75 +61,22 @@ function decode<T>(value: string | undefined, raw = true): T[] {
     if (
       v.version !== 1 ||
       !Array.isArray(v.points) ||
-      v.points.length > (raw ? 180 : 1080)
+      v.points.length >
+        (raw ? NQ_MAX_RAW_BLOCK_POINTS : NQ_MAX_ROLLUP_BLOCK_POINTS)
     )
       return [];
     for (const p of v.points) {
-      const target = nqParseTarget(p.target);
       if (
+        !p ||
+        typeof p !== "object" ||
+        !p.target ||
+        typeof p.target.id !== "string" ||
         !Number.isSafeInteger(p.ts) ||
         typeof p.segment_id !== "string" ||
-        !p.segment_id ||
-        p.segment_id.length > 160 ||
-        !/^[a-f0-9]{64}$/.test(p.target_revision)
+        !p.segment_id
       )
         return [];
-      if (raw) {
-        if (
-          p.target_id !== target.id ||
-          typeof p.sample_id !== "string" ||
-          !p.sample_id ||
-          p.sample_id.length > 160 ||
-          !Number.isSafeInteger(p.round_seq) ||
-          p.round_seq < 0 ||
-          !/^[a-f0-9]{64}$/.test(p.config_id)
-        )
-          return [];
-        if (
-          ![
-            "ok",
-            "connect_timeout",
-            "connection_refused",
-            "dns_error",
-            "dns_timeout",
-            "network_error",
-          ].includes(p.result)
-        )
-          return [];
-        if (
-          p.result === "ok"
-            ? !(
-                typeof p.connect_ms === "number" &&
-                Number.isFinite(p.connect_ms) &&
-                p.connect_ms >= 0 &&
-                p.connect_ms <= 1500
-              )
-            : p.connect_ms !== null
-        )
-          return [];
-      } else {
-        if (
-          ![p.attempts, p.failures, p.success_count].every(
-            (n) => Number.isSafeInteger(n) && n >= 0,
-          ) ||
-          p.attempts !== p.failures + p.success_count
-        )
-          return [];
-        if (
-          typeof p.latency_sum_ms !== "number" ||
-          !Number.isFinite(p.latency_sum_ms) ||
-          p.latency_sum_ms < 0
-        )
-          return [];
-        if (
-          ![p.latency_ms, p.latency_max_ms, p.failure_rate_pct].every(
-            (n) =>
-              n === null ||
-              (typeof n === "number" && Number.isFinite(n) && n >= 0),
-          )
-        )
-          return [];
-      }
+      if (raw && p.target_id !== p.target.id) return [];
     }
     return v.points;
   } catch {
@@ -399,7 +362,7 @@ export class NetworkQualityStore {
         const old = this.block<NqPoint>(RAW, nodeId, ts, 600, 146);
         const merged = new Map(old.map((p) => [p.sample_id, p]));
         for (const p of points) {
-          if (merged.size >= 180) break;
+          if (merged.size >= NQ_MAX_RAW_BLOCK_POINTS) break;
           if (!merged.has(p.sample_id)) {
             merged.set(p.sample_id, p);
             affected.add(bucket(p.ts, 3600));
@@ -433,19 +396,18 @@ export class NetworkQualityStore {
           bucket(now - 1800, 600),
           bucket(now + 60, 600),
         );
-        latest = NQ_IDS.flatMap((id) => {
-          const target = control.targets.find((t) => t.id === id)!;
+        latest = control.targets.flatMap((target) => {
           if (!control.enabled || !target.enabled) return [];
           const samples = raw.filter(
             (p) =>
-              p.target_id === id &&
+              p.target_id === target.id &&
               p.target_revision === target.target_revision,
           );
           samples.sort((a, b) => b.ts - a.ts || b.round_seq - a.round_seq);
           const anchor = samples.find((p) => p.config_id === control.config_id);
           const retained = previous.latest.find(
             (p) =>
-              p.target_id === id &&
+              p.target_id === target.id &&
               p.target_revision === target.target_revision,
           );
           if (retained && (!anchor || retained.measured_at > anchor.ts))
@@ -477,21 +439,25 @@ export class NetworkQualityStore {
     let resumeBucket: number | undefined;
     if (cursor) {
       try {
-        const c = JSON.parse(atob(cursor));
+        const c = decodeCursor(cursor);
         if (
           c.range !== range ||
           c.node_id !== nodeId ||
+          typeof c.to !== "number" ||
           !Number.isSafeInteger(c.to) ||
           c.to > now + 60 ||
           c.to < now - 1800 ||
+          typeof c.offset !== "number" ||
           !Number.isSafeInteger(c.offset) ||
           c.offset < 0 ||
-          c.offset > (rawRange ? 180 : 1080)
+          c.offset >
+            (rawRange ? NQ_MAX_RAW_BLOCK_POINTS : NQ_MAX_ROLLUP_BLOCK_POINTS)
         )
           throw new Error();
         if (
           c.bucket !== undefined &&
-          (!Number.isSafeInteger(c.bucket) ||
+          (typeof c.bucket !== "number" ||
+            !Number.isSafeInteger(c.bucket) ||
             c.bucket % blockSeconds !== 0 ||
             c.bucket < bucket(c.to - duration, blockSeconds) ||
             c.bucket > bucket(c.to, blockSeconds))
@@ -505,22 +471,29 @@ export class NetworkQualityStore {
         throw new Error("Invalid or expired cursor");
       }
     }
+    const control = this.control(nodeId);
     const from = to - duration;
     const firstBucket = resumeBucket ?? bucket(from, blockSeconds);
     const page: NqQueryPoint[] = [];
     let bytes = 0;
-    const reply = (next_cursor: string | null) => ({
-      node_id: nodeId,
-      range,
-      resolution_sec: rawRange ? 20 : 300,
-      server_time: now,
-      state: this.state(nodeId),
-      series: NQ_IDS.map((target_id) => ({
-        target_id,
-        points: page.filter((p) => p.target.id === target_id),
-      })),
-      next_cursor,
-    });
+    const reply = (next_cursor: string | null) => {
+      const targetIds = nqSortTargetIds([
+        ...control.targets.map((t) => t.id),
+        ...page.map((p) => p.target.id),
+      ]);
+      return {
+        node_id: nodeId,
+        range,
+        resolution_sec: rawRange ? (control.interval_sec ?? 20) : 300,
+        server_time: now,
+        state: this.state(nodeId),
+        series: targetIds.map((target_id) => ({
+          target_id,
+          points: page.filter((p) => p.target.id === target_id),
+        })),
+        next_cursor,
+      };
+    };
     // Decode one block at a time. A month of frequent IP/process segments can
     // exceed the isolate's memory even though each individual response is small.
     let warmup = rawRange
@@ -537,6 +510,7 @@ export class NetworkQualityStore {
       firstBucket,
       bucket(to, blockSeconds),
     );
+    let foundCursorBucket = resumeBucket === undefined || offset === 0;
     for (const row of rows) {
       let points: NqQueryPoint[];
       if (rawRange) {
@@ -549,9 +523,25 @@ export class NetworkQualityStore {
         .sort(
           (a, b) =>
             a.ts - b.ts ||
-            a.target.id.localeCompare(b.target.id) ||
-            a.segment_id.localeCompare(b.segment_id),
+            (a.target.id < b.target.id
+              ? -1
+              : a.target.id > b.target.id
+                ? 1
+                : 0) ||
+            (a.segment_id < b.segment_id
+              ? -1
+              : a.segment_id > b.segment_id
+                ? 1
+                : 0),
         );
+      if (row.bucket_ts === resumeBucket) {
+        foundCursorBucket = true;
+        if (offset > 0 && offset >= points.length) {
+          throw new Error("Invalid or expired cursor");
+        }
+      } else if (!foundCursorBucket && resumeBucket !== undefined && row.bucket_ts > resumeBucket) {
+        throw new Error("Invalid or expired cursor");
+      }
       for (
         let i = row.bucket_ts === firstBucket ? offset : 0;
         i < points.length;
@@ -561,19 +551,20 @@ export class NetworkQualityStore {
         const size = new TextEncoder().encode(JSON.stringify(point)).length + 1;
         if (page.length && (page.length >= 3000 || bytes + size > 1_000_000))
           return reply(
-            btoa(
-              JSON.stringify({
-                node_id: nodeId,
-                range,
-                to,
-                bucket: row.bucket_ts,
-                offset: i,
-              }),
-            ),
+            encodeCursor({
+              node_id: nodeId,
+              range,
+              to,
+              bucket: row.bucket_ts,
+              offset: i,
+            }),
           );
         page.push(point);
         bytes += size;
       }
+    }
+    if (!foundCursorBucket) {
+      throw new Error("Invalid or expired cursor");
     }
     return reply(null);
   }

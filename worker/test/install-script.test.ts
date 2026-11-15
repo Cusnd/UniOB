@@ -37,6 +37,20 @@ describe("GET /install.sh", () => {
     expect(script).toContain("SHA256SUMS");
     expect(script).toContain('[[ ! -f "${CONFIG_PATH}"');
     expect(script).toContain('url = "${ESC_URL}"');
+    expect(script).toContain("/usr/local/sbin/uniob-agent-apply-update");
+    expect(script).toContain("/etc/systemd/system/${UPDATE_PATH_NAME}");
+    expect(script).toContain("uniob-agent-update.path");
+    expect(script).toContain("PathChanged=/var/lib/uniob/update/ready.json");
+    expect(script).toContain("uniob-agent-update.service");
+    expect(script).toContain("--config \"${CONFIG_PATH}\" --verify-staged-update");
+    expect(script).toContain("/usr/local/bin/uniob-agent.prev");
+    expect(script).toContain("sleep 2");
+    expect(script).toContain("! systemctl is-active --quiet");
+    expect(script).toContain("BACKUP_BINARY_PATH");
+    expect(script).toContain(
+      'rm -f "${UPDATE_PATH_UNIT}" "${UPDATE_SERVICE_UNIT}" "${SERVICE_PATH}" "${APPLY_HELPER_PATH}" "${BINARY_PATH}" "${BACKUP_BINARY_PATH}"',
+    );
+    expect(script).toContain('systemctl enable --now "${UPDATE_PATH_NAME}"');
   });
 
   it("uses GITHUB_REPO env override when configured", async () => {

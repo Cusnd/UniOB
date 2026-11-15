@@ -11,12 +11,15 @@ import {
   nqParsePayload,
   nqRawQuery,
   nqRollup,
+  nqSortTargets,
+  nqTargetArray,
   type NqControl,
   type NqPoint,
   type NqQueryPoint,
 } from "../src/network-quality";
 import { payloadToCompactTuple } from "../src/do/tsdb-slab";
 import { NetworkQualityStore } from "../src/do/network-quality-store";
+import { base64UrlEncode } from "../src/crypto";
 import fixture from "../../shared/fixtures/network-quality-v1.json";
 import {
   authedFetch,
@@ -152,10 +155,10 @@ describe("Network quality contract and statistics", () => {
       }
     }
     const valid = nqDefaultConfig();
-    valid.targets[0]!.label = "🚀".repeat(64);
+    valid.targets[0]!.label = "🚀".repeat(32);
     valid.targets[0]!.region = " 广东 ";
     expect(nqParseConfig(valid).targets[0]).toMatchObject({
-      label: "🚀".repeat(64),
+      label: "🚀".repeat(32),
       region: "广东",
     });
   });
@@ -549,13 +552,15 @@ describe("Network quality Cloudflare integration", () => {
               ts,
               JSON.stringify({ version: 1, points }),
             );
-          let cursor: string | null = btoa(
-            JSON.stringify({
-              node_id: "boundary",
-              range: "24h",
-              to,
-              offset: 0,
-            }),
+          let cursor: string | null = base64UrlEncode(
+            new TextEncoder().encode(
+              JSON.stringify({
+                node_id: "boundary",
+                range: "24h",
+                to,
+                offset: 0,
+              }),
+            ),
           );
           const all = [];
           let pages = 0;
@@ -753,7 +758,7 @@ describe("Network quality Cloudflare integration", () => {
         for (const target of config.targets)
           Object.assign(target, {
             host: longHost,
-            label: "🚀".repeat(64),
+            label: "🚀".repeat(32),
             region: "广".repeat(64),
           });
         const control = await nqMakeControl(nqParseConfig(config));
@@ -903,8 +908,10 @@ describe("Network quality Cloudflare integration", () => {
             ts,
             JSON.stringify({ version: 1, points }),
           );
-        let cursor: string | null = btoa(
-          JSON.stringify({ node_id: "month", range: "30d", to, offset: 0 }),
+        let cursor: string | null = base64UrlEncode(
+          new TextEncoder().encode(
+            JSON.stringify({ node_id: "month", range: "30d", to, offset: 0 }),
+          ),
         );
         const all = [];
         let pages = 0;
@@ -934,5 +941,391 @@ describe("Network quality Cloudflare integration", () => {
     expect(result.allFailed).toBe(true);
     expect(result.blocks).toBe(721);
     expect(result.pages).toBeGreaterThan(1);
+  });
+
+  it("supports 1..=8 customizable targets, canonical sorting, optional region, and interval_sec 10..=300", async () => {
+    const withDefaultInterval = nqParseConfig({
+      ...fixture.config,
+      interval_sec: 20,
+    });
+    expect("interval_sec" in withDefaultInterval).toBe(false);
+    const controlDefault = await nqMakeControl(withDefaultInterval);
+    expect("interval_sec" in controlDefault).toBe(false);
+    expect(controlDefault.config_id).toBe(fixture.control.config_id);
+    expect(controlDefault).toEqual(fixture.control);
+
+    const withCustomInterval = nqParseConfig({
+      ...fixture.config,
+      interval_sec: 30,
+    });
+    expect(withCustomInterval.interval_sec).toBe(30);
+    const controlCustom = await nqMakeControl(withCustomInterval);
+    expect(controlCustom.interval_sec).toBe(30);
+    expect(controlCustom.config_id).not.toBe(fixture.control.config_id);
+
+    for (const badInterval of [9, 301, 20.5, "20"]) {
+      expect(() =>
+        nqParseConfig({ ...fixture.config, interval_sec: badInterval }),
+      ).toThrow();
+    }
+
+    const customOnly = nqParseConfig({
+      enabled: true,
+      interval_sec: 15,
+      targets: [
+        {
+          id: "z_node",
+          enabled: true,
+          label: "Z Node",
+          region: "   ",
+          host: "1.1.1.1",
+          address_family: "ipv4",
+        },
+        {
+          id: "cm",
+          enabled: true,
+          label: "移动",
+          region: "广东",
+          host: "gd-cm-v4.ip.zstaticcdn.com",
+          address_family: "ipv4",
+        },
+        {
+          id: "a_node",
+          enabled: false,
+          label: "A Node",
+          host: "8.8.8.8",
+          port: 443,
+          address_family: "ipv4",
+        },
+        {
+          id: "ct",
+          enabled: true,
+          label: "电信",
+          region: null,
+          host: "1.0.0.1",
+          address_family: "ipv4",
+        },
+        {
+          id: "cu",
+          enabled: true,
+          label: "联通",
+          host: "9.9.9.9",
+          address_family: "ipv4",
+        },
+      ],
+    });
+    expect(customOnly.targets.map((t) => t.id)).toEqual([
+      "ct",
+      "cu",
+      "cm",
+      "a_node",
+      "z_node",
+    ]);
+    expect("region" in customOnly.targets[0]!).toBe(false);
+    expect("region" in customOnly.targets[4]!).toBe(false);
+    expect(customOnly.targets[4]!.port).toBe(80);
+    expect(nqTargetArray(customOnly.targets[4]!)[3]).toBeNull();
+    expect(nqTargetArray(customOnly.targets[2]!)[3]).toBe("广东");
+
+    expect(
+      nqSortTargets([
+        { id: "sg-1", enabled: true, label: "SG", host: "1.1.1.1", port: 80, address_family: "ipv4" },
+        { id: "cm", enabled: true, label: "CM", host: "1.1.1.1", port: 80, address_family: "ipv4" },
+      ]).map((t) => t.id),
+    ).toEqual(["cm", "sg-1"]);
+
+    // 1 target valid, 8 targets valid, 0 or 9 invalid
+    expect(
+      nqParseConfig({
+        enabled: true,
+        targets: [
+          {
+            id: "sg_01-edge",
+            enabled: true,
+            label: "SG",
+            host: "1.1.1.1",
+            address_family: "ipv4",
+          },
+        ],
+      }).targets,
+    ).toHaveLength(1);
+    expect(
+      nqParseConfig({
+        enabled: true,
+        targets: Array.from({ length: 8 }, (_, idx) => ({
+          id: `t-${idx}`,
+          enabled: true,
+          label: `Target ${idx}`,
+          host: "1.1.1.1",
+          address_family: "ipv4",
+        })),
+      }).targets,
+    ).toHaveLength(8);
+    expect(() => nqParseConfig({ enabled: true, targets: [] })).toThrow();
+    expect(() =>
+      nqParseConfig({
+        enabled: true,
+        targets: Array.from({ length: 9 }, (_, idx) => ({
+          id: `t-${idx}`,
+          enabled: true,
+          label: `Target ${idx}`,
+          host: "1.1.1.1",
+          address_family: "ipv4",
+        })),
+      }),
+    ).toThrow();
+
+    for (const badId of ["CT", "-ct", "_ct", "a".repeat(25), "a b", ""]) {
+      expect(() =>
+        nqParseConfig({
+          enabled: true,
+          targets: [
+            {
+              id: badId,
+              enabled: true,
+              label: "Bad",
+              host: "1.1.1.1",
+              address_family: "ipv4",
+            },
+          ],
+        }),
+      ).toThrow();
+    }
+    expect(() =>
+      nqParseConfig({
+        enabled: true,
+        targets: [
+          {
+            id: "dup",
+            enabled: true,
+            label: "One",
+            host: "1.1.1.1",
+            address_family: "ipv4",
+          },
+          {
+            id: "dup",
+            enabled: false,
+            label: "Two",
+            host: "8.8.8.8",
+            address_family: "ipv4",
+          },
+        ],
+      }),
+    ).toThrow();
+  });
+
+  it("paginates non-Latin1 nodeIds cleanly with base64url cursors and rejects forged offset buckets", async () => {
+    await setupAndLogin();
+    const control = await nqMakeControl({
+      enabled: true,
+      interval_sec: 30,
+      targets: [
+        {
+          id: "ct",
+          enabled: true,
+          label: "电信",
+          host: "1.1.1.1",
+          port: 80,
+          address_family: "ipv4",
+        },
+        {
+          id: "sg-edge",
+          enabled: true,
+          label: "Singapore",
+          region: "APAC",
+          host: "8.8.8.8",
+          port: 443,
+          address_family: "ipv4",
+        },
+      ],
+    });
+    const nonLatinNodeId = "东京-节点-🚀";
+    const now = Math.floor(Date.now() / 1000);
+    const baseBucket = Math.floor((now - 1200) / 600) * 600;
+
+    const res = await runInDurableObject(
+      env.FLEET_HUB_DO.getByName("nq-non-latin1-cursor"),
+      async (_obj, state) => {
+        const store = new NetworkQualityStore(state.storage.sql, env, (fn) =>
+          state.storage.transactionSync(fn),
+        );
+        await store.ensureReady();
+        await store.saveConfig({
+          enabled: true,
+          interval_sec: 30,
+          targets: control.targets.map(({ target_revision: _r, ...t }) => t),
+        });
+        store.setSupported(nonLatinNodeId, true);
+
+        // Seed 7 consecutive 10m chunks * 500 points = 3500 points so >3000 page cap
+        // forces real base64url encodeCursor/decodeCursor on a non-Latin1 node_id.
+        const insertedBuckets: number[] = [];
+        for (let b = 0; b < 7; b++) {
+          const bucketTs = baseBucket - (6 - b) * 600;
+          insertedBuckets.push(bucketTs);
+          const blockPoints: NqPoint[] = [];
+          for (let i = 0; i < 250; i++) {
+            for (const target of control.targets) {
+              const { target_revision, ...plain } = target;
+              blockPoints.push({
+                sample_id: `nl:${bucketTs}:${i}:${target.id}`,
+                round_seq: b * 250 + i + 1,
+                config_id: control.config_id,
+                target_id: target.id,
+                target_revision,
+                segment_id: `nl:${target.id}:seg`,
+                ts: bucketTs + i * 2,
+                result: "ok",
+                connect_ms: 25 + (i % 10),
+                remote_ip: target.host,
+                target: plain,
+              });
+            }
+          }
+          state.storage.sql.exec(
+            "INSERT OR REPLACE INTO network_quality_chunk_10m VALUES (?,?,?,?)",
+            nonLatinNodeId,
+            Math.floor(bucketTs / 600) % 145,
+            bucketTs,
+            JSON.stringify({ version: 1, points: blockPoints }),
+          );
+        }
+
+        const collected: NqQueryPoint[] = [];
+        let cursor: string | null = null;
+        let pages = 0;
+        do {
+          const page = store.query(nonLatinNodeId, "24h", cursor ?? undefined);
+          for (const series of page.series) {
+            collected.push(...series.points);
+          }
+          cursor = page.next_cursor;
+          pages++;
+        } while (cursor && pages < 10);
+
+        // Missing bucket with offset > 0 must throw invalid cursor.
+        const missingBucketCursor = base64UrlEncode(
+          new TextEncoder().encode(
+            JSON.stringify({
+              node_id: nonLatinNodeId,
+              range: "24h",
+              to: now,
+              bucket: baseBucket - 7200,
+              offset: 1,
+            }),
+          ),
+        );
+        let missingErr: string | null = null;
+        try {
+          store.query(nonLatinNodeId, "24h", missingBucketCursor);
+        } catch (err) {
+          missingErr = (err as Error).message;
+        }
+
+        // Existing bucket with out-of-range offset >= block points must throw too.
+        const badOffsetCursor = base64UrlEncode(
+          new TextEncoder().encode(
+            JSON.stringify({
+              node_id: nonLatinNodeId,
+              range: "24h",
+              to: now,
+              bucket: insertedBuckets[0]!,
+              offset: 999,
+            }),
+          ),
+        );
+        let offsetErr: string | null = null;
+        try {
+          store.query(nonLatinNodeId, "24h", badOffsetCursor);
+        } catch (err) {
+          offsetErr = (err as Error).message;
+        }
+
+        return { collected, pages, missingErr, offsetErr };
+      },
+    );
+
+    expect(res.collected).toHaveLength(3500);
+    expect(res.pages).toBe(2);
+    expect(res.collected.some((p) => p.target.id === "sg-edge")).toBe(true);
+    expect(res.missingErr).toBe("Invalid or expired cursor");
+    expect(res.offsetErr).toBe("Invalid or expired cursor");
+  });
+
+  it("ingests and queries >3 custom targets with custom interval_sec end-to-end", async () => {
+    const cookie = await setupAndLogin();
+    const { node, agent_token } = await createTestNode(cookie, { name: "custom-4-nq" });
+    const cfg = {
+      enabled: true,
+      interval_sec: 30,
+      targets: [
+        { id: "ct", enabled: true, label: "电信", region: "广东", host: "1.1.1.1", port: 80, address_family: "ipv4" },
+        { id: "cu", enabled: true, label: "联通", host: "8.8.8.8", port: 80, address_family: "ipv4" },
+        { id: "sg-1", enabled: true, label: "新加坡", region: "SG", host: "9.9.9.9", port: 443, address_family: "ipv4" },
+        { id: "jp-2", enabled: true, label: "东京", host: "1.0.0.1", port: 8443, address_family: "ipv4" },
+      ],
+    };
+    const putRes = await authedFetch("/api/network-quality/config", cookie, put(cfg));
+    expect(putRes.status).toBe(200);
+
+    const ws = await connectAgentWs(node.id, agent_token);
+    const first = nextWsMessage<any>(ws, (m) => m.t === "ctrl");
+    ws.send(
+      JSON.stringify(
+        makeHelloFrame({ v: 2, capabilities: ["network_quality_v1"] }),
+      ),
+    );
+    const control = (await first).network_quality as NqControl;
+    expect(control.interval_sec).toBe(30);
+    expect(control.targets.map((t) => t.id)).toEqual(["ct", "cu", "jp-2", "sg-1"]);
+
+    const now = Math.floor(Date.now() / 1000);
+    const points: NqPoint[] = control.targets.map((target) => {
+      const { target_revision, ...plain } = target;
+      return {
+        sample_id: `e2e:${target.id}:1`,
+        round_seq: 1,
+        config_id: control.config_id,
+        target_id: target.id,
+        target_revision,
+        segment_id: `e2e:${target.id}:1`,
+        ts: now - 30,
+        result: "ok",
+        connect_ms: 42,
+        remote_ip: plain.host,
+        target: plain,
+      };
+    });
+
+    ws.send(
+      JSON.stringify({
+        ...makeMetricsFrame(now),
+        network_quality: {
+          schema_version: 1,
+          applied_config_id: control.config_id,
+          enabled: true,
+          config_error: null,
+          dropped_samples: 0,
+          latest: [],
+          points,
+        },
+      }),
+    );
+    await flushMicrotasks();
+
+    const rawRes = await (
+      await authedFetch(`/api/nodes/${node.id}/network-quality?range=1h`, cookie)
+    ).json<{
+      resolution_sec: number;
+      series: Array<{ target_id: string; points: NqQueryPoint[] }>;
+    }>();
+    expect(rawRes.resolution_sec).toBe(30);
+    expect(rawRes.series.map((s) => s.target_id)).toEqual(["ct", "cu", "jp-2", "sg-1"]);
+    const allPoints = rawRes.series.flatMap((s) => s.points);
+    expect(allPoints).toHaveLength(4);
+    expect(new Set(allPoints.map((p) => p.target.id))).toEqual(
+      new Set(["ct", "cu", "jp-2", "sg-1"]),
+    );
+    ws.close();
   });
 });

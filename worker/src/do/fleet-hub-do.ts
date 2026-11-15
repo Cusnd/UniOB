@@ -14,6 +14,17 @@ import {
   type AlertRuleRuntimeState,
 } from "../alert/engine";
 import { generateId } from "../crypto";
+import {
+  checkLatestAgentRelease,
+  decodeAutoUpdateOverride,
+  getAgentUpdateConfig,
+  isNewerAgentVersion,
+  isNodeEligibleForUpdate,
+  normalizeAgentArch,
+  parseAgentUpdateStatus,
+  RELEASE_CACHE_TTL_SEC,
+  signUpdateDirective,
+} from "../auto-update";
 import { NetworkQualityStore } from "./network-quality-store";
 import {
   advanceTrafficLedger,
@@ -24,9 +35,11 @@ import {
 import type {
   AgentCtrlFrame,
   AgentHelloFrame,
+  AgentLatestRelease,
   AgentMetricsBatchFrame,
   AgentMetricsFrame,
   AgentProcEntry,
+  AgentUpdateConfig,
   AgentWsAttachment,
   AlertChangeMessage,
   AlertRule,
@@ -34,6 +47,7 @@ import type {
   ClientAttachment,
   ClientInboundMessage,
   CompactMetricTuple,
+  CtrlUpdateDirective,
   CtrlWatermarks,
   Env,
   ExportTrafficLedgerEntry,
@@ -49,6 +63,7 @@ import type {
   NodeRow,
   NodeSnapshot,
   NodeTrafficSummary,
+  NodeUpdateStatus,
   NotificationChannel,
   NotificationChannelRow,
 } from "../types";
@@ -112,6 +127,8 @@ interface PersistedNodeState {
   welford_5m: WelfordAccum | null;
   welford_1h: WelfordAccum | null;
   hw: NodeHardwareInfo | null;
+  caps: string[];
+  update_status: NodeUpdateStatus | null;
 }
 
 interface NodeStateSqlRow {
@@ -134,6 +151,8 @@ interface NodeStateSqlRow {
   welford_5m_json: string | null;
   welford_1h_json: string | null;
   hw_json: string | null;
+  caps_json: string | null;
+  update_status_json: string | null;
 }
 
 interface StoredAlertRuleState extends AlertRuleRuntimeState {
@@ -186,6 +205,11 @@ export class FleetHubDO extends DurableObject<Env> {
   private liveProcs = new Map<string, AgentProcEntry[]>();
   private flushWaiters = new Map<string, Array<() => void>>();
   private lastFleetBroadcastMs = 0;
+  private lastRequestOrigin: string | null = null;
+  private agentUpdateConfigCache: { config: AgentUpdateConfig; loadedAt: number } | null = null;
+  private agentReleaseCache: { release: AgentLatestRelease | null; checkedAt: number; key: string } | null = null;
+  private inFlightReleaseCheck: Promise<AgentLatestRelease | null> | null = null;
+  private lastUpdateDispatchByNode = new Map<string, { version: string; ts: number }>();
 
   constructor(ctx: DurableObjectState, env: Env) {
     super(ctx, env);
@@ -215,17 +239,43 @@ export class FleetHubDO extends DurableObject<Env> {
       }
       if (schemaVersion < 2) {
         this.initSchema();
-        this.sql.exec(
-          "INSERT OR REPLACE INTO hub_meta (key, value) VALUES ('schema_version', '2')",
-        );
       }
       if (schemaVersion < 3) {
         this.networkQuality.initSchema();
-        this.sql.exec("INSERT OR REPLACE INTO hub_meta(key,value) VALUES ('schema_version','3')");
+      }
+      if (schemaVersion >= 2 && schemaVersion < 4) {
+        this.migrateSchemaToV4();
+      }
+      if (schemaVersion < 4) {
+        this.sql.exec("INSERT OR REPLACE INTO hub_meta(key,value) VALUES ('schema_version','4')");
       }
       this.loadPersistedStateIntoMemory();
       await this.networkQuality.ensureReady();
     });
+  }
+
+  private migrateSchemaToV4(): void {
+    const mirrorCols = new Set(
+      this.sql
+        .exec<{ name: string }>("PRAGMA table_info(nodes_mirror)")
+        .toArray()
+        .map((c) => c.name),
+    );
+    if (!mirrorCols.has("auto_update_override")) {
+      this.sql.exec("ALTER TABLE nodes_mirror ADD COLUMN auto_update_override INTEGER");
+    }
+    const stateCols = new Set(
+      this.sql
+        .exec<{ name: string }>("PRAGMA table_info(node_state)")
+        .toArray()
+        .map((c) => c.name),
+    );
+    if (!stateCols.has("caps_json")) {
+      this.sql.exec("ALTER TABLE node_state ADD COLUMN caps_json TEXT");
+    }
+    if (!stateCols.has("update_status_json")) {
+      this.sql.exec("ALTER TABLE node_state ADD COLUMN update_status_json TEXT");
+    }
   }
 
   private initSchema(): void {
@@ -256,6 +306,7 @@ export class FleetHubDO extends DurableObject<Env> {
         agent_version TEXT,
         proc_enabled INTEGER NOT NULL DEFAULT 1,
         mute_until INTEGER,
+        auto_update_override INTEGER,
         created_at INTEGER NOT NULL,
         updated_at INTEGER NOT NULL
       );
@@ -301,7 +352,9 @@ export class FleetHubDO extends DurableObject<Env> {
         last_metrics_json TEXT,
         welford_5m_json TEXT,
         welford_1h_json TEXT,
-        hw_json TEXT
+        hw_json TEXT,
+        caps_json TEXT,
+        update_status_json TEXT
       );
 
       CREATE TABLE IF NOT EXISTS alert_rule_states (
@@ -346,15 +399,24 @@ export class FleetHubDO extends DurableObject<Env> {
   private loadPersistedStateIntoMemory(): void {
     const metaRows = this.sql
       .exec<{ key: string; value: string }>(
-        "SELECT key, value FROM hub_meta WHERE key = 'mirror_seeded'",
+        "SELECT key, value FROM hub_meta WHERE key IN ('mirror_seeded', 'last_request_origin')",
       )
       .toArray();
-    this.mirrorSeeded = metaRows[0]?.value === "1";
+    for (const m of metaRows) {
+      if (m.key === "mirror_seeded") {
+        this.mirrorSeeded = m.value === "1";
+      } else if (m.key === "last_request_origin") {
+        this.lastRequestOrigin = m.value;
+      }
+    }
 
     for (const row of this.sql
       .exec<NodeRow & Record<string, SqlStorageValue>>("SELECT * FROM nodes_mirror")
       .toArray()) {
-      this.nodesMirror.set(row.id, row);
+      this.nodesMirror.set(row.id, {
+        ...row,
+        auto_update_override: row.auto_update_override ?? null,
+      });
     }
     for (const row of this.sql
       .exec<AlertRuleRow & Record<string, SqlStorageValue>>("SELECT * FROM alert_rules_mirror")
@@ -390,6 +452,8 @@ export class FleetHubDO extends DurableObject<Env> {
         welford_5m: safeJsonParse<WelfordAccum>(row.welford_5m_json),
         welford_1h: safeJsonParse<WelfordAccum>(row.welford_1h_json),
         hw: safeJsonParse<NodeHardwareInfo>(row.hw_json),
+        caps: safeJsonParse<string[]>(row.caps_json) ?? [],
+        update_status: safeJsonParse<NodeUpdateStatus>(row.update_status_json),
       });
     }
     for (const row of this.sql
@@ -472,8 +536,8 @@ export class FleetHubDO extends DurableObject<Env> {
         id, name, group_name, tags_json, sort_order, token_sha256,
         traffic_limit_bytes, traffic_reset_day, traffic_count_mode,
         hostname, os, kernel, arch, cpu_model, cpu_cores, mem_total, swap_total,
-        agent_version, proc_enabled, mute_until, created_at, updated_at
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        agent_version, proc_enabled, mute_until, auto_update_override, created_at, updated_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       node.id,
       node.name,
       node.group_name,
@@ -494,6 +558,7 @@ export class FleetHubDO extends DurableObject<Env> {
       node.agent_version,
       node.proc_enabled,
       node.mute_until,
+      node.auto_update_override ?? null,
       node.created_at,
       node.updated_at,
     );
@@ -539,8 +604,9 @@ export class FleetHubDO extends DurableObject<Env> {
         node_id, online, last_seen_ts, offline_deadline_ms,
         cycle_key, last_agent_rx, last_agent_tx, cycle_rx_bytes, cycle_tx_bytes,
         traffic_updated_at, last_flush_rx_tot, last_flush_tx_tot,
-        last_raw_ts, last_boot_up, last_metrics_json, welford_5m_json, welford_1h_json, hw_json
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        last_raw_ts, last_boot_up, last_metrics_json, welford_5m_json, welford_1h_json, hw_json,
+        caps_json, update_status_json
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       ON CONFLICT(node_id) DO UPDATE SET
         online = excluded.online,
         last_seen_ts = excluded.last_seen_ts,
@@ -558,7 +624,9 @@ export class FleetHubDO extends DurableObject<Env> {
         last_metrics_json = excluded.last_metrics_json,
         welford_5m_json = excluded.welford_5m_json,
         welford_1h_json = excluded.welford_1h_json,
-        hw_json = excluded.hw_json`,
+        hw_json = excluded.hw_json,
+        caps_json = excluded.caps_json,
+        update_status_json = excluded.update_status_json`,
       state.node_id,
       state.online,
       state.last_seen_ts,
@@ -577,6 +645,8 @@ export class FleetHubDO extends DurableObject<Env> {
       state.welford_5m ? JSON.stringify(state.welford_5m) : null,
       state.welford_1h ? JSON.stringify(state.welford_1h) : null,
       state.hw ? JSON.stringify(state.hw) : null,
+      JSON.stringify(state.caps),
+      state.update_status ? JSON.stringify(state.update_status) : null,
     );
     this.dirtyNodeStates.delete(state.node_id);
   }
@@ -623,6 +693,8 @@ export class FleetHubDO extends DurableObject<Env> {
       welford_5m: null,
       welford_1h: null,
       hw: null,
+      caps: [],
+      update_status: null,
     };
     this.nodeStates.set(nodeId, created);
     return created;
@@ -696,6 +768,8 @@ export class FleetHubDO extends DurableObject<Env> {
       traffic: this.buildTrafficSummary(node, state),
       metrics: state?.last_metrics ?? null,
       hardware: this.resolveHardware(node, state),
+      caps: state?.caps ?? [],
+      update_status: state?.update_status ?? null,
     };
   }
 
@@ -714,13 +788,39 @@ export class FleetHubDO extends DurableObject<Env> {
       traffic: this.buildTrafficSummary(node, state),
       metrics: state?.last_metrics ?? null,
       ...(hw ? { hardware: hw } : {}),
+      caps: state?.caps ?? [],
+      auto_update_override: decodeAutoUpdateOverride(node.auto_update_override),
+      update_status: state?.update_status ?? null,
     };
+  }
+
+  private rememberOriginString(origin?: string): void {
+    if (!origin) return;
+    try {
+      this.rememberRequestOrigin(new URL(origin));
+    } catch {
+      /* ignore invalid origin */
+    }
+  }
+
+  private rememberRequestOrigin(url: URL): void {
+    if (url.protocol !== "http:" && url.protocol !== "https:") {
+      return;
+    }
+    if (this.lastRequestOrigin !== url.origin) {
+      this.lastRequestOrigin = url.origin;
+      this.sql.exec(
+        "INSERT OR REPLACE INTO hub_meta(key, value) VALUES ('last_request_origin', ?)",
+        url.origin,
+      );
+    }
   }
 
   async fetch(request: Request): Promise<Response> {
     await this.ensureMirrorSeeded();
 
     const url = new URL(request.url);
+    this.rememberRequestOrigin(url);
     const upgrade = request.headers.get("Upgrade")?.toLowerCase();
     if (upgrade !== "websocket") {
       return new Response("Expected websocket", { status: 426 });
@@ -1003,12 +1103,22 @@ export class FleetHubDO extends DurableObject<Env> {
       }
     }
 
-    this.persistNodeStateSql(state);
-
     const ver = hello.v === 2 ? 2 : 1;
     const caps = Array.isArray(hello.capabilities)
-      ? hello.capabilities.filter((c): c is string => typeof c === "string").slice(0, 8)
+      ? hello.capabilities.filter((c): c is string => typeof c === "string").slice(0, 16)
       : [];
+    state.caps = caps;
+    if (
+      state.update_status &&
+      (state.update_status.state === "applying" ||
+        state.update_status.state === "staged") &&
+      state.update_status.target_version &&
+      state.update_status.target_version === hw.agent_version
+    ) {
+      state.update_status = { state: "idle", updated_at: nowSec };
+    }
+    this.persistNodeStateSql(state);
+
     this.networkQuality.setSupported(nodeId, caps.includes("network_quality_v1"));
     const desired = this.computeCtrlForNode(nodeId, ver, nowSec);
     const nextAtt: AgentWsAttachment = {
@@ -1020,8 +1130,24 @@ export class FleetHubDO extends DurableObject<Env> {
     };
     ws.serializeAttachment(nextAtt);
 
-    // Send initial ctrl immediately for v2 agents or when browsers already watch this node.
-    if (ver >= 2 || desired.mode > 0) {
+    if (latestNode) {
+      const update = await this.resolveAutoUpdateDirective(
+        nextAtt,
+        latestNode,
+        state,
+        nowSec,
+      );
+      if (update) {
+        desired.update = update;
+        this.lastUpdateDispatchByNode.set(nodeId, {
+          version: update.version,
+          ts: nowSec,
+        });
+      }
+    }
+
+    // Send initial ctrl immediately for v2 agents, watched nodes, or auto-update dispatch.
+    if (ver >= 2 || desired.mode > 0 || desired.update) {
       this.sendAgentCtrl(ws, desired);
     }
 
@@ -1047,8 +1173,15 @@ export class FleetHubDO extends DurableObject<Env> {
     const nowSec = Math.floor(Date.now() / 1000);
     const state = this.getOrCreateNodeState(nodeId);
     const wasOffline = state.online === 0;
-    const { t: _t, procs, network_quality: _nq, ...resourcePayload } = frame;
+    const {
+      t: _t,
+      procs,
+      network_quality: _nq,
+      upd: rawUpd,
+      ...resourcePayload
+    } = frame;
     const payload: NodeMetricsPayload = { ...resourcePayload, network_quality: this.networkQuality.state(nodeId) };
+    const updChanged = this.applyMetricsUpdateStatus(state, rawUpd, nowSec);
 
     const prevLedger: TrafficLedgerRow | null =
       state.cycle_key !== null && state.last_agent_rx !== null && state.last_agent_tx !== null
@@ -1102,6 +1235,7 @@ export class FleetHubDO extends DurableObject<Env> {
     const shouldFlushState =
       shouldWriteRaw ||
       wasOffline ||
+      updChanged ||
       trafficStep.rebooted ||
       trafficStep.cycleReset ||
       trafficDelta >= TRAFFIC_COALESCE_BYTES ||
@@ -1139,6 +1273,7 @@ export class FleetHubDO extends DurableObject<Env> {
       ws.serializeAttachment(att);
       this.sendAgentCtrl(ws, desired);
     }
+    await this.maybeAutoDispatchUpdate(ws, att, node, state, nowSec);
 
     if (wasOffline) {
       await this.scheduleNextAlarm();
@@ -1159,8 +1294,15 @@ export class FleetHubDO extends DurableObject<Env> {
     const nowSec = Math.floor(Date.now() / 1000);
     const state = this.getOrCreateNodeState(nodeId);
     const wasOffline = state.online === 0;
-    const { procs: _lastProcs, network_quality: _lastNq, ...resourcePayload } = frame.last;
+    const {
+      procs: _lastProcs,
+      network_quality: _lastNq,
+      upd: lastUpd,
+      ...resourcePayload
+    } = frame.last;
+    const rawUpd = frame.upd ?? lastUpd;
     const lastPayload: NodeMetricsPayload = { ...resourcePayload, network_quality: this.networkQuality.state(nodeId) };
+    this.applyMetricsUpdateStatus(state, rawUpd, nowSec);
 
     const validTuples: CompactMetricTuple[] = Array.isArray(frame.pts)
       ? frame.pts.filter(isValidCompactTuple)
@@ -1249,6 +1391,7 @@ export class FleetHubDO extends DurableObject<Env> {
       ws.serializeAttachment(att);
       this.sendAgentCtrl(ws, desired);
     }
+    await this.maybeAutoDispatchUpdate(ws, att, node, state, nowSec);
 
     if (wasOffline) {
       await this.scheduleNextAlarm();
@@ -2431,6 +2574,21 @@ export class FleetHubDO extends DurableObject<Env> {
     }
     this.nodesMirror.set(node.id, node);
     this.upsertNodeMirrorSql(node);
+    this.maybeBroadcastFleetTick(node.id);
+    if (node.auto_update_override === 1) {
+      const sock = this.ctx.getWebSockets(`agent:${node.id}`).find(isSocketOpen);
+      const att = sock ? this.readAgentAttachment(sock) : null;
+      const state = this.nodeStates.get(node.id);
+      if (sock && att && state) {
+        await this.maybeAutoDispatchUpdate(
+          sock,
+          att,
+          node,
+          state,
+          Math.floor(Date.now() / 1000),
+        );
+      }
+    }
   }
 
   async deleteNode(nodeId: string): Promise<void> {
@@ -2640,6 +2798,288 @@ export class FleetHubDO extends DurableObject<Env> {
     }
 
     return { dispatched, skipped_offline };
+  }
+
+  private applyMetricsUpdateStatus(
+    state: PersistedNodeState,
+    rawUpd: unknown,
+    nowSec: number,
+  ): boolean {
+    if (rawUpd === undefined || rawUpd === null) {
+      return false;
+    }
+    const parsed = parseAgentUpdateStatus(rawUpd, nowSec);
+    if (!parsed) {
+      return false;
+    }
+    const prev = state.update_status;
+    if (
+      prev &&
+      prev.state === parsed.state &&
+      prev.target_version === parsed.target_version &&
+      prev.error === parsed.error
+    ) {
+      return false;
+    }
+    state.update_status = parsed;
+    return true;
+  }
+
+  private async loadAgentUpdateConfigCached(
+    nowSec: number,
+  ): Promise<AgentUpdateConfig> {
+    if (
+      this.agentUpdateConfigCache &&
+      nowSec - this.agentUpdateConfigCache.loadedAt < 60
+    ) {
+      return this.agentUpdateConfigCache.config;
+    }
+    const config = await getAgentUpdateConfig(this.env.DB);
+    this.agentUpdateConfigCache = { config, loadedAt: nowSec };
+    return config;
+  }
+
+  private async getOrCheckLatestRelease(
+    config: AgentUpdateConfig,
+    nowSec: number,
+  ): Promise<AgentLatestRelease | null> {
+    const origin = this.lastRequestOrigin ?? "";
+    const key = `${config.channel}|${config.custom_base_url}|${this.env.GITHUB_REPO ?? ""}|${config.channel === "stable" ? origin : ""}`;
+    const ttl = Math.max(
+      60,
+      Math.min(config.check_interval_sec, RELEASE_CACHE_TTL_SEC),
+    );
+    if (
+      this.agentReleaseCache &&
+      this.agentReleaseCache.key === key &&
+      nowSec - this.agentReleaseCache.checkedAt < ttl
+    ) {
+      return this.agentReleaseCache.release;
+    }
+    if (!this.inFlightReleaseCheck) {
+      this.inFlightReleaseCheck = checkLatestAgentRelease(this.env, config, {
+        requestOrigin: this.lastRequestOrigin ?? undefined,
+        nowSec,
+      })
+        .then((res) => {
+          this.agentReleaseCache = {
+            release: res.release,
+            checkedAt: res.checked_at,
+            key,
+          };
+          return res.release;
+        })
+        .finally(() => {
+          this.inFlightReleaseCheck = null;
+        });
+    }
+    return this.inFlightReleaseCheck;
+  }
+
+  private async sendSignedUpdateCtrl(
+    ws: WebSocket,
+    att: AgentWsAttachment,
+    node: NodeRow,
+    release: AgentLatestRelease,
+    asset: { url: string; fallback_url?: string; sha256: string },
+    nowSec: number,
+  ): Promise<void> {
+    const ctrl = this.computeCtrlForNode(node.id, att.ver, nowSec);
+    ctrl.update = await signUpdateDirective(node.id, node.token_sha256, {
+      version: release.version,
+      sha256: asset.sha256,
+      url: asset.url,
+      fallback_url: asset.fallback_url,
+      issued_at: nowSec,
+    });
+    this.sendAgentCtrl(ws, ctrl);
+    this.lastUpdateDispatchByNode.set(node.id, {
+      version: release.version,
+      ts: nowSec,
+    });
+  }
+
+  private async resolveAutoUpdateDirective(
+    att: AgentWsAttachment,
+    node: NodeRow,
+    state: PersistedNodeState,
+    nowSec: number,
+  ): Promise<CtrlUpdateDirective | undefined> {
+    const caps = att.caps.length > 0 ? att.caps : state.caps;
+    if (!caps.includes("auto_update_v1") || node.auto_update_override === 0) {
+      return undefined;
+    }
+    if (!normalizeAgentArch(state.hw?.arch ?? node.arch)) {
+      return undefined;
+    }
+    const config = await this.loadAgentUpdateConfigCached(nowSec);
+    const overrideBool = decodeAutoUpdateOverride(node.auto_update_override);
+    if (
+      !(
+        overrideBool === true ||
+        (overrideBool === null && config.auto_update_enabled)
+      )
+    ) {
+      return undefined;
+    }
+    const release = await this.getOrCheckLatestRelease(config, nowSec);
+    if (!release) {
+      return undefined;
+    }
+    const lastAttempt = this.lastUpdateDispatchByNode.get(node.id);
+    if (
+      lastAttempt &&
+      lastAttempt.version === release.version &&
+      nowSec - lastAttempt.ts < 600
+    ) {
+      return undefined;
+    }
+    const check = isNodeEligibleForUpdate({
+      capabilities: caps,
+      arch: state.hw?.arch ?? node.arch,
+      agentVersion: state.hw?.agent_version ?? node.agent_version,
+      autoUpdateOverride: overrideBool,
+      updateStatus: state.update_status,
+      config,
+      release,
+      nowSec,
+    });
+    if (!check.eligible || !check.asset) {
+      return undefined;
+    }
+    return signUpdateDirective(node.id, node.token_sha256, {
+      version: release.version,
+      sha256: check.asset.sha256,
+      url: check.asset.url,
+      fallback_url: check.asset.fallback_url,
+      issued_at: nowSec,
+    });
+  }
+
+  private async maybeAutoDispatchUpdate(
+    ws: WebSocket,
+    att: AgentWsAttachment,
+    node: NodeRow,
+    state: PersistedNodeState,
+    nowSec: number,
+  ): Promise<void> {
+    const directive = await this.resolveAutoUpdateDirective(att, node, state, nowSec);
+    if (!directive) {
+      return;
+    }
+    const ctrl = this.computeCtrlForNode(node.id, att.ver, nowSec);
+    ctrl.update = directive;
+    this.sendAgentCtrl(ws, ctrl);
+    this.lastUpdateDispatchByNode.set(node.id, {
+      version: directive.version,
+      ts: nowSec,
+    });
+  }
+
+  async syncAgentUpdateState(params: {
+    config: AgentUpdateConfig;
+    origin?: string;
+    release?: AgentLatestRelease | null;
+    clearReleaseCache?: boolean;
+  }): Promise<void> {
+    await this.ensureMirrorSeeded();
+    const nowSec = Math.floor(Date.now() / 1000);
+    this.rememberOriginString(params.origin);
+    this.agentUpdateConfigCache = { config: params.config, loadedAt: nowSec };
+    if (params.clearReleaseCache) {
+      this.agentReleaseCache = null;
+    }
+    if (params.release !== undefined) {
+      const origin = this.lastRequestOrigin ?? "";
+      const key = `${params.config.channel}|${params.config.custom_base_url}|${this.env.GITHUB_REPO ?? ""}|${params.config.channel === "stable" ? origin : ""}`;
+      this.agentReleaseCache = {
+        release: params.release,
+        checkedAt: params.release?.checked_at ?? nowSec,
+        key,
+      };
+    }
+
+    for (const sock of this.ctx.getWebSockets("agent")) {
+      if (!isSocketOpen(sock)) continue;
+      const att = this.readAgentAttachment(sock);
+      if (!att) continue;
+      const node = this.nodesMirror.get(att.nodeId);
+      const state = this.nodeStates.get(att.nodeId);
+      if (node && state) {
+        await this.maybeAutoDispatchUpdate(sock, att, node, state, nowSec);
+      }
+    }
+  }
+
+  async triggerAgentUpdates(params: {
+    release: AgentLatestRelease;
+    config: AgentUpdateConfig;
+    nodeIds?: string[];
+    force?: boolean;
+    origin?: string;
+  }): Promise<{
+    version: string;
+    targeted: number;
+    dispatched: number;
+    skipped: number;
+  }> {
+    await this.ensureMirrorSeeded();
+    const nowSec = Math.floor(Date.now() / 1000);
+    this.rememberOriginString(params.origin);
+    const targetIds = params.nodeIds ?? Array.from(this.nodesMirror.keys());
+    let dispatched = 0;
+    let skipped = 0;
+
+    for (const nodeId of targetIds) {
+      const node = await this.ensureNodeMirrored(nodeId);
+      const sock = this.ctx
+        .getWebSockets(`agent:${nodeId}`)
+        .find((s) => isSocketOpen(s));
+      const att = sock ? this.readAgentAttachment(sock) : null;
+      const state = this.nodeStates.get(nodeId);
+      if (!node || !sock || !att) {
+        skipped++;
+        continue;
+      }
+      const caps = att.caps.length > 0 ? att.caps : (state?.caps ?? []);
+      if (!caps.includes("auto_update_v1")) {
+        skipped++;
+        continue;
+      }
+      const arch = normalizeAgentArch(state?.hw?.arch ?? node.arch);
+      const asset = arch ? params.release.assets[arch] : undefined;
+      if (!asset) {
+        skipped++;
+        continue;
+      }
+      const agentVersion = state?.hw?.agent_version ?? node.agent_version;
+      if (!params.force) {
+        if (node.auto_update_override === 0) {
+          skipped++;
+          continue;
+        }
+        if (!isNewerAgentVersion(params.release.version, agentVersion)) {
+          skipped++;
+          continue;
+        }
+      }
+      await this.sendSignedUpdateCtrl(
+        sock,
+        att,
+        node,
+        params.release,
+        asset,
+        nowSec,
+      );
+      dispatched++;
+    }
+
+    return {
+      version: params.release.version,
+      targeted: targetIds.length,
+      dispatched,
+      skipped,
+    };
   }
 
   private readAnyAttachment(ws: WebSocket): AgentWsAttachment | ClientAttachment | null {
