@@ -28,6 +28,11 @@ import {
 } from "../auto-update";
 import { NetworkQualityStore } from "./network-quality-store";
 import {
+  computeFleetScchEstimates,
+  type FleetNqQuotaControl,
+  type FleetScchEstimates,
+} from "../cf-quota";
+import {
   advanceTrafficLedger,
   computeCountedBytes,
   computeTrafficCycle,
@@ -2758,8 +2763,13 @@ export class FleetHubDO extends DurableObject<Env> {
     connectedAgents: number;
     connectedClients: number;
     totalNodes: number;
+    doStorageBytes: number | null;
+    scchEstimates: FleetScchEstimates;
   }> {
-    await this.ensureMirrorSeeded();
+    await Promise.all([
+      this.ensureMirrorSeeded(),
+      this.networkQuality.ensureReady(),
+    ]);
     const onlineAgents = new Set<string>();
     for (const sock of this.ctx.getWebSockets("agent")) {
       if (isSocketOpen(sock)) {
@@ -2769,10 +2779,28 @@ export class FleetHubDO extends DurableObject<Env> {
         }
       }
     }
+    const rawDbSize = this.sql.databaseSize;
+    const doStorageBytes =
+      typeof rawDbSize === "number" && Number.isFinite(rawDbSize)
+        ? rawDbSize
+        : null;
+
+    const nqControls: FleetNqQuotaControl[] = [];
+    for (const nodeId of this.nodesMirror.keys()) {
+      const ctrl = this.networkQuality.control(nodeId);
+      nqControls.push({
+        enabled: Boolean(ctrl.enabled),
+        intervalSec: ctrl.interval_sec ?? 20,
+        targetCount: Array.isArray(ctrl.targets) ? ctrl.targets.length : 0,
+      });
+    }
+
     return {
       connectedAgents: onlineAgents.size,
       connectedClients: this.ctx.getWebSockets("client").filter(isSocketOpen).length,
       totalNodes: this.nodesMirror.size,
+      doStorageBytes,
+      scchEstimates: computeFleetScchEstimates(this.nodesMirror.size, nqControls),
     };
   }
 

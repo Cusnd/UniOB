@@ -9,6 +9,7 @@ import {
   normalizeAndValidateMigrationUrl,
 } from "../src/migration";
 import { DEFAULT_TIMEOUT_SEC, runWatchdogCron } from "../src/watchdog";
+import { clearCfPlanCacheForTest } from "../src/cf-quota";
 import type {
   AgentCtrlFrame,
   ExportBundle,
@@ -34,6 +35,7 @@ import {
 import { SELF } from "cloudflare:test";
 
 afterEach(() => {
+  clearCfPlanCacheForTest();
   vi.restoreAllMocks();
 });
 
@@ -1168,5 +1170,136 @@ describe("Direction A Control Plane: Hub Status, Export/Import, Migration, and W
     await ctrlMsg4Promise;
 
     ws.close();
+  });
+
+  it("reports Cloudflare quota metrics, auto-detects Workers Paid/Free when queryable, and falls back to manual selection", async () => {
+    const cookie = await setupAndLogin();
+    await createTestNode(cookie, { name: "quota-node-1" });
+
+    // 1. Default when plan cannot be queried: detected_plan is null, defaults to free
+    const s0Res = await authedFetch("/api/hub/status", cookie);
+    expect(s0Res.status).toBe(200);
+    const s0 = (await s0Res.json()) as HubStatusResponse;
+    expect(s0.cloudflare_quota).toMatchObject({
+      detected_plan: null,
+      manual_plan: null,
+      effective_plan: "free",
+      plan_source: "default",
+      nq_enabled_nodes: 0,
+      est_daily_do_writes: 984, // 888 * 1 + 96
+      est_daily_do_requests: 110, // round(14.4 * 1 + 96)
+    });
+    expect(typeof s0.cloudflare_quota.do_storage_bytes).toBe("number");
+    expect(s0.cloudflare_quota.do_storage_bytes).toBeGreaterThan(0);
+
+    // 2. Manual selection via PUT /api/hub/cf-plan
+    const badPlanRes = await authedFetch("/api/hub/cf-plan", cookie, {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ plan: "enterprise" }),
+    });
+    expect(badPlanRes.status).toBe(400);
+
+    const putPaidRes = await authedFetch("/api/hub/cf-plan", cookie, {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ plan: "paid" }),
+    });
+    expect(putPaidRes.status).toBe(200);
+    expect(await putPaidRes.json()).toEqual({ ok: true, plan: "paid" });
+
+    const s1 = (await (await authedFetch("/api/hub/status", cookie)).json()) as HubStatusResponse;
+    expect(s1.cloudflare_quota).toMatchObject({
+      detected_plan: null,
+      manual_plan: "paid",
+      effective_plan: "paid",
+      plan_source: "manual",
+    });
+
+    // 3. Env auto-detection overrides manual selection
+    const envStatusRes = await worker.fetch(
+      new Request(`${TEST_ORIGIN}/api/hub/status`, {
+        headers: { Cookie: cookie },
+      }),
+      { ...env, CF_WORKERS_PLAN: "free" },
+    );
+    expect(envStatusRes.status).toBe(200);
+    const envStatus = (await envStatusRes.json()) as HubStatusResponse;
+    expect(envStatus.cloudflare_quota).toMatchObject({
+      detected_plan: "free",
+      manual_plan: "paid",
+      effective_plan: "free",
+      plan_source: "env",
+    });
+
+    // 4. Cloudflare Subscriptions API auto-detection (Workers Paid, Free, and 403 fallback)
+    let mockSubMode: "paid" | "free" | "forbidden" = "paid";
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: RequestInfo | URL) => {
+        const url = typeof input === "string" ? input : input instanceof URL ? input.toString() : input.url;
+        if (url.includes("api.cloudflare.com/client/v4/accounts/acc-123/subscriptions")) {
+          if (mockSubMode === "forbidden") {
+            return new Response(JSON.stringify({ success: false, errors: [{ code: 10000 }] }), {
+              status: 403,
+              headers: { "Content-Type": "application/json" },
+            });
+          }
+          return new Response(
+            JSON.stringify({
+              success: true,
+              result:
+                mockSubMode === "paid"
+                  ? [{ state: "Paid", rate_plan: { id: "WORKERS_PAID", public_name: "Workers Paid" } }]
+                  : [{ state: "Paid", rate_plan: { id: "PRO_ZONE", public_name: "Pro Plan" } }],
+            }),
+            { status: 200, headers: { "Content-Type": "application/json" } },
+          );
+        }
+        throw new Error(`Unexpected fetch: ${url}`);
+      }),
+    );
+
+    const apiEnv = {
+      ...env,
+      CF_ACCOUNT_ID: "acc-123",
+      CF_API_TOKEN: "cf-tok-secret-9999",
+    };
+
+    const paidApiRes = await worker.fetch(
+      new Request(`${TEST_ORIGIN}/api/hub/status?refresh=1`, { headers: { Cookie: cookie } }),
+      apiEnv,
+    );
+    const paidApiStatus = (await paidApiRes.json()) as HubStatusResponse;
+    expect(paidApiStatus.cloudflare_quota).toMatchObject({
+      detected_plan: "paid",
+      effective_plan: "paid",
+      plan_source: "api",
+    });
+
+    mockSubMode = "free";
+    const freeApiRes = await worker.fetch(
+      new Request(`${TEST_ORIGIN}/api/hub/status?refresh=1`, { headers: { Cookie: cookie } }),
+      apiEnv,
+    );
+    const freeApiStatus = (await freeApiRes.json()) as HubStatusResponse;
+    expect(freeApiStatus.cloudflare_quota).toMatchObject({
+      detected_plan: "free",
+      effective_plan: "free",
+      plan_source: "api",
+    });
+
+    mockSubMode = "forbidden";
+    const forbiddenApiRes = await worker.fetch(
+      new Request(`${TEST_ORIGIN}/api/hub/status?refresh=1`, { headers: { Cookie: cookie } }),
+      apiEnv,
+    );
+    const forbiddenApiStatus = (await forbiddenApiRes.json()) as HubStatusResponse;
+    expect(forbiddenApiStatus.cloudflare_quota).toMatchObject({
+      detected_plan: null,
+      manual_plan: "paid",
+      effective_plan: "paid",
+      plan_source: "manual",
+    });
   });
 });

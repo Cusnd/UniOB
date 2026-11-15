@@ -638,6 +638,22 @@ impl HubDb {
         })
     }
 
+    pub fn list_node_ids(&self) -> Result<Vec<String>, String> {
+        self.with_conn(|c| {
+            let mut stmt = c
+                .prepare("SELECT id FROM nodes")
+                .map_err(|e| format!("list_node_ids prepare error: {e}"))?;
+            let rows = stmt
+                .query_map([], |r| r.get::<_, String>(0))
+                .map_err(|e| format!("list_node_ids query error: {e}"))?;
+            let mut out = Vec::new();
+            for r in rows {
+                out.push(r.map_err(|e| format!("list_node_ids row error: {e}"))?);
+            }
+            Ok(out)
+        })
+    }
+
     pub fn get_node_token_hash(&self, node_id: &str) -> Result<Option<String>, String> {
         self.with_conn(|c| {
             c.query_row(

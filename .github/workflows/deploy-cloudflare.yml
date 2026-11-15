@@ -102,10 +102,12 @@ jobs:
       - name: Inject deployment config into worker/wrangler.jsonc
         shell: bash
         env:
+          CF_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
           CF_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID || vars.CLOUDFLARE_ACCOUNT_ID }}
           CF_D1_DATABASE_ID: ${{ secrets.CF_D1_DATABASE_ID || vars.CF_D1_DATABASE_ID }}
           CF_CUSTOM_DOMAIN: ${{ vars.CF_CUSTOM_DOMAIN }}
           CF_WORKERS_DEV: ${{ vars.CF_WORKERS_DEV }}
+          CF_WORKERS_PLAN: ${{ vars.CF_WORKERS_PLAN }}
           CF_AUTH_MODE: ${{ vars.CF_AUTH_MODE }}
           CF_ACCESS_TEAM_DOMAIN: ${{ vars.CF_ACCESS_TEAM_DOMAIN }}
           CF_ACCESS_AUD: ${{ secrets.CF_ACCESS_AUD || vars.CF_ACCESS_AUD }}
@@ -114,70 +116,137 @@ jobs:
           node - <<'EOF'
           const fs = require("node:fs");
           const path = "worker/wrangler.jsonc";
-          const raw = fs.readFileSync(path, "utf8");
 
-          // Strip // line comments outside quoted JSON strings before parsing
-          let cleaned = "";
-          let inString = false;
-          let escaped = false;
-          for (let i = 0; i < raw.length; i++) {
-            const ch = raw[i];
-            if (inString) {
+          function parsePlan(raw) {
+            if (typeof raw !== "string") return null;
+            const v = raw.trim().toLowerCase();
+            if (v === "free" || v === "workers_free" || v === "workers-free") return "free";
+            if (v === "paid" || v === "workers_paid" || v === "workers-paid") return "paid";
+            return null;
+          }
+
+          function isSubWorkersPaid(sub) {
+            if (!sub || typeof sub !== "object") return false;
+            const state = typeof sub.state === "string" ? sub.state.trim().toLowerCase() : "";
+            if (state === "cancelled" || state === "canceled" || state === "expired" || state === "deactivated") {
+              return false;
+            }
+            if (state && !["paid", "provisioned", "trial", "active"].includes(state)) {
+              return false;
+            }
+            const rp = sub.rate_plan && typeof sub.rate_plan === "object" ? sub.rate_plan : {};
+            const id = typeof rp.id === "string" ? rp.id.trim().toLowerCase() : "";
+            const name = typeof rp.public_name === "string" ? rp.public_name.trim().toLowerCase() : "";
+            return (
+              id === "workers_paid" ||
+              id === "partners_workers_paid" ||
+              id.startsWith("workers_paid") ||
+              id === "unbound_paid" ||
+              name.includes("workers paid")
+            );
+          }
+
+          (async () => {
+            const raw = fs.readFileSync(path, "utf8");
+
+            // Strip // line comments outside quoted JSON strings before parsing
+            let cleaned = "";
+            let inString = false;
+            let escaped = false;
+            for (let i = 0; i < raw.length; i++) {
+              const ch = raw[i];
+              if (inString) {
+                cleaned += ch;
+                if (escaped) {
+                  escaped = false;
+                } else if (ch === "\\") {
+                  escaped = true;
+                } else if (ch === "\"") {
+                  inString = false;
+                }
+                continue;
+              }
+              if (ch === "\"") {
+                inString = true;
+                cleaned += ch;
+                continue;
+              }
+              if (ch === "/" && raw[i + 1] === "/") {
+                while (i < raw.length && raw[i] !== "\n") {
+                  i++;
+                }
+                if (i < raw.length) {
+                  cleaned += "\n";
+                }
+                continue;
+              }
               cleaned += ch;
-              if (escaped) {
-                escaped = false;
-              } else if (ch === "\\") {
-                escaped = true;
-              } else if (ch === "\"") {
-                inString = false;
-              }
-              continue;
             }
-            if (ch === "\"") {
-              inString = true;
-              cleaned += ch;
-              continue;
+
+            const config = JSON.parse(cleaned);
+            const accountId = process.env.CF_ACCOUNT_ID.trim();
+            config.account_id = accountId;
+            config.d1_databases[0].database_id = process.env.CF_D1_DATABASE_ID.trim();
+            config.vars = config.vars || {};
+            config.vars.GITHUB_REPO = process.env.GITHUB_REPOSITORY || config.vars.GITHUB_REPO;
+
+            const customDomain = (process.env.CF_CUSTOM_DOMAIN || "").trim();
+            if (customDomain) {
+              config.routes = [{ pattern: customDomain, custom_domain: true }];
+              config.workers_dev = process.env.CF_WORKERS_DEV === "true";
+            } else if (process.env.CF_WORKERS_DEV === "false") {
+              config.workers_dev = false;
             }
-            if (ch === "/" && raw[i + 1] === "/") {
-              while (i < raw.length && raw[i] !== "\n") {
-                i++;
-              }
-              if (i < raw.length) {
-                cleaned += "\n";
-              }
-              continue;
+
+            if (process.env.CF_AUTH_MODE) {
+              config.vars.AUTH_MODE = process.env.CF_AUTH_MODE.trim();
             }
-            cleaned += ch;
-          }
+            if (process.env.CF_ACCESS_TEAM_DOMAIN) {
+              config.vars.CF_ACCESS_TEAM_DOMAIN = process.env.CF_ACCESS_TEAM_DOMAIN.trim();
+            }
+            if (process.env.CF_ACCESS_AUD) {
+              config.vars.CF_ACCESS_AUD = process.env.CF_ACCESS_AUD.trim();
+            }
+            if (process.env.CF_ACCESS_ALLOWED_EMAILS) {
+              config.vars.CF_ACCESS_ALLOWED_EMAILS = process.env.CF_ACCESS_ALLOWED_EMAILS.trim();
+            }
 
-          const config = JSON.parse(cleaned);
-          config.account_id = process.env.CF_ACCOUNT_ID.trim();
-          config.d1_databases[0].database_id = process.env.CF_D1_DATABASE_ID.trim();
-          config.vars = config.vars || {};
-          config.vars.GITHUB_REPO = process.env.GITHUB_REPOSITORY || config.vars.GITHUB_REPO;
+            const explicitPlan = parsePlan(process.env.CF_WORKERS_PLAN);
+            if (explicitPlan) {
+              config.vars.CF_WORKERS_PLAN = explicitPlan;
+              console.log(`Configured CF_WORKERS_PLAN=${explicitPlan} from variable.`);
+            } else if (process.env.CF_API_TOKEN && accountId) {
+              try {
+                const res = await fetch(
+                  `https://api.cloudflare.com/client/v4/accounts/${encodeURIComponent(accountId)}/subscriptions`,
+                  {
+                    headers: {
+                      Authorization: `Bearer ${process.env.CF_API_TOKEN.trim()}`,
+                      Accept: "application/json",
+                    },
+                    signal: AbortSignal.timeout(4000),
+                  },
+                );
+                if (res.ok) {
+                  const body = await res.json();
+                  if (body && body.success === true && Array.isArray(body.result)) {
+                    const detected = body.result.some(isSubWorkersPaid) ? "paid" : "free";
+                    config.vars.CF_WORKERS_PLAN = detected;
+                    console.log(`Auto-detected CF_WORKERS_PLAN=${detected} via Cloudflare Subscriptions API.`);
+                  }
+                } else {
+                  console.log(`Cloudflare Subscriptions API returned HTTP ${res.status}; leaving CF_WORKERS_PLAN unset for manual UI selection.`);
+                }
+              } catch (err) {
+                console.log(`Skipped Cloudflare plan auto-detection (${err instanceof Error ? err.message : "error"}); manual UI selection remains available.`);
+              }
+            }
 
-          const customDomain = (process.env.CF_CUSTOM_DOMAIN || "").trim();
-          if (customDomain) {
-            config.routes = [{ pattern: customDomain, custom_domain: true }];
-            config.workers_dev = process.env.CF_WORKERS_DEV === "true";
-          } else if (process.env.CF_WORKERS_DEV === "false") {
-            config.workers_dev = false;
-          }
-
-          if (process.env.CF_AUTH_MODE) {
-            config.vars.AUTH_MODE = process.env.CF_AUTH_MODE.trim();
-          }
-          if (process.env.CF_ACCESS_TEAM_DOMAIN) {
-            config.vars.CF_ACCESS_TEAM_DOMAIN = process.env.CF_ACCESS_TEAM_DOMAIN.trim();
-          }
-          if (process.env.CF_ACCESS_AUD) {
-            config.vars.CF_ACCESS_AUD = process.env.CF_ACCESS_AUD.trim();
-          }
-          if (process.env.CF_ACCESS_ALLOWED_EMAILS) {
-            config.vars.CF_ACCESS_ALLOWED_EMAILS = process.env.CF_ACCESS_ALLOWED_EMAILS.trim();
-          }
-
-          fs.writeFileSync(path, JSON.stringify(config, null, 2) + "\n", "utf8");
+            fs.writeFileSync(path, JSON.stringify(config, null, 2) + "\n", "utf8");
+          })().catch((err) => {
+            console.error(err);
+            process.exit(1);
+          });
           EOF
 
       - name: Apply D1 database migrations (--remote)

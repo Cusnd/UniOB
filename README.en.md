@@ -131,6 +131,10 @@ curl -fsSL https://raw.githubusercontent.com/Cusnd/UniOB/main/scripts/install-hu
 - 🏗️ **[Architecture Deep-Dive (ZH)](./docs/ARCHITECTURE.md)** · 📐 **[Technical Spec & Cost Model (ZH)](./docs/SPEC.md)** · 🔌 **[HTTP & WebSocket API Reference](./docs/API.md)**
 - 🤝 **[Contributing & Local Build Guide](./CONTRIBUTING.md)** · 🔒 **[Security Policy](./SECURITY.md)** · 📝 **[Changelog](./CHANGELOG.md)**
 
+## 🙏 Acknowledgments
+
+Special thanks to [huilang-me/CF-Server-Monitor](https://github.com/huilang-me/CF-Server-Monitor) for inspiration on parts of the design ideas behind UniOB.
+
 ## License
 
 [MIT](./LICENSE)

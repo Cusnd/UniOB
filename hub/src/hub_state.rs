@@ -14,9 +14,10 @@ use crate::db::{payload_to_raw_sample, HubDb, RawSlabSample};
 use crate::protocol::{
     metrics_frame_to_tuple, AgentCtrlFrame, AgentHelloFrame, AgentMetricsBatchFrame,
     AgentMetricsFrame, AlertChangeMessage, CtrlMigrateDirective, CtrlUpdateDirective,
-    FleetBatchMessage, FleetTickMessage, HubMigrateRequest, HubMigrateResponse, HubStatusResponse,
-    LatestRelease, NodeDetailMessage, NodeHardwareInfo, NodeMetricsPayload, NodeOfflineMessage,
-    NodeRow, NodeUpdateStatus, ReleaseAssetInfo, WatchdogStatusView,
+    FleetBatchMessage, FleetTickMessage, HubCloudflareQuotaView, HubMigrateRequest,
+    HubMigrateResponse, HubStatusResponse, LatestRelease, NodeDetailMessage, NodeHardwareInfo,
+    NodeMetricsPayload, NodeOfflineMessage, NodeRow, NodeUpdateStatus, ReleaseAssetInfo,
+    WatchdogStatusView,
 };
 use serde_json::{json, Value};
 use std::collections::HashMap;
@@ -28,6 +29,15 @@ use tokio::sync::{mpsc, Notify, RwLock};
 use url::Url;
 
 pub const CLIENT_LEASE_SEC: u64 = 90;
+pub const CF_MANUAL_PLAN_SETTING_KEY: &str = "cf_workers_plan_manual";
+
+pub fn parse_cf_workers_plan(raw: &str) -> Option<String> {
+    match raw.trim().to_ascii_lowercase().as_str() {
+        "free" | "workers_free" | "workers-free" => Some("free".to_string()),
+        "paid" | "workers_paid" | "workers-paid" => Some("paid".to_string()),
+        _ => None,
+    }
+}
 // Current browsers renew every 50s. This threshold also coalesces clients using
 // a 20s interval, while allowing refresh before the Agent's 90s lease expires.
 const AGENT_LEASE_REFRESH_AFTER: Duration = Duration::from_secs(30);
@@ -139,7 +149,8 @@ impl HubState {
             let guard = self.agents.read().await;
             guard.len()
         };
-        let total_nodes = self.db.count_nodes()?;
+        let node_ids = self.db.list_node_ids()?;
+        let total_nodes = node_ids.len();
         let wd = self.watchdog.read().await.clone();
         let now = now_sec();
         let status = if !wd.enabled {
@@ -154,6 +165,8 @@ impl HubState {
             "waiting".to_string()
         };
 
+        let cloudflare_quota = self.compute_cloudflare_quota_view(&node_ids);
+
         Ok(HubStatusResponse {
             mode: "self-hosted-hub",
             version: env!("CARGO_PKG_VERSION").to_string(),
@@ -165,7 +178,78 @@ impl HubState {
                 status,
                 timeout_sec: wd.timeout_sec,
             },
+            cloudflare_quota,
         })
+    }
+
+    fn compute_cloudflare_quota_view(&self, node_ids: &[String]) -> HubCloudflareQuotaView {
+        let total_nodes = node_ids.len() as u64;
+        let core_daily_writes = if total_nodes > 0 {
+            888 * total_nodes + 96
+        } else {
+            0
+        };
+
+        let mut nq_enabled_nodes = 0usize;
+        let mut nq_daily_writes = 0u64;
+        let mut nq_steady_storage = 0u64;
+
+        if let Ok(global_cfg) = self.db.network_config() {
+            for node_id in node_ids {
+                if let Ok(ov) = self.db.network_override(node_id) {
+                    if let Ok(ctrl) = crate::network_quality::effective_control(&global_cfg, &ov) {
+                        if ctrl.enabled && !ctrl.targets.is_empty() {
+                            nq_enabled_nodes += 1;
+                            let clamped_interval = (ctrl.interval_sec.max(10)) as f64;
+                            let write_ratio = (300.0 / clamped_interval).min(1.0);
+                            nq_daily_writes += (1034.0 * write_ratio).round() as u64;
+                            let target_factor = (ctrl.targets.len() as f64) / 3.0;
+                            let rate_factor = (20.0 / clamped_interval).min(2.0);
+                            nq_steady_storage +=
+                                (17_707_932.0 * target_factor * rate_factor).round() as u64;
+                        }
+                    }
+                }
+            }
+        }
+
+        let est_daily_do_writes = core_daily_writes + nq_daily_writes;
+        let est_daily_do_requests = if total_nodes > 0 {
+            (14.4 * (total_nodes as f64) + 96.0).round() as u64
+        } else {
+            0
+        };
+        let est_steady_storage_bytes = total_nodes * 1_840_000 + nq_steady_storage;
+
+        let detected_plan = std::env::var("CF_WORKERS_PLAN")
+            .ok()
+            .and_then(|v| parse_cf_workers_plan(&v));
+        let manual_plan = self
+            .db
+            .get_setting(CF_MANUAL_PLAN_SETTING_KEY)
+            .ok()
+            .flatten()
+            .and_then(|v| parse_cf_workers_plan(&v));
+
+        let (effective_plan, plan_source) = if let Some(ref p) = detected_plan {
+            (p.clone(), "env".to_string())
+        } else if let Some(ref p) = manual_plan {
+            (p.clone(), "manual".to_string())
+        } else {
+            ("free".to_string(), "default".to_string())
+        };
+
+        HubCloudflareQuotaView {
+            detected_plan,
+            manual_plan,
+            effective_plan,
+            plan_source,
+            do_storage_bytes: None,
+            nq_enabled_nodes,
+            est_daily_do_writes,
+            est_daily_do_requests,
+            est_steady_storage_bytes,
+        }
     }
 
     pub async fn touch_agent_alive(&self, node_id: &str, ts: i64) {

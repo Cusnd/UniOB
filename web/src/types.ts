@@ -360,6 +360,8 @@ export type WsInboundMessage =
 
 export type HubMode = "cloudflare-worker" | "self-hosted-hub";
 export type WatchdogHealthStatus = "disabled" | "waiting" | "healthy" | "stale";
+export type CfWorkersPlan = "free" | "paid";
+export type CfPlanSource = "api" | "env" | "runtime" | "manual" | "default";
 
 export interface HubWatchdogStatus {
   enabled: boolean;
@@ -368,12 +370,25 @@ export interface HubWatchdogStatus {
   timeout_sec: number;
 }
 
+export interface HubCloudflareQuota {
+  detected_plan: CfWorkersPlan | null;
+  manual_plan: CfWorkersPlan | null;
+  effective_plan: CfWorkersPlan;
+  plan_source: CfPlanSource;
+  do_storage_bytes: number | null;
+  nq_enabled_nodes: number;
+  est_daily_do_writes: number;
+  est_daily_do_requests: number;
+  est_steady_storage_bytes: number;
+}
+
 export interface HubStatusResponse {
   mode: HubMode;
   version: string;
   connected_agents: number;
   total_nodes: number;
   watchdog: HubWatchdogStatus;
+  cloudflare_quota?: HubCloudflareQuota;
 }
 
 export interface ExportBundle {

@@ -8,7 +8,10 @@ use crate::auth::{
 use crate::crypto::{
     constant_time_equal, generate_agent_token, generate_id, now_sec, random_base62, sha256_hex,
 };
-use crate::hub_state::{validate_and_normalize_migrate_url, AgentOutboundCmd, HubState};
+use crate::hub_state::{
+    parse_cf_workers_plan, validate_and_normalize_migrate_url, AgentOutboundCmd, HubState,
+    CF_MANUAL_PLAN_SETTING_KEY,
+};
 use crate::install_scripts::{render_install_agent_script, render_install_hub_script};
 use crate::protocol::{
     AgentInboundFrame, AlertIncidentRow, AlertRuleRow, AlertRuleView, ClientInboundMessage,
@@ -41,6 +44,7 @@ pub fn build_router(hub: HubState) -> Router {
     let protected = Router::new()
         .route("/api/client/ws", get(client_ws_handler))
         .route("/api/hub/status", get(hub_status_handler))
+        .route("/api/hub/cf-plan", axum::routing::put(put_cf_plan_handler))
         .route("/api/export/bundle", get(export_bundle_handler))
         .route("/api/import/bundle", post(import_bundle_handler))
         .route("/api/hub/migrate", post(hub_migrate_handler))
@@ -494,6 +498,23 @@ async fn hub_status_handler(State(hub): State<HubState>) -> Response {
         Ok(st) => Json(st).into_response(),
         Err(e) => json_error(StatusCode::INTERNAL_SERVER_ERROR, &e),
     }
+}
+
+async fn put_cf_plan_handler(
+    State(hub): State<HubState>,
+    Json(body): Json<Value>,
+) -> Response {
+    let raw_plan = body.get("plan").and_then(|v| v.as_str()).unwrap_or("");
+    let Some(plan) = parse_cf_workers_plan(raw_plan) else {
+        return json_error(StatusCode::BAD_REQUEST, "plan must be 'free' or 'paid'");
+    };
+    if let Err(e) = hub
+        .db
+        .set_setting(CF_MANUAL_PLAN_SETTING_KEY, &plan, now_sec())
+    {
+        return json_error(StatusCode::INTERNAL_SERVER_ERROR, &e);
+    }
+    Json(json!({ "ok": true, "plan": plan })).into_response()
 }
 
 async fn export_bundle_handler(State(hub): State<HubState>) -> Response {

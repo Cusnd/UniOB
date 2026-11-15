@@ -34,6 +34,11 @@ import {
 import { computeTrafficCycle } from "./traffic";
 import { nqParseConfig, nqParseOverride } from "./network-quality";
 import { NQ_RANGE_SECONDS } from "./do/network-quality-store";
+import {
+  parseCfWorkersPlan,
+  resolveHubCloudflareQuota,
+  saveManualCfPlan,
+} from "./cf-quota";
 import type {
   AlertMetric,
   AlertOperator,
@@ -1333,10 +1338,17 @@ app.get("/api/alerts/incidents", async (c) => {
 // ---- Direction A Control Plane Routes ----
 
 app.get("/api/hub/status", async (c) => {
+  const forceRefresh = c.req.query("refresh") === "1";
   const [hubStats, watchdog] = await Promise.all([
     getFleetHub(c.env).getHubStats(),
     getWatchdogStatusSummary(c.env.DB),
   ]);
+  const cloudflare_quota = await resolveHubCloudflareQuota({
+    env: c.env,
+    doStorageBytes: hubStats.doStorageBytes,
+    estimates: hubStats.scchEstimates,
+    forceRefresh,
+  });
 
   const payload: HubStatusResponse = {
     mode: "cloudflare-worker",
@@ -1344,8 +1356,19 @@ app.get("/api/hub/status", async (c) => {
     connected_agents: hubStats.connectedAgents,
     total_nodes: hubStats.totalNodes,
     watchdog,
+    cloudflare_quota,
   };
   return c.json(payload);
+});
+
+app.put("/api/hub/cf-plan", async (c) => {
+  const body = await parseJson<Record<string, unknown>>(c);
+  const plan = parseCfWorkersPlan(body?.plan);
+  if (!plan) {
+    return c.json({ error: "plan must be 'free' or 'paid'" }, 400);
+  }
+  await saveManualCfPlan(c.env.DB, plan);
+  return c.json({ ok: true, plan });
 });
 
 app.get("/api/export/bundle", async (c) => {

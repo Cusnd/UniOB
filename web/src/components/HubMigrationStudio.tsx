@@ -15,6 +15,7 @@ import {
   Upload,
 } from "lucide-react";
 import type {
+  CfWorkersPlan,
   ExportBundle,
   HorizonNode,
   HubStatusResponse,
@@ -24,7 +25,11 @@ import type {
   WatchdogConfig,
 } from "../types";
 import { api } from "../api/client";
-import { formatRelativeTime, formatTimestamp } from "../utils/format";
+import {
+  formatBytes,
+  formatRelativeTime,
+  formatTimestamp,
+} from "../utils/format";
 import {
   Badge,
   Button,
@@ -74,6 +79,48 @@ function generateRandomSecret(byteLen = 24): string {
   return Array.from(bytes, (b) => b.toString(16).padStart(2, "0")).join("");
 }
 
+const CF_MANUAL_PLAN_STORAGE_KEY = "uniob_cf_plan_manual";
+const CF_PLAN_OPTIONS: Array<{ value: CfWorkersPlan; label: string }> = [
+  { value: "free", label: "Free 免费版" },
+  { value: "paid", label: "Workers Paid" },
+];
+
+function readLocalCfPlan(): CfWorkersPlan | null {
+  try {
+    const raw = window.localStorage.getItem(CF_MANUAL_PLAN_STORAGE_KEY);
+    return raw === "paid" || raw === "free" ? raw : null;
+  } catch {
+    return null;
+  }
+}
+
+function writeLocalCfPlan(plan: CfWorkersPlan): void {
+  try {
+    window.localStorage.setItem(CF_MANUAL_PLAN_STORAGE_KEY, plan);
+  } catch {
+    // Ignore storage restriction
+  }
+}
+
+function formatQuotaCount(n: number): string {
+  const safe = Math.max(0, Math.round(n));
+  if (safe >= 1_000_000) {
+    const m = safe / 1_000_000;
+    return `${(m >= 10 ? m.toFixed(1) : m.toFixed(2)).replace(/\.?0+$/, "")}M`;
+  }
+  if (safe >= 10_000) {
+    return `${(safe / 1_000).toFixed(1).replace(/\.0$/, "")}k`;
+  }
+  return safe.toLocaleString("en-US");
+}
+
+function formatQuotaPct(pct: number): string {
+  if (!Number.isFinite(pct) || pct <= 0) return "0%";
+  if (pct < 0.1) return "<0.1%";
+  if (pct < 10) return `${pct.toFixed(1)}%`;
+  return `${Math.round(pct)}%`;
+}
+
 function formatCountdown(expiresAtSec: number, nowSec: number): string {
   const rem = Math.max(0, expiresAtSec - nowSec);
   if (rem === 0) return "已过期";
@@ -92,6 +139,7 @@ export function HubMigrationStudio(
   const targetInputId = useId();
   const wdModalTitleId = useId();
   const importModalTitleId = useId();
+  const cloudDetailsId = useId();
   const fileInputRef = useRef<HTMLInputElement | null>(null);
 
   const onDataChangedRef = useRef(onDataChanged);
@@ -104,6 +152,8 @@ export function HubMigrationStudio(
   );
   const [refreshingStatus, setRefreshingStatus] = useState(false);
   const [showCloudDetails, setShowCloudDetails] = useState(false);
+  const [manualPlanOverride, setManualPlanOverride] =
+    useState<CfWorkersPlan | null>(() => readLocalCfPlan());
 
   useEffect(() => {
     if (hubStatus) setLiveStatus(hubStatus);
@@ -129,6 +179,41 @@ export function HubMigrationStudio(
   const hubMode = effectiveStatus?.mode ?? null;
   const isCloudflare = hubMode === "cloudflare-worker";
   const isSelfHosted = hubMode === "self-hosted-hub";
+
+  useEffect(() => {
+    const serverManual = effectiveStatus?.cloudflare_quota?.manual_plan;
+    if (serverManual === "free" || serverManual === "paid") {
+      setManualPlanOverride(serverManual);
+      writeLocalCfPlan(serverManual);
+    }
+  }, [effectiveStatus?.cloudflare_quota?.manual_plan]);
+
+  const handleSelectCfPlan = async (nextPlan: CfWorkersPlan) => {
+    setManualPlanOverride(nextPlan);
+    writeLocalCfPlan(nextPlan);
+    setLiveStatus((prev) => {
+      const base = prev ?? hubStatus;
+      if (!base?.cloudflare_quota) return prev;
+      const detected = base.cloudflare_quota.detected_plan;
+      return {
+        ...base,
+        cloudflare_quota: {
+          ...base.cloudflare_quota,
+          manual_plan: nextPlan,
+          effective_plan: detected ?? nextPlan,
+          plan_source: detected ? base.cloudflare_quota.plan_source : "manual",
+        },
+      };
+    });
+    try {
+      await api.updateCfPlan(nextPlan);
+    } catch (err) {
+      onNotify(
+        "danger",
+        err instanceof Error ? err.message : "保存 Cloudflare 套餐档位失败",
+      );
+    }
+  };
 
   const onlineNodes = useMemo(() => nodes.filter((n) => n.online), [nodes]);
   const orderedNodes = useMemo(
@@ -301,7 +386,10 @@ export function HubMigrationStudio(
     if (refreshingStatus) return;
     setRefreshingStatus(true);
     try {
-      const [next] = await Promise.all([api.getHubStatus(), onDataChanged()]);
+      const [next] = await Promise.all([
+        api.getHubStatus({ refresh: true }),
+        onDataChanged(),
+      ]);
       setLiveStatus(next);
       if (next.mode === "cloudflare-worker") {
         await loadWatchdogAux();
@@ -592,6 +680,70 @@ export function HubMigrationStudio(
   const onlineRatioPct =
     totalNodes > 0 ? Math.round((connectedAgents / totalNodes) * 100) : 0;
 
+  const cfQuota = effectiveStatus?.cloudflare_quota;
+  const detectedCfPlan: CfWorkersPlan | null = cfQuota?.detected_plan ?? null;
+  const effectiveCfPlan: CfWorkersPlan =
+    detectedCfPlan ??
+    manualPlanOverride ??
+    cfQuota?.manual_plan ??
+    cfQuota?.effective_plan ??
+    "free";
+
+  const fallbackNqNodes = useMemo(
+    () => nodes.filter((n) => n.metrics?.network_quality?.enabled).length,
+    [nodes],
+  );
+  const estDailyWrites =
+    cfQuota?.est_daily_do_writes ??
+    (totalNodes > 0 ? 888 * totalNodes + 96 + fallbackNqNodes * 1034 : 0);
+  const estDailyRequests =
+    cfQuota?.est_daily_do_requests ??
+    (totalNodes > 0 ? Math.round(14.4 * totalNodes + 96) : 0);
+  const estSteadyStorageBytes =
+    cfQuota?.est_steady_storage_bytes ??
+    totalNodes * 1_840_000 + fallbackNqNodes * 17_707_932;
+  const doStorageBytes = cfQuota?.do_storage_bytes ?? null;
+
+  const estMonthlyWrites = estDailyWrites * 30;
+  const cfWritePct =
+    effectiveCfPlan === "paid"
+      ? (estMonthlyWrites / 50_000_000) * 100
+      : (estDailyWrites / 100_000) * 100;
+  const cfWriteLabel =
+    effectiveCfPlan === "paid"
+      ? isCloudflare
+        ? "DO SQLite 月写入配额（预估）"
+        : "迁回云端预计月写入配额"
+      : isCloudflare
+        ? "DO SQLite 日写入配额（预估）"
+        : "迁回云端预计日写入配额";
+  const cfWriteValueLabel =
+    effectiveCfPlan === "paid"
+      ? `${formatQuotaCount(estMonthlyWrites)} / 50M (${formatQuotaPct(cfWritePct)})`
+      : `${formatQuotaCount(estDailyWrites)} / 100k (${formatQuotaPct(cfWritePct)})`;
+
+  const perNodeWritesAvg =
+    totalNodes > 0
+      ? Math.max(888, Math.round((estDailyWrites - 96) / totalNodes))
+      : 888;
+  const freeMaxNodes = Math.max(1, Math.floor((100_000 - 96) / perNodeWritesAvg));
+  const cfStorageLimitLabel = effectiveCfPlan === "paid" ? "5 GB" : "1 GB";
+  const cfStorageDisplay =
+    doStorageBytes !== null
+      ? `${formatBytes(doStorageBytes)} / ${cfStorageLimitLabel}`
+      : `~${formatBytes(estSteadyStorageBytes)} / ${cfStorageLimitLabel}`;
+  const cfRequestsDisplay =
+    effectiveCfPlan === "paid"
+      ? `${formatQuotaCount(estDailyRequests * 30)} / 1M · 月`
+      : `${formatQuotaCount(estDailyRequests)} / 100k · 日`;
+  const cfCapacityDisplay =
+    effectiveCfPlan === "paid"
+      ? `${totalNodes} 台 · 充裕`
+      : `${totalNodes} / ~${freeMaxNodes} 台`;
+  const cfVersionDisplay = effectiveStatus?.version
+    ? `v${effectiveStatus.version.replace(/^v/, "")}`
+    : "—";
+
   const dispatchedCount = migrationResult?.dispatched ?? 0;
   const switchedCount =
     cutoverPhase === "done"
@@ -704,10 +856,46 @@ export function HubMigrationStudio(
                 )}
               </div>
 
+              <div className="flex flex-wrap items-center justify-between gap-2 text-[12px]">
+                <div className="flex items-center gap-1.5">
+                  <span style={{ color: "var(--text-tertiary)" }}>
+                    套餐档位
+                  </span>
+                  {detectedCfPlan !== null && (
+                    <span
+                      style={{
+                        color: "var(--text-tertiary)",
+                        backgroundColor: "var(--bg-subtle)",
+                        border: "1px solid var(--border-hairline)",
+                      }}
+                      className="rounded-[4px] px-1.5 py-0.5 text-[10.5px] leading-none"
+                    >
+                      自动识别
+                    </span>
+                  )}
+                </div>
+
+                {detectedCfPlan !== null ? (
+                  detectedCfPlan === "paid" ? (
+                    <Badge tone="accent">Workers Paid</Badge>
+                  ) : (
+                    <Badge tone="neutral">Workers Free</Badge>
+                  )
+                ) : (
+                  <SegmentedControl<CfWorkersPlan>
+                    size="xs"
+                    ariaLabel="选择 Cloudflare 套餐档位"
+                    value={effectiveCfPlan}
+                    onChange={(next) => void handleSelectCfPlan(next)}
+                    options={CF_PLAN_OPTIONS}
+                  />
+                )}
+              </div>
+
               <MetricBar
-                label="当前节点在线率"
-                valueLabel={`${connectedAgents} / ${totalNodes}`}
-                valuePct={isCloudflare ? onlineRatioPct : 0}
+                label={cfWriteLabel}
+                valueLabel={cfWriteValueLabel}
+                valuePct={cfWritePct}
                 thickness={4}
               />
 
@@ -715,6 +903,7 @@ export function HubMigrationStudio(
                 <button
                   type="button"
                   aria-expanded={showCloudDetails}
+                  aria-controls={cloudDetailsId}
                   onClick={() => setShowCloudDetails((v) => !v)}
                   style={{ color: "var(--text-tertiary)" }}
                   className="inline-flex cursor-pointer items-center gap-1 text-[12px] font-medium hover:text-[var(--text-primary)]"
@@ -728,7 +917,10 @@ export function HubMigrationStudio(
                 </button>
 
                 {showCloudDetails && (
-                  <div className="mt-2.5 grid grid-cols-3 gap-2">
+                  <div
+                    id={cloudDetailsId}
+                    className="mt-2.5 grid grid-cols-2 gap-2"
+                  >
                     <div
                       style={{
                         backgroundColor: "var(--bg-subtle)",
@@ -740,13 +932,15 @@ export function HubMigrationStudio(
                         style={{ color: "var(--text-tertiary)" }}
                         className="text-[11px]"
                       >
-                        在线探针
+                        {doStorageBytes !== null
+                          ? "DO SQLite 实时存储"
+                          : "DO SQLite 稳态存储"}
                       </div>
                       <div
                         style={{ color: "var(--text-primary)" }}
-                        className="font-mono-num tabular-nums mt-0.5 text-[13.5px] font-semibold"
+                        className="font-mono-num tabular-nums mt-0.5 text-[13px] font-semibold"
                       >
-                        {connectedAgents} 台
+                        {cfStorageDisplay}
                       </div>
                     </div>
 
@@ -761,13 +955,13 @@ export function HubMigrationStudio(
                         style={{ color: "var(--text-tertiary)" }}
                         className="text-[11px]"
                       >
-                        纳管总数
+                        DO 请求配额（预估）
                       </div>
                       <div
                         style={{ color: "var(--text-primary)" }}
-                        className="font-mono-num tabular-nums mt-0.5 text-[13.5px] font-semibold"
+                        className="font-mono-num tabular-nums mt-0.5 text-[13px] font-semibold"
                       >
-                        {totalNodes} 台
+                        {cfRequestsDisplay}
                       </div>
                     </div>
 
@@ -782,15 +976,34 @@ export function HubMigrationStudio(
                         style={{ color: "var(--text-tertiary)" }}
                         className="text-[11px]"
                       >
-                        服务版本
+                        建议承载规模
                       </div>
                       <div
                         style={{ color: "var(--text-primary)" }}
-                        className="font-mono-num tabular-nums mt-0.5 text-[13.5px] font-semibold"
+                        className="font-mono-num tabular-nums mt-0.5 text-[13px] font-semibold"
                       >
-                        {effectiveStatus?.version
-                          ? `v${effectiveStatus.version.replace(/^v/, "")}`
-                          : "—"}
+                        {cfCapacityDisplay}
+                      </div>
+                    </div>
+
+                    <div
+                      style={{
+                        backgroundColor: "var(--bg-subtle)",
+                        border: "1px solid var(--border-hairline)",
+                      }}
+                      className="rounded-[8px] px-3 py-2"
+                    >
+                      <div
+                        style={{ color: "var(--text-tertiary)" }}
+                        className="text-[11px]"
+                      >
+                        节点状态 · 版本
+                      </div>
+                      <div
+                        style={{ color: "var(--text-primary)" }}
+                        className="font-mono-num tabular-nums mt-0.5 text-[13px] font-semibold"
+                      >
+                        {connectedAgents}/{totalNodes} 在线 · {cfVersionDisplay}
                       </div>
                     </div>
                   </div>

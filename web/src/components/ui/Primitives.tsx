@@ -1276,6 +1276,12 @@ export function MetricBar({
         </div>
       )}
       <div
+        role={label ? "meter" : undefined}
+        aria-label={label}
+        aria-valuemin={label ? 0 : undefined}
+        aria-valuemax={label ? 100 : undefined}
+        aria-valuenow={label ? Math.round(clamped) : undefined}
+        aria-valuetext={label && valueLabel ? valueLabel : undefined}
         style={{
           height: thickness,
           backgroundColor: "var(--bg-muted)",

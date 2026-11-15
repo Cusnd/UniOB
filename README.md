@@ -133,6 +133,10 @@ curl -fsSL https://raw.githubusercontent.com/Cusnd/UniOB/main/scripts/install-hu
 - 🏗️ **[架构设计与省流原理](./docs/ARCHITECTURE.md)** · 📐 **[技术规范与计费测算](./docs/SPEC.md)** · 🔌 **[HTTP / WebSocket API 文档](./docs/API.md)**
 - 🤝 **[参与贡献与本地编译指南](./CONTRIBUTING.md)** · 🔒 **[安全策略](./SECURITY.md)** · 📝 **[更新日志](./CHANGELOG.md)**
 
+## 🙏 致谢
+
+感谢 [huilang-me/CF-Server-Monitor](https://github.com/huilang-me/CF-Server-Monitor) 带来的启发，UniOB 在设计过程中参考了该项目的部分思路。
+
 ## License
 
 [MIT](./LICENSE)

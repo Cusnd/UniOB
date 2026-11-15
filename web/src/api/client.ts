@@ -5,6 +5,7 @@ import type {
   AlertIncident,
   AlertRule,
   AuthStatus,
+  CfWorkersPlan,
   CreateNodePayload,
   CreateNodeResponse,
   ExportBundle,
@@ -336,8 +337,19 @@ export const api = {
     );
   },
 
-  getHubStatus(): Promise<HubStatusResponse> {
-    return request<HubStatusResponse>("/api/hub/status");
+  getHubStatus(opts?: { refresh?: boolean }): Promise<HubStatusResponse> {
+    return request<HubStatusResponse>(
+      opts?.refresh ? "/api/hub/status?refresh=1" : "/api/hub/status",
+    );
+  },
+
+  updateCfPlan(
+    plan: CfWorkersPlan,
+  ): Promise<{ ok: true; plan: CfWorkersPlan }> {
+    return request<{ ok: true; plan: CfWorkersPlan }>("/api/hub/cf-plan", {
+      method: "PUT",
+      body: JSON.stringify({ plan }),
+    });
   },
 
   exportBundle(): Promise<ExportBundle> {

@@ -597,12 +597,26 @@ pub struct WatchdogStatusView {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct HubCloudflareQuotaView {
+    pub detected_plan: Option<String>,
+    pub manual_plan: Option<String>,
+    pub effective_plan: String,
+    pub plan_source: String,
+    pub do_storage_bytes: Option<u64>,
+    pub nq_enabled_nodes: usize,
+    pub est_daily_do_writes: u64,
+    pub est_daily_do_requests: u64,
+    pub est_steady_storage_bytes: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct HubStatusResponse {
     pub mode: &'static str,
     pub version: String,
     pub connected_agents: usize,
     pub total_nodes: usize,
     pub watchdog: WatchdogStatusView,
+    pub cloudflare_quota: HubCloudflareQuotaView,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

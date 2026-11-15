@@ -14,6 +14,11 @@ export interface Env {
   CF_ACCESS_AUD?: string;
   CF_ACCESS_ALLOWED_EMAILS?: string;
   GITHUB_REPO?: string;
+  CF_WORKERS_PLAN?: string;
+  CF_API_TOKEN?: string;
+  CLOUDFLARE_API_TOKEN?: string;
+  CF_ACCOUNT_ID?: string;
+  CLOUDFLARE_ACCOUNT_ID?: string;
 }
 
 export type TrafficCountMode = "both" | "tx_only" | "max";
@@ -522,12 +527,28 @@ export interface HubWatchdogStatus {
   timeout_sec: number;
 }
 
+export type CfWorkersPlan = "free" | "paid";
+export type CfPlanSource = "api" | "env" | "runtime" | "manual" | "default";
+
+export interface HubCloudflareQuota {
+  detected_plan: CfWorkersPlan | null;
+  manual_plan: CfWorkersPlan | null;
+  effective_plan: CfWorkersPlan;
+  plan_source: CfPlanSource;
+  do_storage_bytes: number | null;
+  nq_enabled_nodes: number;
+  est_daily_do_writes: number;
+  est_daily_do_requests: number;
+  est_steady_storage_bytes: number;
+}
+
 export interface HubStatusResponse {
   mode: "cloudflare-worker" | "self-hosted-hub";
   version: string;
   connected_agents: number;
   total_nodes: number;
   watchdog: HubWatchdogStatus;
+  cloudflare_quota: HubCloudflareQuota;
 }
 
 export interface ExportTrafficLedgerEntry {
