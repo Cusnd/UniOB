@@ -16,6 +16,7 @@ import {
 import { generateId } from "../crypto";
 import {
   checkLatestAgentRelease,
+  clearCachedAgentRelease,
   decodeAutoUpdateOverride,
   getAgentUpdateConfig,
   isNewerAgentVersion,
@@ -2572,10 +2573,14 @@ export class FleetHubDO extends DurableObject<Env> {
         agent_version: node.agent_version ?? existingState.hw.agent_version,
       };
     }
+    const prevNode = this.nodesMirror.get(node.id);
     this.nodesMirror.set(node.id, node);
     this.upsertNodeMirrorSql(node);
     this.maybeBroadcastFleetTick(node.id);
-    if (node.auto_update_override === 1) {
+    if (
+      node.auto_update_override !== 0 &&
+      (node.auto_update_override === 1 || prevNode?.auto_update_override === 0)
+    ) {
       const sock = this.ctx.getWebSockets(`agent:${node.id}`).find(isSocketOpen);
       const att = sock ? this.readAgentAttachment(sock) : null;
       const state = this.nodeStates.get(node.id);
@@ -2988,6 +2993,7 @@ export class FleetHubDO extends DurableObject<Env> {
     this.agentUpdateConfigCache = { config: params.config, loadedAt: nowSec };
     if (params.clearReleaseCache) {
       this.agentReleaseCache = null;
+      await clearCachedAgentRelease(this.env.DB);
     }
     if (params.release !== undefined) {
       const origin = this.lastRequestOrigin ?? "";

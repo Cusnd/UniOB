@@ -508,7 +508,7 @@ mv -f "\${TMP_NEW}" "\${BINARY_PATH}"
 trap - EXIT
 rm -f "\${READY_JSON}" "\${STAGED_BIN}"
 
-systemctl restart "\${SERVICE_NAME}"
+systemctl restart "\${SERVICE_NAME}" || true
 sleep 2
 
 if ! systemctl is-active --quiet "\${SERVICE_NAME}"; then

@@ -50,6 +50,7 @@ describe("GET /install.sh", () => {
     expect(script).toContain(
       'rm -f "${UPDATE_PATH_UNIT}" "${UPDATE_SERVICE_UNIT}" "${SERVICE_PATH}" "${APPLY_HELPER_PATH}" "${BINARY_PATH}" "${BACKUP_BINARY_PATH}"',
     );
+    expect(script).toContain('systemctl restart "${SERVICE_NAME}" || true');
     expect(script).toContain('systemctl enable --now "${UPDATE_PATH_NAME}"');
   });
 
