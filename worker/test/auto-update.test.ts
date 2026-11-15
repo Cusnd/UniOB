@@ -98,8 +98,8 @@ afterEach(() => {
 });
 
 describe("Agent Auto-Update (`auto_update_v1`)", () => {
-  it("distinguishes WORKER_VERSION 2.0.0 from BUNDLED_AGENT_VERSION 0.3.0 and parses wire formats", () => {
-    expect(BUNDLED_AGENT_VERSION).toBe("0.3.0");
+  it("distinguishes WORKER_VERSION 2.0.0 from BUNDLED_AGENT_VERSION 0.3.1 and parses wire formats", () => {
+    expect(BUNDLED_AGENT_VERSION).toBe("0.3.1");
 
     expect(compareSemver("0.2.1", "0.2.0")).toBeGreaterThan(0);
     expect(compareSemver("v0.2.0", "0.2.0")).toBe(0);
@@ -213,7 +213,7 @@ describe("Agent Auto-Update (`auto_update_v1`)", () => {
         custom_base_url: "",
       },
       latest_release: null,
-      bundled_version: "0.3.0",
+      bundled_version: "0.3.1",
     });
 
     // Reject SSRF custom_base_url, bad channel, out-of-range interval, unknown keys
@@ -254,7 +254,7 @@ describe("Agent Auto-Update (`auto_update_v1`)", () => {
       check_interval_sec: 3600,
       custom_base_url: "https://cdn.example.com/agent-releases",
     });
-    expect(saved.bundled_version).toBe("0.3.0");
+    expect(saved.bundled_version).toBe("0.3.1");
 
     const refetch = await (
       await authedFetch("/api/agent-update/config", cookie)
@@ -321,7 +321,7 @@ describe("Agent Auto-Update (`auto_update_v1`)", () => {
       error: string | null;
     }>();
     expect(body1.ok).toBe(true);
-    expect(body1.bundled_version).toBe("0.3.0");
+    expect(body1.bundled_version).toBe("0.3.1");
     expect(body1.error).toBeNull();
     expect(body1.latest_release?.version).toBe("0.3.0");
     expect(body1.latest_release?.source).toBe("assets");

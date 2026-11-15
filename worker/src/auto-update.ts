@@ -13,7 +13,7 @@ import type {
 } from "./types";
 import { readSettingJson, writeSettingJson } from "./watchdog";
 
-export const BUNDLED_AGENT_VERSION = "0.3.0";
+export const BUNDLED_AGENT_VERSION = "0.3.1";
 export const AGENT_UPDATE_CONFIG_KEY = "agent_update_config";
 export const AGENT_UPDATE_CACHE_KEY = "agent_update_cache";
 export const RELEASE_CACHE_TTL_SEC = 900;

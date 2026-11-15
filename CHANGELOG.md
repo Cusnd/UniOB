@@ -4,6 +4,19 @@ All notable changes to **UniOB** will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.3.1] - 2026-11-15
+
+### Added
+- **Cloudflare Quota Visibility**: Show estimated Durable Objects writes, requests, storage, and node capacity in the Hub panel, with Free/Paid plan detection and a persisted manual fallback shared by the Worker and self-hosted Rust Hub.
+
+### Changed
+- **Deployment Configuration**: Detect the Workers plan during Cloudflare deployment when the Subscriptions API is available, with an explicit repository variable override and manual UI fallback.
+- **Onboarding and Server Management**: Refresh the Chinese and English READMEs around setup and deployment choices, and improve server management controls and accessible group selection.
+
+### Fixed
+- Keep the Add Server dialog from resetting while users are entering server details.
+- Format the Rust Hub Cloudflare plan handler so CI passes and automatic deployment can proceed.
+
 ## [0.3.0] - 2026-11-15
 
 ### Added

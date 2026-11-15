@@ -415,7 +415,7 @@ cmdline_mode = "sanitized"
    - `metrics_1h_chunk_1d`：`ROLLUP_1H_SEC = 3600`, `CHUNK_1H_SEC = 86400`, `366` 槽（366d），`ROLLUP_STRIDE = 88` 字节/点。服务 `range = 1y`。
 3. **可选网络质量独立环存（Schema v3）**：`network_quality_settings`（Worker DO 本地设置表）、`network_quality_state`（每节点最近状态与当前 `config_id`/`segment_id`）、`network_quality_chunk_10m`（`146` 槽）与 `network_quality_5m_chunk_1h`（`721` 槽），与资源 TSDB 完全解耦且不进入迁移 Bundle。
 
-### 5.4 REST API 与安装分发接口一览（Worker `2.0.0` / 内置 Agent `0.3.0`）
+### 5.4 REST API 与安装分发接口一览（Worker `2.0.0` / 内置 Agent `0.3.1`）
 
 | 方法与路径 | 鉴权方 | 说明 |
 | :--- | :--- | :--- |

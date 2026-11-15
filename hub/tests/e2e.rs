@@ -1648,7 +1648,7 @@ async fn auto_update_config_check_trigger_status_and_override_flow() {
     assert_eq!(cfg_res["config"]["auto_update_enabled"], false);
     assert_eq!(cfg_res["config"]["channel"], "stable");
     assert_eq!(cfg_res["config"]["check_interval_sec"], 21600);
-    assert_eq!(cfg_res["bundled_version"], "0.3.0");
+    assert_eq!(cfg_res["bundled_version"], "0.3.1");
 
     // Check release against local releases_dir
     let chk_res: Value = client
