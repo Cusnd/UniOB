@@ -500,10 +500,7 @@ async fn hub_status_handler(State(hub): State<HubState>) -> Response {
     }
 }
 
-async fn put_cf_plan_handler(
-    State(hub): State<HubState>,
-    Json(body): Json<Value>,
-) -> Response {
+async fn put_cf_plan_handler(State(hub): State<HubState>, Json(body): Json<Value>) -> Response {
     let raw_plan = body.get("plan").and_then(|v| v.as_str()).unwrap_or("");
     let Some(plan) = parse_cf_workers_plan(raw_plan) else {
         return json_error(StatusCode::BAD_REQUEST, "plan must be 'free' or 'paid'");
