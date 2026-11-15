@@ -443,6 +443,51 @@ dialog.uniob-drawer::backdrop {
   box-shadow: var(--shadow-card-hover);
 }
 
+/* ============================================================================
+ * Bento Card & Metric Cell Container Queries
+ * (modern-web-guidance: card, css-layout, single-line-overflow)
+ * ============================================================================ */
+.uniob-bento-card {
+  container: fleet-card / inline-size;
+}
+
+.uniob-metric-cell {
+  position: relative;
+  min-inline-size: 0;
+  container: metric-cell / inline-size;
+}
+
+@container fleet-card (inline-size < 276px) {
+  .uniob-card-metrics {
+    grid-template-columns: minmax(0, 1fr);
+  }
+}
+
+.uniob-short {
+  display: none;
+  user-select: none;
+}
+
+@container metric-cell (inline-size < 152px) {
+  /* Visually hidden, keeping full text in the accessibility tree and Ctrl+F */
+  .uniob-long {
+    position: absolute;
+    inline-size: 1px;
+    block-size: 1px;
+    overflow: hidden;
+    clip-path: inset(50%);
+    white-space: nowrap;
+  }
+
+  .uniob-short {
+    display: inline;
+  }
+
+  .uniob-net-pair {
+    gap: 0.5rem;
+  }
+}
+
 /* Accessible Scrollable Data Table Region (modern-web-guidance: responsive-table & sortable-table) */
 .table-scroll-region {
   overflow-x: auto;

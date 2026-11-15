@@ -131,12 +131,20 @@ export function BentoHeroStrip({
           >
             实时总网速
           </span>
-          <div className="font-mono-num flex flex-wrap items-baseline gap-x-3 gap-y-1 text-[13.5px] leading-tight font-semibold">
-            <span style={{ color: "var(--accent-ink)" }}>
-              ↓ {formatBytesPerSec(summary.totalRxBps)}
+          <div className="font-mono-num flex flex-wrap items-baseline gap-x-3.5 gap-y-1 text-[13.5px] leading-tight font-semibold">
+            <span
+              style={{ color: "var(--accent-ink)" }}
+              className="inline-flex items-center gap-1 whitespace-nowrap"
+            >
+              <span>↓</span>
+              <span>{formatBytesPerSec(summary.totalRxBps)}</span>
             </span>
-            <span style={{ color: "var(--status-ok-ink)" }}>
-              ↑ {formatBytesPerSec(summary.totalTxBps)}
+            <span
+              style={{ color: "var(--status-ok-ink)" }}
+              className="inline-flex items-center gap-1 whitespace-nowrap"
+            >
+              <span>↑</span>
+              <span>{formatBytesPerSec(summary.totalTxBps)}</span>
             </span>
           </div>
         </div>

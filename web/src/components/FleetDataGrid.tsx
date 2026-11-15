@@ -346,12 +346,20 @@ export function FleetDataGrid({
 
                   <td className="min-w-[168px]">
                     {node.online && node.metrics ? (
-                      <div className="font-mono-num flex items-center gap-2.5 whitespace-nowrap text-[12px] font-medium">
-                        <span style={{ color: "var(--accent-ink)" }}>
-                          ↓ {formatBytesPerSec(node.metrics.net.rx_bps)}
+                      <div className="font-mono-num flex items-center gap-3.5 whitespace-nowrap text-[12px] font-medium">
+                        <span
+                          style={{ color: "var(--accent-ink)" }}
+                          className="inline-flex items-center gap-1"
+                        >
+                          <span>↓</span>
+                          <span>{formatBytesPerSec(node.metrics.net.rx_bps)}</span>
                         </span>
-                        <span style={{ color: "var(--status-ok-ink)" }}>
-                          ↑ {formatBytesPerSec(node.metrics.net.tx_bps)}
+                        <span
+                          style={{ color: "var(--status-ok-ink)" }}
+                          className="inline-flex items-center gap-1"
+                        >
+                          <span>↑</span>
+                          <span>{formatBytesPerSec(node.metrics.net.tx_bps)}</span>
                         </span>
                       </div>
                     ) : (

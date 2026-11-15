@@ -13,6 +13,8 @@ import type {
   InspectorTab,
 } from "../types";
 import {
+  formatBytesPairCompact,
+  formatCompactRate,
   resolvePrimaryMetricCard,
   type BottomMetricSlot,
 } from "../utils/cardMetrics";
@@ -57,42 +59,69 @@ function getTrafficBarPct(node: HorizonNode): number {
   return Math.min(100, (node.traffic.counted_bytes / fiveTb) * 100);
 }
 
-function formatCompactRate(bps: number): string {
-  if (!Number.isFinite(bps) || bps <= 0) return "0";
-  const units = ["B", "K", "M", "G", "T"];
-  const idx = Math.min(
-    Math.floor(Math.log(bps) / Math.log(1024)),
-    units.length - 1,
+function AdaptiveText({
+  long,
+  short,
+}: {
+  long: string;
+  short: string;
+}): React.JSX.Element {
+  if (long === short) {
+    return <>{long}</>;
+  }
+  return (
+    <>
+      <span className="uniob-long">{long}</span>
+      <span className="uniob-short" aria-hidden="true">
+        {short}
+      </span>
+    </>
   );
-  const val = bps / Math.pow(1024, idx);
-  const num = idx === 0 || val >= 100 ? Math.round(val).toString() : val.toFixed(1);
-  return `${num}${units[idx]}`;
 }
 
 function getBottomMetricProps(
   slot: BottomMetricSlot,
   node: HorizonNode,
-): { label: string; valueLabel: string; valuePct: number } {
+): {
+  label: React.ReactNode;
+  labelText: string;
+  valueLabel: React.ReactNode;
+  valueText: string;
+  valuePct: number;
+} {
   const online = node.online;
   const m = node.metrics;
   switch (slot) {
     case "cpu": {
       const cpuPct = online && m ? m.cpu.all : 0;
+      const text = online && m ? `${cpuPct.toFixed(0)}%` : "—";
       return {
         label: "CPU",
-        valueLabel: online && m ? `${cpuPct.toFixed(0)}%` : "—",
+        labelText: "CPU",
+        valueLabel: text,
+        valueText: text,
         valuePct: cpuPct,
       };
     }
     case "mem": {
       const memPct = online ? getMemUsagePct(node) : 0;
       const memTotal = getMemTotalBytes(node);
+      if (online && m && memTotal > 0) {
+        const full = `${formatBytes(m.mem.used)} / ${formatBytes(memTotal)}`;
+        const compact = formatBytesPairCompact(m.mem.used, memTotal);
+        return {
+          label: "内存",
+          labelText: "内存",
+          valueLabel: <AdaptiveText long={full} short={compact} />,
+          valueText: full,
+          valuePct: memPct,
+        };
+      }
       return {
         label: "内存",
-        valueLabel:
-          online && m && memTotal > 0
-            ? `${formatBytes(m.mem.used)} / ${formatBytes(memTotal)}`
-            : "—",
+        labelText: "内存",
+        valueLabel: "—",
+        valueText: "—",
         valuePct: memPct,
       };
     }
@@ -103,34 +132,83 @@ function getBottomMetricProps(
       // Scale rate activity softly on a 100 MiB/s reference bar
       const refBps = 100 * 1024 * 1024;
       const activityPct =
-        online && m && total > 0 ? Math.min(100, Math.max(4, (total / refBps) * 100)) : 0;
+        online && m && total > 0
+          ? Math.min(100, Math.max(4, (total / refBps) * 100))
+          : 0;
+      if (online && m) {
+        const rxText = formatCompactRate(rx);
+        const txText = formatCompactRate(tx);
+        return {
+          label: <AdaptiveText long="实时网络" short="网速" />,
+          labelText: "实时网络",
+          valueLabel: (
+            <span className="uniob-net-pair inline-flex items-center gap-2.5">
+              <span className="inline-flex items-center gap-1">
+                <span style={{ color: "var(--accent-ink)" }}>↓</span>
+                <span>{rxText}</span>
+              </span>
+              <span className="inline-flex items-center gap-1">
+                <span style={{ color: "var(--status-ok-ink)" }}>↑</span>
+                <span>{txText}</span>
+              </span>
+            </span>
+          ),
+          valueText: `↓ ${rxText} ↑ ${txText}`,
+          valuePct: activityPct,
+        };
+      }
       return {
-        label: "实时网络",
-        valueLabel:
-          online && m
-            ? `↓${formatCompactRate(rx)} ↑${formatCompactRate(tx)}`
-            : "—",
+        label: <AdaptiveText long="实时网络" short="网速" />,
+        labelText: "实时网络",
+        valueLabel: "—",
+        valueText: "—",
         valuePct: activityPct,
       };
     }
     case "disk": {
       const rootDisk = getRootDisk(m?.disks);
+      if (rootDisk) {
+        const full = `${formatBytes(rootDisk.used)} / ${formatBytes(rootDisk.total)}`;
+        const compact = formatBytesPairCompact(rootDisk.used, rootDisk.total);
+        return {
+          label: "磁盘",
+          labelText: "磁盘",
+          valueLabel: <AdaptiveText long={full} short={compact} />,
+          valueText: full,
+          valuePct: getDiskUsagePct(rootDisk),
+        };
+      }
       return {
         label: "磁盘",
-        valueLabel: rootDisk
-          ? `${formatBytes(rootDisk.used)} / ${formatBytes(rootDisk.total)}`
-          : "—",
-        valuePct: getDiskUsagePct(rootDisk),
+        labelText: "磁盘",
+        valueLabel: "—",
+        valueText: "—",
+        valuePct: 0,
       };
     }
     case "traffic": {
       const hasLimit =
         node.traffic.limit_bytes !== null && node.traffic.limit_bytes > 0;
+      if (hasLimit) {
+        const full = `${formatBytes(node.traffic.counted_bytes)} / ${formatBytes(node.traffic.limit_bytes)}`;
+        const compact = formatBytesPairCompact(
+          node.traffic.counted_bytes,
+          node.traffic.limit_bytes,
+        );
+        return {
+          label: "流量",
+          labelText: "流量",
+          valueLabel: <AdaptiveText long={full} short={compact} />,
+          valueText: full,
+          valuePct: getTrafficBarPct(node),
+        };
+      }
+      const single = formatBytes(node.traffic.counted_bytes);
       return {
         label: "流量",
-        valueLabel: hasLimit
-          ? `${formatBytes(node.traffic.counted_bytes)} / ${formatBytes(node.traffic.limit_bytes)}`
-          : formatBytes(node.traffic.counted_bytes),
+        labelText: "流量",
+        valueLabel: single,
+        valueText: single,
         valuePct: getTrafficBarPct(node),
       };
     }
@@ -145,7 +223,7 @@ export function FleetBentoGrid({
 }: FleetBentoGridProps): React.JSX.Element {
   return (
     <div
-      className={`grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 ${
+      className={`grid grid-cols-1 min-[880px]:grid-cols-2 xl:grid-cols-3 ${
         density === "compact" ? "gap-3.5" : "gap-4"
       }`}
     >
@@ -171,12 +249,12 @@ export function FleetBentoGrid({
               }
             }}
             aria-label={`${node.name}，${regionText}`}
-            className={`atelier-card atelier-card-interactive flex min-w-0 cursor-pointer flex-col gap-4 ${
+            className={`uniob-bento-card atelier-card atelier-card-interactive flex min-w-0 cursor-pointer flex-col gap-4 ${
               density === "compact" ? "p-4" : "p-5"
             }`}
           >
             {/* Header: Status Dot + Name + Region */}
-            <div className="flex items-center justify-between gap-3">
+            <div className="flex min-h-[22px] items-center justify-between gap-3">
               <div className="flex min-w-0 items-center gap-2">
                 <StatusDot tone={statusTone} />
                 <h3
@@ -195,7 +273,7 @@ export function FleetBentoGrid({
                     ? "var(--text-tertiary)"
                     : "var(--status-danger-ink)",
                 }}
-                className="shrink-0 text-[12px]"
+                className="shrink-0 text-[12px] whitespace-nowrap"
               >
                 {node.online ? regionText : `${regionText} · 离线`}
               </span>
@@ -210,31 +288,39 @@ export function FleetBentoGrid({
               }}
               className="min-w-0 py-2.5"
             >
-              <div className="mb-1.5 flex items-baseline justify-between gap-2">
+              <div className="mb-1.5 flex min-h-[18px] items-center justify-between gap-2">
                 <span
                   style={{
                     color: node.online
                       ? "var(--text-tertiary)"
                       : "var(--text-muted)",
                   }}
-                  className="text-[11.5px]"
+                  className="shrink-0 text-[11.5px] whitespace-nowrap"
                 >
                   {plot.heroLabel}
                 </span>
                 {plot.hasLiveChart ? (
                   plot.netRatePair ? (
-                    <div className="font-mono-num flex items-center gap-2.5 text-[12px] font-medium">
-                      <span style={{ color: "var(--accent-ink)" }}>
-                        ↓ {plot.netRatePair.rx}
+                    <div className="font-mono-num flex min-w-0 items-center gap-3.5 text-[12px] font-medium whitespace-nowrap">
+                      <span
+                        style={{ color: "var(--accent-ink)" }}
+                        className="inline-flex items-center gap-1"
+                      >
+                        <span>↓</span>
+                        <span>{plot.netRatePair.rx}</span>
                       </span>
-                      <span style={{ color: "var(--status-ok-ink)" }}>
-                        ↑ {plot.netRatePair.tx}
+                      <span
+                        style={{ color: "var(--status-ok-ink)" }}
+                        className="inline-flex items-center gap-1"
+                      >
+                        <span>↑</span>
+                        <span>{plot.netRatePair.tx}</span>
                       </span>
                     </div>
                   ) : (
                     <span
                       style={{ color: "var(--text-primary)" }}
-                      className="font-mono-num text-[12px] font-medium"
+                      className="font-mono-num text-[12px] font-medium whitespace-nowrap"
                     >
                       {plot.primaryValueText}
                     </span>
@@ -242,7 +328,7 @@ export function FleetBentoGrid({
                 ) : (
                   <span
                     style={{ color: "var(--text-muted)" }}
-                    className="font-mono-num text-[12px]"
+                    className="font-mono-num text-[12px] whitespace-nowrap"
                   >
                     {plot.primaryValueText}
                   </span>
@@ -284,19 +370,23 @@ export function FleetBentoGrid({
             {/* 4 Clean Visual Bars (primary metric dynamically swapped so it's never duplicated) */}
             <div
               style={node.online ? undefined : { opacity: 0.72 }}
-              className="grid grid-cols-2 gap-x-4 gap-y-3"
+              className="uniob-card-metrics mt-auto grid grid-cols-2 gap-x-4 gap-y-3"
             >
               {plot.bottomSlots.map((slot) => {
                 const bar = getBottomMetricProps(slot, node);
                 return (
-                  <MetricBar
-                    key={slot}
-                    label={bar.label}
-                    valueLabel={bar.valueLabel}
-                    valuePct={bar.valuePct}
-                    toneOverride={barTone}
-                    thickness={3}
-                  />
+                  <div key={slot} className="uniob-metric-cell flex flex-col">
+                    <MetricBar
+                      label={bar.label}
+                      labelText={bar.labelText}
+                      valueLabel={bar.valueLabel}
+                      valueText={bar.valueText}
+                      valuePct={bar.valuePct}
+                      toneOverride={barTone}
+                      thickness={3}
+                      className="flex-1"
+                    />
+                  </div>
                 );
               })}
             </div>

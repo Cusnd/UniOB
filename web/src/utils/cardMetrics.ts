@@ -67,12 +67,72 @@ export function getSnapshotMemPct(
   return Math.min(100, Math.max(0, (metrics.mem.used / total) * 100));
 }
 
+const COMPACT_SIZE_UNITS = ["B", "KB", "MB", "GB", "TB", "PB"] as const;
+const SHORT_SIZE_UNITS = ["B", "K", "M", "G", "T", "P"] as const;
+
+function splitByteParts(bytes: number): {
+  num: string;
+  idx: number;
+  unit: string;
+  shortUnit: string;
+} {
+  if (!Number.isFinite(bytes) || bytes <= 0) {
+    return { num: "0", idx: 0, unit: "B", shortUnit: "B" };
+  }
+  const idx = Math.max(
+    0,
+    Math.min(
+      Math.floor(Math.log(bytes) / Math.log(1024)),
+      COMPACT_SIZE_UNITS.length - 1,
+    ),
+  );
+  const val = bytes / Math.pow(1024, idx);
+  const digits = idx === 0 || val >= 100 ? 0 : 1;
+  return {
+    num: val.toFixed(digits),
+    idx,
+    unit: COMPACT_SIZE_UNITS[idx]!,
+    shortUnit: SHORT_SIZE_UNITS[idx]!,
+  };
+}
+
+export function formatBytesPairCompact(
+  usedBytes: number | null | undefined,
+  totalBytes: number | null | undefined,
+): string {
+  const used = usedBytes && Number.isFinite(usedBytes) && usedBytes > 0 ? usedBytes : 0;
+  const total =
+    totalBytes && Number.isFinite(totalBytes) && totalBytes > 0 ? totalBytes : 0;
+  const u = splitByteParts(used);
+  const t = splitByteParts(total);
+  if (used <= 0) {
+    return `0 / ${t.num} ${t.unit}`;
+  }
+  if (u.idx === t.idx) {
+    return `${u.num} / ${t.num} ${t.unit}`;
+  }
+  return `${u.num}${u.shortUnit} / ${t.num}${t.shortUnit}`;
+}
+
+export function formatCompactRate(bps: number): string {
+  if (!Number.isFinite(bps) || bps <= 0) return "0B";
+  const units = ["B", "K", "M", "G", "T"];
+  const idx = Math.max(
+    0,
+    Math.min(Math.floor(Math.log(bps) / Math.log(1024)), units.length - 1),
+  );
+  const val = bps / Math.pow(1024, idx);
+  const num =
+    idx === 0 || val >= 100 ? Math.round(val).toString() : val.toFixed(1);
+  return `${num}${units[idx]}`;
+}
+
 export function formatRateBpsText(bps: number): string {
   if (!Number.isFinite(bps) || bps <= 0) return "0 B/s";
   const units = ["B/s", "KB/s", "MB/s", "GB/s"];
-  const idx = Math.min(
-    Math.floor(Math.log(bps) / Math.log(1024)),
-    units.length - 1,
+  const idx = Math.max(
+    0,
+    Math.min(Math.floor(Math.log(bps) / Math.log(1024)), units.length - 1),
   );
   const val = bps / Math.pow(1024, idx);
   const digits = idx === 0 ? 0 : val >= 100 ? 0 : val >= 10 ? 1 : 1;

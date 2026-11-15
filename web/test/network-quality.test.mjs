@@ -20,6 +20,9 @@ import {
   validateNetworkConfig,
 } from "../src/utils/networkQuality.ts";
 import {
+  formatBytesPairCompact,
+  formatCompactRate,
+  formatRateBpsText,
   getBottomMetricSlots,
   getSnapshotLatencyMs,
   parseCardPrimaryMetric,
@@ -407,4 +410,21 @@ test("network target validation blocks RFC special-use IPv4s, control chars, and
   });
   assert.equal(ctrlRegion.valid, false);
   assert.ok(ctrlRegion.targetErrors[0].region);
+});
+
+test("card metric compact formatters keep pairs concise and clamp fractional rates safely", () => {
+  const gib = 1024 ** 3;
+  const mib = 1024 ** 2;
+  const tib = 1024 ** 4;
+  assert.equal(formatBytesPairCompact(1.2 * gib, 31.3 * gib), "1.2 / 31.3 GB");
+  assert.equal(formatBytesPairCompact(13.4 * gib, 225 * gib), "13.4 / 225 GB");
+  assert.equal(formatBytesPairCompact(546 * mib, 1.9 * gib), "546M / 1.9G");
+  assert.equal(formatBytesPairCompact(45.1 * gib, 2.0 * tib), "45.1G / 2.0T");
+  assert.equal(formatBytesPairCompact(0, 31.3 * gib), "0 / 31.3 GB");
+
+  assert.equal(formatCompactRate(0), "0B");
+  assert.equal(formatCompactRate(0.4), "0B");
+  assert.equal(formatCompactRate(520), "520B");
+  assert.equal(formatCompactRate(2.8 * mib), "2.8M");
+  assert.equal(formatRateBpsText(0.4), "0 B/s");
 });

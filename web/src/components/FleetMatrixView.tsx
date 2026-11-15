@@ -144,11 +144,19 @@ export function FleetMatrixView({
                     <div className="font-mono-num flex items-center justify-between gap-2 text-[11px] font-medium">
                       {node.online && node.metrics ? (
                         <>
-                          <span style={{ color: "var(--accent-ink)" }}>
-                            ↓ {formatBytesPerSec(node.metrics.net.rx_bps)}
+                          <span
+                            style={{ color: "var(--accent-ink)" }}
+                            className="inline-flex items-center gap-1 whitespace-nowrap"
+                          >
+                            <span>↓</span>
+                            <span>{formatBytesPerSec(node.metrics.net.rx_bps)}</span>
                           </span>
-                          <span style={{ color: "var(--status-ok-ink)" }}>
-                            ↑ {formatBytesPerSec(node.metrics.net.tx_bps)}
+                          <span
+                            style={{ color: "var(--status-ok-ink)" }}
+                            className="inline-flex items-center gap-1 whitespace-nowrap"
+                          >
+                            <span>↑</span>
+                            <span>{formatBytesPerSec(node.metrics.net.tx_bps)}</span>
                           </span>
                         </>
                       ) : (

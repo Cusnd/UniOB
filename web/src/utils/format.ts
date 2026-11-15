@@ -16,9 +16,9 @@ export function formatBytes(
   }
   if (bytes === 0) return "0 B";
   const k = 1024;
-  const idx = Math.min(
-    Math.floor(Math.log(bytes) / Math.log(k)),
-    SIZE_UNITS.length - 1,
+  const idx = Math.max(
+    0,
+    Math.min(Math.floor(Math.log(bytes) / Math.log(k)), SIZE_UNITS.length - 1),
   );
   const val = bytes / Math.pow(k, idx);
   const digits = idx === 0 ? 0 : val >= 100 ? 0 : decimals;
@@ -35,9 +35,9 @@ export function formatBytesCompact(bytes: number | null | undefined): string {
     return "0B";
   }
   const k = 1024;
-  const idx = Math.min(
-    Math.floor(Math.log(bytes) / Math.log(k)),
-    SIZE_UNITS.length - 1,
+  const idx = Math.max(
+    0,
+    Math.min(Math.floor(Math.log(bytes) / Math.log(k)), SIZE_UNITS.length - 1),
   );
   const val = bytes / Math.pow(k, idx);
   const digits = idx === 0 ? 0 : val >= 100 ? 0 : val >= 10 ? 1 : 2;
@@ -49,9 +49,9 @@ export function formatBytesPerSec(bps: number | null | undefined): string {
     return "0 B/s";
   }
   const k = 1024;
-  const idx = Math.min(
-    Math.floor(Math.log(bps) / Math.log(k)),
-    SIZE_UNITS.length - 1,
+  const idx = Math.max(
+    0,
+    Math.min(Math.floor(Math.log(bps) / Math.log(k)), SIZE_UNITS.length - 1),
   );
   const val = bps / Math.pow(k, idx);
   const digits = idx === 0 ? 0 : val >= 100 ? 0 : 1;

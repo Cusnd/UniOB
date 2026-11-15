@@ -19,9 +19,9 @@ export function formatBytesPerSec(bps: number | null | undefined): string {
     return "0 B/s";
   }
   const k = 1024;
-  const idx = Math.min(
-    Math.floor(Math.log(bps) / Math.log(k)),
-    RATE_UNITS.length - 1,
+  const idx = Math.max(
+    0,
+    Math.min(Math.floor(Math.log(bps) / Math.log(k)), RATE_UNITS.length - 1),
   );
   const val = bps / Math.pow(k, idx);
   const digits = idx === 0 ? 0 : val >= 100 ? 0 : 1;
@@ -1075,19 +1075,21 @@ export function ObservabilityChart({
             }}
             pointerEvents="none"
           >
-            <text
-              x={padLeft + plotW - 2}
-              y={padTop + 9}
-              textAnchor="end"
-              style={{
-                paintOrder: "stroke",
-                stroke: "var(--bg-card)",
-                strokeWidth: 3,
-                strokeLinejoin: "round",
-              }}
-            >
-              {resolvedTickFmt(ceiling)}
-            </text>
+            {hoveredX === null && (
+              <text
+                x={padLeft + plotW - 2}
+                y={padTop + 9}
+                textAnchor="end"
+                style={{
+                  paintOrder: "stroke",
+                  stroke: "var(--bg-card)",
+                  strokeWidth: 3,
+                  strokeLinejoin: "round",
+                }}
+              >
+                {resolvedTickFmt(ceiling)}
+              </text>
+            )}
             {plotH >= 54 && (
               <text
                 x={padLeft + plotW - 2}
@@ -1184,7 +1186,7 @@ export function ObservabilityChart({
             transform:
               hoveredX > svgW * 0.58 ? "translateX(-100%)" : "translateX(0)",
           }}
-          className="font-mono-num pointer-events-none absolute top-1 z-10 flex items-center gap-2 rounded-[6px] px-2 py-0.5 text-[10.5px] leading-tight whitespace-nowrap"
+          className="font-mono-num pointer-events-none absolute top-1 z-10 flex items-center gap-3 rounded-[6px] px-2 py-0.5 text-[10.5px] leading-tight whitespace-nowrap"
         >
           {series.map((s, sIdx) => {
             const val = s.data[Math.min(activeHover, Math.max(0, s.data.length - 1))] ?? 0;
@@ -1195,7 +1197,7 @@ export function ObservabilityChart({
               >
                 <span
                   style={{ backgroundColor: s.color }}
-                  className="inline-block h-1.5 w-1.5 rounded-full"
+                  className="inline-block h-1.5 w-1.5 shrink-0 rounded-full"
                 />
                 <span style={{ color: "var(--text-secondary)" }}>{s.label}</span>
                 <span style={{ color: "var(--text-primary)" }}>
@@ -1216,8 +1218,10 @@ export function ObservabilityChart({
  * ============================================================================ */
 export interface MetricBarProps {
   valuePct: number;
-  label?: string;
-  valueLabel?: string;
+  label?: React.ReactNode;
+  labelText?: string;
+  valueLabel?: React.ReactNode;
+  valueText?: string;
   warnAt?: number;
   dangerAt?: number;
   recoveryMarkerPct?: number;
@@ -1229,7 +1233,9 @@ export interface MetricBarProps {
 export function MetricBar({
   valuePct,
   label,
+  labelText,
   valueLabel,
+  valueText,
   warnAt = 75,
   dangerAt = 88,
   toneOverride,
@@ -1238,6 +1244,10 @@ export function MetricBar({
 }: MetricBarProps): React.JSX.Element {
   const clamped = Math.max(0, Math.min(100, valuePct));
   const isMuted = toneOverride === "muted";
+  const resolvedAriaLabel =
+    labelText ?? (typeof label === "string" ? label : undefined);
+  const resolvedAriaValueText =
+    valueText ?? (typeof valueLabel === "string" ? valueLabel : undefined);
 
   let fillColor = "var(--ink-primary)";
   if (toneOverride === "muted") fillColor = "var(--text-muted)";
@@ -1251,24 +1261,27 @@ export function MetricBar({
   else fillColor = "var(--accent)";
 
   return (
-    <div className={`flex flex-col gap-1.5 ${className}`}>
-      {(label || valueLabel) && (
-        <div className="flex items-center justify-between gap-2 text-[12px] leading-none">
-          {label && (
+    <div
+      className={`flex min-w-0 flex-col justify-between gap-1.5 ${className}`}
+    >
+      {(label !== undefined || valueLabel !== undefined) && (
+        <div className="flex min-w-0 items-center justify-between gap-1.5 text-[12px] leading-snug">
+          {label !== undefined && (
             <span
               style={{
                 color: isMuted ? "var(--text-muted)" : "var(--text-tertiary)",
               }}
+              className="shrink-0 whitespace-nowrap"
             >
               {label}
             </span>
           )}
-          {valueLabel && (
+          {valueLabel !== undefined && (
             <span
               style={{
                 color: isMuted ? "var(--text-tertiary)" : "var(--text-primary)",
               }}
-              className="font-mono-num font-medium"
+              className="font-mono-num min-w-0 truncate font-medium whitespace-nowrap"
             >
               {valueLabel}
             </span>
@@ -1276,12 +1289,16 @@ export function MetricBar({
         </div>
       )}
       <div
-        role={label ? "meter" : undefined}
-        aria-label={label}
-        aria-valuemin={label ? 0 : undefined}
-        aria-valuemax={label ? 100 : undefined}
-        aria-valuenow={label ? Math.round(clamped) : undefined}
-        aria-valuetext={label && valueLabel ? valueLabel : undefined}
+        role={resolvedAriaLabel ? "meter" : undefined}
+        aria-label={resolvedAriaLabel}
+        aria-valuemin={resolvedAriaLabel ? 0 : undefined}
+        aria-valuemax={resolvedAriaLabel ? 100 : undefined}
+        aria-valuenow={resolvedAriaLabel ? Math.round(clamped) : undefined}
+        aria-valuetext={
+          resolvedAriaLabel && resolvedAriaValueText
+            ? resolvedAriaValueText
+            : undefined
+        }
         style={{
           height: thickness,
           backgroundColor: "var(--bg-muted)",
