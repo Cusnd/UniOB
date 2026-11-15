@@ -302,8 +302,8 @@ cargo zigbuild --manifest-path hub/Cargo.toml --release --target aarch64-unknown
 - **自动发布（[.github/workflows/release.yml](.github/workflows/release.yml)）**：推送 `v*` 标签或手动运行时填写 tag，即构建并发布 GitHub Release 产物；手动运行未填写 tag 时仅生成构建产物：
 
 ```bash
-git tag v0.2.0
-git push origin v0.2.0
+git tag v0.3.0
+git push origin v0.3.0
 ```
 
 工作流自动运行 `agent` 与 `hub` 测试，构建前端产物 `uniob-web-dist.tar.gz`，交叉编译 `uniob-agent-{x86_64,aarch64}-unknown-linux-musl`（强制校验 `<= 2,621,440` 字节）与 `uniob-hub-{x86_64,aarch64}-unknown-linux-musl`，并生成 `SHA256SUMS` 一并发布。

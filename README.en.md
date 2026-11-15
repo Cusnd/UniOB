@@ -162,8 +162,8 @@ When placing either Cloudflare Workers or a Tunnel-backed `uniob-hub` behind Clo
 Pushing any `v*` tag triggers [.github/workflows/release.yml](./.github/workflows/release.yml) to test Rust crates, bundle `uniob-web-dist.tar.gz`, cross-compile static `musl` binaries (`uniob-agent` verified `<= 2,621,440` bytes and `uniob-hub` for `x86_64` & `aarch64`), compute `SHA256SUMS`, and publish a GitHub Release:
 
 ```bash
-git tag v0.2.0
-git push origin v0.2.0
+git tag v0.3.0
+git push origin v0.3.0
 ```
 
 You can also run the Release workflow manually with a tag; leaving the tag empty only builds artifacts. When `ENABLE_CF_AUTO_DEPLOY=true`, successful publication triggers Cloudflare deployment. Regular `main` pushes deploy after CI succeeds for that commit, without requiring a Release.

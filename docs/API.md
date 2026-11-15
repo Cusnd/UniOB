@@ -104,11 +104,11 @@ Both backends expose authenticated endpoints for managing signed remote agent up
 
 - `auto_update_enabled` (`boolean`, default `false`): Automatically pushes signed directives to connected nodes with `auto_update_v1` capability whose `auto_update_override` is `null` (inherit) or `true`.
 - `channel` (`"stable" | "github"`, default `"stable"`):
-  - `"stable"` checks local `/releases/SHA256SUMS` (and `/releases/VERSION`, defaulting tag/version comment or bundled version `"0.2.0"`), falling back to GitHub Releases (`Cusnd/UniOB` by default) when local binaries are absent.
+  - `"stable"` checks local `/releases/SHA256SUMS` (and `/releases/VERSION`, defaulting tag/version comment or bundled version `"0.3.0"`), falling back to GitHub Releases (`Cusnd/UniOB` by default) when local binaries are absent.
   - `"github"` queries GitHub `/releases/latest` (resolving digests from GitHub asset `digest` or the release `SHA256SUMS` asset) and attaches a matching local binary `fallback_url` when available.
 - `check_interval_sec` (`60..=604800`, default `21600` = 6h): Minimum background polling cadence for automatic checks (`RELEASE_CACHE_TTL_SEC = 900s` on Worker).
 - `custom_base_url` (`string | null`, default `""`): When non-empty, overrides `channel` and fetches `${custom_base_url}/SHA256SUMS` (and optional `VERSION`). Both `uniob-hub` and Cloudflare Worker (`worker/src/ssrf.ts`) reject non-HTTP(S) URLs, embedded credentials, query strings, fragments, control characters, and private/reserved SSRF hosts.
-- `bundled_version`: Compiled agent/package version bundled with the hub (currently `"0.2.0"`, while Worker control-plane `WORKER_VERSION` is `"2.0.0"`).
+- `bundled_version`: Compiled agent/package version bundled with the hub (currently `"0.3.0"`, while Worker control-plane `WORKER_VERSION` is `"2.0.0"`).
 
 ### Per-Node Override & Live Status
 

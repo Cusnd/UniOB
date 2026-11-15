@@ -4,6 +4,13 @@ All notable changes to **UniOB** will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.3.0] - 2026-11-15
+
+### Added
+- **Customizable Network Quality Monitoring (`network_quality_v1`)**: Multi-target TCP latency & loss probing (`1..=8` public IPv4 targets, `10..=300`s interval) with global defaults and per-node overrides, dedicated Ring-Slab storage (`network_quality_chunk_10m` / `5m_chunk_1h`) & cursor-paginated history API, shared SSRF/RFC special-use IPv4 validation across Agent, Hub, Worker, and Web UI, plus `NetworkQualityPanel` and `NetworkQualitySettings`.
+- **Signed Agent Auto-Update (`auto_update_v1`)**: End-to-end HMAC-SHA256 signed `ctrl.update` directives with `stable` (`/releases` with GitHub fallback), `github`, and SSRF-validated `custom_base_url` channels, SHA-256 binary verification, `systemd` `.path` atomic cutover & automatic rollback on failed startup, per-node `auto_update_override` policies, migration bundle sync, and `AgentUpdateModal` fleet management UI.
+- **Customizable Fleet Bento Primary Metrics**: Configurable 2~3 column Bento primary metric tiles (`cardMetrics`) with improved offline node card handling.
+
 ## [0.2.0] - 2026-11-15
 
 ### Changed

@@ -71,7 +71,7 @@ export function AgentUpdateModal({
   const [config, setConfig] = useState<AgentUpdateConfig>(DEFAULT_CONFIG);
   const [checkIntervalInput, setCheckIntervalInput] = useState("3600");
   const [customUrlInput, setCustomUrlInput] = useState("");
-  const [bundledVersion, setBundledVersion] = useState<string>("0.2.0");
+  const [bundledVersion, setBundledVersion] = useState<string>("0.3.0");
   const [latestRelease, setLatestRelease] = useState<AgentLatestRelease | null>(
     null,
   );
@@ -99,7 +99,7 @@ export function AgentUpdateModal({
         setConfig(cfg);
         setCheckIntervalInput(String(cfg.check_interval_sec || 3600));
         setCustomUrlInput(cfg.custom_base_url ?? "");
-        setBundledVersion(res.bundled_version || "0.2.0");
+        setBundledVersion(res.bundled_version || "0.3.0");
         setLatestRelease(res.latest_release ?? null);
       })
       .catch((err) => {

@@ -415,7 +415,7 @@ cmdline_mode = "sanitized"
    - `metrics_1h_chunk_1d`：`ROLLUP_1H_SEC = 3600`, `CHUNK_1H_SEC = 86400`, `366` 槽（366d），`ROLLUP_STRIDE = 88` 字节/点。服务 `range = 1y`。
 3. **可选网络质量独立环存（Schema v3）**：`network_quality_settings`（Worker DO 本地设置表）、`network_quality_state`（每节点最近状态与当前 `config_id`/`segment_id`）、`network_quality_chunk_10m`（`146` 槽）与 `network_quality_5m_chunk_1h`（`721` 槽），与资源 TSDB 完全解耦且不进入迁移 Bundle。
 
-### 5.4 REST API 与安装分发接口一览（Worker `2.0.0` / 内置 Agent `0.2.0`）
+### 5.4 REST API 与安装分发接口一览（Worker `2.0.0` / 内置 Agent `0.3.0`）
 
 | 方法与路径 | 鉴权方 | 说明 |
 | :--- | :--- | :--- |
@@ -589,7 +589,8 @@ UniOB/
 - **Milestone 1–4（v1 基线）**：完成 Rust `/proc` 探针、`cmdline` 脱敏、Worker + D1 + WebSocket Hibernation + Telegram/Webhook 告警闭环。
 - **Milestone 5（方向 B — SCCH 边缘降本重构）**：完成 `FleetHubDO` 同址收敛、`tsdb-slab.ts` Zero-DELETE 环存、Welford 在线聚合、`mb` 5m 相位批量 + 水位边沿冲刷、`setWebSocketAutoResponse`、Zero-DDL 冷唤醒、Push-Invalidated D1 镜像、`useFleetSocket` 可见性与闲置自动退订。
 - **Milestone 6（方向 A — `uniob-hub`、热迁移与混合看门狗）**：完成独立 `hub/` crate、`self_probe`、`/api/export/bundle` & `/api/import/bundle`、`/api/hub/migrate` HMAC 双阶段金丝雀迁移 + `StateDirectory=uniob` + 自动回退、CF Cron 死开关 Watchdog、`install-hub.sh.tmpl`。
-- **v0.2.0 Atelier UI 与可扩展观测/运维闭环**：替换 `uPlot` 为 Atelier 浅色高密 SVG 图表工作台（`FleetBentoGrid` / `NodeInspectorSheet` / `HubMigrationStudio`）、支持 `1..=8` 路自定义公网 IPv4 TCP 网络质量探测（含 `10..=300`s 探测间隔）与签名节点自动更新（`auto_update_v1`）。
+- **v0.2.0 Atelier UI 与极简高密工作台**：替换 `uPlot` 为 Atelier 浅色高密 SVG 图表工作台（`FleetBentoGrid` / `NodeInspectorSheet` / `HubMigrationStudio`）。
+- **v0.3.0 可扩展网络探测与签名自动更新**：支持 `1..=8` 路自定义公网 IPv4 TCP 网络质量探测（含 `10..=300`s 探测间隔、`network_quality_v1`）、Bento 主指标自定义以及签名节点自动更新与回滚闭环（`auto_update_v1`）。
 - **本地全量校验命令**（具体版本测试以 CI 运行结果为准，详见 [CONTRIBUTING.md](../CONTRIBUTING.md)）：
   - `cargo test --manifest-path agent/Cargo.toml` 与 `cargo test --manifest-path hub/Cargo.toml`
   - `cargo build --release --manifest-path agent/Cargo.toml`（静态产物严格限制 `<= 2,621,440` 字节）
