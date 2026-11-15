@@ -13,6 +13,7 @@ import {
   countUpdateEligibleNodes,
   formatAgentUpdateState,
   formatVersionTag,
+  hasUpdateCap,
   resolveEffectiveAutoUpdate,
 } from "../utils/autoUpdate";
 import {
@@ -130,10 +131,10 @@ export function AgentUpdateModal({
     const parsedInterval = Number(checkIntervalInput.trim());
     if (
       !Number.isInteger(parsedInterval) ||
-      parsedInterval < 300 ||
+      parsedInterval < 60 ||
       parsedInterval > 604800
     ) {
-      setActionError("检查间隔需为 300 ~ 604800 秒的整数");
+      setActionError("检查间隔需为 60 ~ 604800 秒的整数");
       return;
     }
     const trimmedUrl = customUrlInput.trim();
@@ -436,7 +437,7 @@ export function AgentUpdateModal({
                     <input
                       id={intervalInputId}
                       type="number"
-                      min={300}
+                      min={60}
                       max={604800}
                       value={checkIntervalInput}
                       onChange={(e) => {
@@ -553,6 +554,11 @@ export function AgentUpdateModal({
                               <Badge tone={stateBadge.tone}>
                                 {stateBadge.label}
                               </Badge>
+                              {Array.isArray(node.caps) &&
+                                node.caps.length > 0 &&
+                                !hasUpdateCap(node.caps) && (
+                                  <Badge tone="subtle">不支持自动更新</Badge>
+                                )}
                             </div>
                             {stateBadge.detail && (
                               <p

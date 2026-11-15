@@ -139,6 +139,7 @@ export function hasUpdateCap(caps: string[] | undefined): boolean {
   if (!Array.isArray(caps) || caps.length === 0) return false;
   return caps.some(
     (c) =>
+      c === "auto_update_v1" ||
       c === "self_update" ||
       c === "agent_update" ||
       c === "agent_update_v1" ||
@@ -149,13 +150,20 @@ export function hasUpdateCap(caps: string[] | undefined): boolean {
 export function countUpdateEligibleNodes(
   nodes: Pick<
     NodeSummary,
-    "online" | "agent_version" | "auto_update_override" | "update_status"
+    "online" | "agent_version" | "caps" | "auto_update_override" | "update_status"
   >[],
   latestVersion: string | null | undefined,
 ): number {
   if (!latestVersion) return 0;
   return nodes.filter((node) => {
     if (!node.online) return false;
+    if (
+      Array.isArray(node.caps) &&
+      node.caps.length > 0 &&
+      !hasUpdateCap(node.caps)
+    ) {
+      return false;
+    }
     if (
       node.update_status &&
       (node.update_status.state === "downloading" ||

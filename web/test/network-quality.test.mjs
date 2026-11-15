@@ -336,12 +336,14 @@ test("auto-update helpers format states, resolve overrides, and filter eligible 
   assert.equal(resolveEffectiveAutoUpdate(false, true).enabled, false);
   assert.equal(resolveEffectiveAutoUpdate(true, false).enabled, true);
 
+  assert.equal(hasUpdateCap(["mb_v2", "auto_update_v1"]), true);
   assert.equal(hasUpdateCap(["mb_v2", "self_update"]), true);
   assert.equal(hasUpdateCap(["mb_v2"]), false);
 
   const eligible = countUpdateEligibleNodes(
     [
-      { online: true, agent_version: "0.1.9", auto_update_override: null, update_status: null },
+      { online: true, agent_version: "0.1.9", caps: ["mb_v2", "auto_update_v1"], auto_update_override: null, update_status: null },
+      { online: true, agent_version: "0.1.9", caps: ["mb_v2"], auto_update_override: null, update_status: null },
       { online: true, agent_version: "0.2.0", auto_update_override: null, update_status: null },
       { online: false, agent_version: "0.1.8", auto_update_override: true, update_status: null },
       { online: true, agent_version: "0.1.8", auto_update_override: null, update_status: { state: "applying" } },
@@ -349,4 +351,60 @@ test("auto-update helpers format states, resolve overrides, and filter eligible 
     "0.2.0",
   );
   assert.equal(eligible, 1);
+});
+
+test("network target validation blocks RFC special-use IPv4s, control chars, and counts Unicode codepoints", () => {
+  for (const reservedIp of [
+    "192.0.0.1",
+    "192.0.2.1",
+    "192.88.99.1",
+    "198.18.0.1",
+    "198.19.255.1",
+    "198.51.100.1",
+    "203.0.113.1",
+  ]) {
+    assert.equal(isPublicIpv4(reservedIp), false, `expected ${reservedIp} to be blocked`);
+  }
+  assert.equal(isPublicIpv4("8.8.8.8"), true);
+
+  const baseTarget = {
+    id: "hk",
+    enabled: true,
+    label: "香港",
+    region: "",
+    host: "8.8.8.8",
+    port: 443,
+    address_family: "ipv4",
+  };
+
+  // Surrogate-pair emoji repeats: 32 codepoints (UTF-16 .length === 64) should pass, 33 should fail.
+  const emoji32 = "🚀".repeat(32);
+  const emoji33 = "🚀".repeat(33);
+  assert.equal(
+    validateNetworkConfig({ enabled: true, interval_sec: 20, targets: [{ ...baseTarget, label: emoji32 }] }).valid,
+    true,
+  );
+  const tooLongLabel = validateNetworkConfig({
+    enabled: true,
+    interval_sec: 20,
+    targets: [{ ...baseTarget, label: emoji33 }],
+  });
+  assert.equal(tooLongLabel.valid, false);
+  assert.ok(tooLongLabel.targetErrors[0].label);
+
+  const ctrlLabel = validateNetworkConfig({
+    enabled: true,
+    interval_sec: 20,
+    targets: [{ ...baseTarget, label: "香港\n节点" }],
+  });
+  assert.equal(ctrlLabel.valid, false);
+  assert.ok(ctrlLabel.targetErrors[0].label);
+
+  const ctrlRegion = validateNetworkConfig({
+    enabled: true,
+    interval_sec: 20,
+    targets: [{ ...baseTarget, region: "HK\u0007" }],
+  });
+  assert.equal(ctrlRegion.valid, false);
+  assert.ok(ctrlRegion.targetErrors[0].region);
 });

@@ -255,13 +255,18 @@ export function isPublicIpv4(rawHost: string): boolean | null {
     return Number(p);
   });
   if (octets.some((n) => n < 0 || n > 255)) return false;
-  const [a, b] = octets;
-  // Block unspecified, loopback, private RFC1918, CGNAT, link-local, multicast/reserved.
+  const [a, b, c] = octets;
+  // Block unspecified, loopback, private RFC1918, CGNAT, link-local, RFC special-use, multicast/reserved.
   if (a === 0 || a === 10 || a === 127 || a >= 224) return false;
   if (a === 100 && b >= 64 && b <= 127) return false;
   if (a === 169 && b === 254) return false;
   if (a === 172 && b >= 16 && b <= 31) return false;
+  if (a === 192 && b === 0 && (c === 0 || c === 2)) return false;
+  if (a === 192 && b === 88 && c === 99) return false;
   if (a === 192 && b === 168) return false;
+  if (a === 198 && (b === 18 || b === 19)) return false;
+  if (a === 198 && b === 51 && c === 100) return false;
+  if (a === 203 && b === 0 && c === 113) return false;
   return true;
 }
 
@@ -316,6 +321,14 @@ export interface NetworkConfigValidation {
   firstError?: string;
 }
 
+function hasControlChars(value: string): boolean {
+  for (const ch of value) {
+    const cp = ch.codePointAt(0)!;
+    if (cp <= 0x1f || cp === 0x7f) return true;
+  }
+  return false;
+}
+
 export function validateNetworkTarget(
   target: NetworkTarget,
   existingIds?: Map<string, number>,
@@ -333,12 +346,16 @@ export function validateNetworkTarget(
   const label = target.label.trim();
   if (!label) {
     errs.label = "请填写显示名称";
-  } else if (label.length > 32) {
+  } else if (hasControlChars(label)) {
+    errs.label = "显示名称不能包含控制字符";
+  } else if ([...label].length > 32) {
     errs.label = "显示名称不能超过 32 个字符";
   }
 
   const region = target.region?.trim() ?? "";
-  if (region.length > 64) {
+  if (region && hasControlChars(region)) {
+    errs.region = "地区备注不能包含控制字符";
+  } else if ([...region].length > 64) {
     errs.region = "地区备注不能超过 64 个字符";
   }
 
