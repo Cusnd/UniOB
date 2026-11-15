@@ -407,11 +407,15 @@ export function AddServerWizardModal(
                       </label>
                       <input
                         id="add-srv-custom-gb"
+                        name="custom_gb"
                         type="number"
                         min={1}
                         step="any"
                         value={customGb}
-                        onChange={(e) => setCustomGb(e.target.value)}
+                        onChange={(e) => {
+                          setCustomGb(e.target.value);
+                          if (error) setError(null);
+                        }}
                         style={{
                           backgroundColor: "var(--bg-subtle)",
                           color: "var(--text-primary)",
@@ -432,6 +436,7 @@ export function AddServerWizardModal(
                     </label>
                     <input
                       id="add-srv-reset-day"
+                      name="traffic_reset_day"
                       type="number"
                       min={1}
                       max={28}
@@ -462,6 +467,7 @@ export function AddServerWizardModal(
                     </label>
                     <select
                       id="add-srv-count-mode"
+                      name="traffic_count_mode"
                       value={countMode}
                       onChange={(e) =>
                         setCountMode(e.target.value as TrafficCountMode)
