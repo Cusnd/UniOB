@@ -75,11 +75,11 @@ jobs:
         run: |
           set -euo pipefail
           mkdir -p web/public/releases
-          if gh release download --repo "${{ github.repository }}" --dir web/public/releases --clobber; then
+          if gh release download --repo "${{ github.repository }}" --dir web/public/releases --pattern '*' --clobber; then
             rm -f web/public/releases/uniob-web-dist.tar.gz
             ls -lh web/public/releases
           else
-            echo "No published GitHub Release found yet; installers will fall back to GitHub Releases when available."
+            echo "::warning::Could not download the latest GitHub Release; installers will fall back to GitHub Releases when available."
           fi
 
       - name: Set up Node.js
