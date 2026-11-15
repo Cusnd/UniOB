@@ -14,12 +14,12 @@ UniOB is a secure, read-only Linux server fleet monitoring, on-demand process in
 
 | Document | Description |
 | :--- | :--- |
-| **[☁️ Cloudflare Workers Deployment Guide (ZH)](./docs/deploy-cloudflare.md)** | SCCH edge deployment, Zero Trust Access, and usage planning |
+| **[☁️ Cloudflare Workers Deployment Guide (ZH)](./docs/deploy-cloudflare.md)** | Step-by-step setup for zero-server `$0/mo` edge monitoring on Workers Free + Zero Trust Access |
 | **[🖥️ Self-Hosted `uniob-hub` & Migration Guide (ZH)](./docs/deploy-self-hosted.md)** | Dedicated VPS setup with Cloudflare Tunnel, Caddy/Nginx, external Watchdog, and live migration |
 | **[🏗️ Architecture Deep-Dive (ZH)](./docs/ARCHITECTURE.md)** | v1 cost bottlenecks, 6 SCCH cost optimizations, smart migration protocol, and resolved engineering traps |
 | **[🔌 HTTP & WebSocket API Reference](./docs/API.md)** | Complete REST API routes, Watchdog HMAC signatures, and Agent / Dashboard WebSocket protocols |
-| **[📐 Technical Spec & Resource Cost Model (ZH)](./docs/SPEC.md)** | Data structures, ring-slab TSDB layout, and operating cost assumptions |
-| **[Network quality (ZH)](./docs/features/network-quality.md)** | Optional TCP/IPv4 probes, settings, and history |
+| **[📐 Technical Spec & 7-Dimension Cost Model (ZH)](./docs/SPEC.md)** | Data structures, ring-slab TSDB layout, auto-update protocol, and 10 / 50 / 200-node Cloudflare billing comparisons |
+| **[🌐 Network Quality Probing (ZH)](./docs/features/network-quality.md)** | Optional `1..=8` public IPv4 TCP latency/failure probes, presets, per-node overrides, and paginated history |
 | **[🤝 Contributing](./CONTRIBUTING.md) · [🔒 Security Policy](./SECURITY.md) · [📝 Changelog](./CHANGELOG.md)** | Local checks, security boundaries, and release history |
 
 ---
@@ -28,30 +28,32 @@ UniOB is a secure, read-only Linux server fleet monitoring, on-demand process in
 
 UniOB runs identically in **Direction B (Cloudflare SCCH Edge Hub)** and **Direction A (Self-Hosted `uniob-hub` + Cloudflare Watchdog)** modes:
 
-- **`agent/` (`uniob-agent`)**: Static `musl` Rust agent reading `/proc` and `statvfs` directly (no `fork`/`exec` child shells). Strictly capped at `<= 2,621,440` bytes (`<= 2.5 MB`, enforced in CI), ~`3–6 MB` RSS, outbound `WSS (443)` telemetry. Enabling network quality additionally requires DNS and outbound TCP to configured target ports (80 by default), with:
-  - **Network quality**: Disabled by default; global settings and per-node inherit/custom/off. Three public IPv4 targets are probed every 20 seconds. The dashboard shows TCP connect latency, rolling failure rate, 24 hours of raw history and 30 days of five-minute aggregates. Idle telemetry retains its five-minute batch cadence. Budget for the additional message bytes, SQLite reads/writes, and retained history according to enabled targets and dashboard activity.
+- **`agent/` (`uniob-agent`)**: Static `musl` Rust agent reading `/proc` and `statvfs` directly (no `fork`/`exec` child shells). Strictly capped at `<= 2,621,440` bytes (`<= 2.5 MB`, enforced in CI), ~`3–6 MB` RSS, outbound `WSS (443)` telemetry. Enabling network quality or auto-update adds outbound DNS / target-port TCP (default `80`) or HTTPS/HTTP artifact fetches:
+  - **Customizable TCP Network Quality (`network_quality_v1`)**: Disabled by default; supports `1..=8` public IPv4 TCP targets at a configurable `10..=300`s interval (`20`s default, omitted from `config_id` hashing for v1 backward compatibility), 3 presets, and per-node inherit/custom/off overrides. The dashboard renders TCP connect latency, trailing 120s failure rates, 24h raw history, and 30d 5-minute rollups while keeping Idle telemetry on its 5-minute batch cadence (see [docs/features/network-quality.md](./docs/features/network-quality.md)).
+  - **Signed Agent Auto-Update (`auto_update_v1`, `agent/src/update.rs`)**: Verifies `ctrl.update` HMAC-SHA256 signatures pinned to lowercase `token_sha256`, `<= 900s` clock skew, and persisted monotonic `issued_at`; downloads via zero-dependency `rustls` (redirect downgrade prevention `<= 5` hops, rejects `gzip`, `<= 16 MiB`, `\x7fELF` + SHA-256 check); stages under `/var/lib/uniob/update/` and triggers root `uniob-agent-update.path` + `--verify-staged-update` for `.prev`-backed atomic swap and automatic 2-second rollback if unhealthy.
   - **Protocol v2 Cohort Batching & Edge Alert Flushing**: In Idle (`mode = 0`), buffers up to 12 `CompactMetricTuple` (16-number) points in memory and flushes one `mb` batch frame every 5 minutes aligned to UTC boundaries + deterministic `[0, 400)` ms jitter. Immediately flushes (`reason = "edge"`) on watermark crossings, `|Δcpu| >= 35%`, or host reboot so critical alerts suffer zero artificial delay.
   - **Two-Stage Canary Hot Migration (`agent/src/migrate.rs`)**: Verifies HMAC-SHA256 `ctrl.migrate` directives, timestamp window, monotonic `epoch` replay protection, and SSRF guards. Opens a canary connection to the target hub first, promotes once a valid `ctrl` frame arrives within `10s`, persists `/var/lib/uniob/endpoint_override.toml` (`StateDirectory=uniob`), and automatically rolls back to `fallback_url` if the new hub remains unreachable (`>= 300s` or `>= 10` failed reconnects).
   - **Read-Only Security Boundary**: Enumerated sampling modes (`0`/`1`/`2`), regex-free lexical `cmdline` sanitization, and `90s` client subscription leases that automatically downshift back to idle cohort batching.
 - **`worker/` (`uniob-worker`)**: Built with Hono, Cloudflare D1, SQLite Durable Objects, and the WebSocket Hibernation API:
-  - **Co-Located Single DO (`FleetHubDO`)**: Converges Agent WebSockets and Dashboard Client WebSockets in a single `FleetHubDO("global")` instance (**0 cross-DO RPCs**, `1 × 128 MB` instance billing), handles heartbeats at the edge via `setWebSocketAutoResponse` (`{"op":"ping"}` -> `{"t":"pong"}`), guards cold starts with `hub_meta.schema_version` (`0` repeated DDL), mirrors D1 config tables locally (`0` hot-path D1 queries), and writes ring-slab circular TSDB chunks (`metrics_chunk_10m` / `metrics_5m_chunk_1h` / `metrics_1h_chunk_1d`) with Welford streaming aggregation to reduce resource history and state storage overhead. Capacity depends on enabled features, dashboard activity, and the account’s request, compute, read/write, and storage quotas.
+  - **Co-Located Single DO (`FleetHubDO`)**: Converges Agent WebSockets and Dashboard Client WebSockets in a single `FleetHubDO("global")` instance (**0 cross-DO RPCs**, `1 × 128 MB` instance billing), handles heartbeats at the edge via `setWebSocketAutoResponse` (`{"op":"ping"}` -> `{"t":"pong"}`), guards cold starts with `hub_meta.schema_version` (`0` repeated DDL), mirrors D1 config tables locally (`0` hot-path D1 queries), and writes ring-slab circular TSDB chunks (`metrics_chunk_10m` / `metrics_5m_chunk_1h` / `metrics_1h_chunk_1d`) with Welford streaming aggregation — letting **Cloudflare Workers Free (`100k` SQLite row writes/day) run up to ~112 Idle nodes or ~75 nodes with 2h/day live dashboard viewing** (~52 Idle nodes when optional 3-target 20s TCP network quality probing is enabled).
   - **Cloudflare Watchdog (`worker/src/watchdog.ts`)**: `*/5 * * * *` Cron Trigger + HMAC-SHA256 `POST /api/watchdog/ping` endpoint (`576` Worker requests/day on Free tier, 0 DO calls).
-  - **D1 (`uniob-meta`)**: Stores node registry, notification channels, alert rules, incident history, and system settings.
+  - **D1 (`uniob-meta`)**: Stores node registry (including `auto_update_override`), notification channels, alert rules, incident history, and system settings.
 - **`hub/` (`uniob-hub`)**: Standalone Rust Hub powered by Axum, Tokio-Tungstenite, and local SQLite WAL with zero cloud cost:
   - Exposes matching `/api/*`, `/api/agent/ws`, `/api/client/ws`, `/install.sh`, `/install-hub.sh`, `/releases/*`, and serves static `web/dist` assets.
-  - Includes loopback host self-probing (`hub/src/self_probe.rs`, default `hub-local`).
+  - Includes loopback host self-probing (`hub/src/self_probe.rs`, default `hub-local`) and matching `auto_update_v1` release resolution/signing (`hub/src/agent_update.rs`).
   - Supports both **Cloudflare Zero Trust Access (`Cf-Access-Jwt-Assertion` RS256 JWKS)** and **Builtin PBKDF2 password sessions**, plus periodic signed heartbeats to the Cloudflare Watchdog (`hub/src/watchdog.rs`).
-- **`web/` (`uniob-web`)**: React 19 + TypeScript + Vite + TailwindCSS v4 + uPlot SPA with visibility/idle auto-unsubscribe (`IDLE_TIMEOUT_MS = 10 min`) and guided **Migration & Mode** workflows (`HubMigrationPanel.tsx`).
+- **`web/` (`uniob-web`)**: React 19 + TypeScript + Vite + TailwindCSS v4 Atelier light-first SPA with native SVG telemetry charts (`ObservabilityChart` / `Sparkline`, no `uPlot`), visibility/idle auto-unsubscribe (`IDLE_TIMEOUT_MS = 10 min`), customizable Bento fleet cards (`FleetBentoGrid.tsx` + `cardMetrics.ts`: selectable primary metric `net` / `cpu` / `latency` / `mem` and clean dashed gray baseline for offline nodes), node operations (`NodesOpsView.tsx`, `NetworkQualitySettings.tsx`, `AgentUpdateModal.tsx`, `HardwareSecurityPanel.tsx`), and guided **Migration & Mode** workflows (`HubMigrationStudio.tsx`).
 
 ### Repository Structure
 
 ```text
 UniOB/
+├── shared/                 # Shared Rust network_quality_v1 scheduler, SSRF checks & test fixtures
 ├── agent/                  # Static Linux musl monitoring probe (uniob-agent)
 ├── hub/                    # Self-hosted Rust + SQLite hub server (uniob-hub)
-├── worker/                 # Cloudflare Workers + D1 + SCCH Durable Objects backend
-├── web/                    # React 19 + TailwindCSS v4 + uPlot dashboard frontend
-├── scripts/                # Hardened install.sh.tmpl & install-hub.sh.tmpl installers
+├── worker/                 # Cloudflare Workers + D1 (0001_init, 0002_auto_update) + SCCH Durable Objects backend
+├── web/                    # React 19 + TailwindCSS v4 + Atelier SVG dashboard frontend
+├── scripts/                # Hardened install.sh.tmpl (with update path unit) & install-hub.sh.tmpl
 ├── .github/
 │   ├── workflows/
 │   │   ├── ci.yml                  # Typecheck, web build, Worker tests, Rust fmt/clippy/tests
@@ -59,7 +61,7 @@ UniOB/
 │   │   └── deploy-cloudflare.yml   # Optional GitHub Actions Worker + D1 deployment workflow
 │   ├── ISSUE_TEMPLATE/
 │   └── pull_request_template.md
-├── docs/                   # Deployment guides, ARCHITECTURE.md, API.md, SPEC.md
+├── docs/                   # Deployment guides, features/network-quality.md, ARCHITECTURE.md, API.md, SPEC.md
 └── package.json            # Root convenience scripts (no npm workspaces)
 ```
 
@@ -160,8 +162,8 @@ When placing either Cloudflare Workers or a Tunnel-backed `uniob-hub` behind Clo
 Pushing any `v*` tag triggers [.github/workflows/release.yml](./.github/workflows/release.yml) to test Rust crates, bundle `uniob-web-dist.tar.gz`, cross-compile static `musl` binaries (`uniob-agent` verified `<= 2,621,440` bytes and `uniob-hub` for `x86_64` & `aarch64`), compute `SHA256SUMS`, and publish a GitHub Release:
 
 ```bash
-git tag v0.1.0
-git push origin v0.1.0
+git tag v0.2.0
+git push origin v0.2.0
 ```
 
 You can also run the Release workflow manually with a tag; leaving the tag empty only builds artifacts. When `ENABLE_CF_AUTO_DEPLOY=true`, successful publication triggers Cloudflare deployment. Regular `main` pushes deploy after CI succeeds for that commit, without requiring a Release.
@@ -183,6 +185,8 @@ curl -fsSL https://monitor.example.com/install.sh | sudo bash -s -- \
 # Uninstall cleanly
 curl -fsSL https://monitor.example.com/install.sh | sudo bash -s -- --uninstall
 ```
+
+Agent binary flags: `-c`/`--config` (`/etc/uniob/agent.toml`), `--state-dir` (`/var/lib/uniob`, storing `endpoint_override.toml` and `update/`), `--verify-staged-update` (invoked by the root `uniob-agent-update.service` apply helper before swapping), `--allow-insecure-ws-for-test`, `--once`, `-V`/`--version`, `-h`/`--help`. Once installed, agents advertising `auto_update_v1` can be upgraded directly from the web dashboard (**Nodes -> Agent Auto-Update**, supporting `stable` / `github` / `custom_base_url` with `.prev` 2-second auto-rollback).
 
 ---
 

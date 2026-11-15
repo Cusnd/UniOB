@@ -1,11 +1,5 @@
 # Cloudflare Workers 边缘中枢从零部署教程（人话版）
 
-## 可选的网络质量检测
-
-先升级 Worker 与 Web，再升级 Agent；旧 Agent 继续提供资源监控，但网络区显示“不支持”。新版默认关闭，在“服务器 → 网络检测”启用全局配置，或在节点编辑/详情中设置继承、自定义、关闭。默认是广东电信、联通、移动 IPv4 TCP 80 目标，探针需要 DNS 和到目标端口的出站访问，不新增入站端口或 raw socket 权限。若 DNS 代理返回私网/假 IP，会显示配置错误；应使用服务器能正常解析到公网地址的目标。
-
-关闭配置可以停止新探测，保留已有历史。Bundle 迁移配置，历史仍留在原中枢。启用后应把探测上报、网络历史读写与存储计入部署预算。
-
 > **一句话定位**：不想专门买一台服务器挂监控面板？不想操心面板机续费、硬盘坏道、SSL 证书过期或者被人拿 DDoS 打死？这篇教程手把手带你用 **15 分钟** 把 UniOB 塞进 Cloudflare 的全球边缘网络里，管好你手头几十台 Linux 小鸡（哪怕是 512M/1G 内存的丐版 VPS 也能轻松带，探针常驻内存才 `3~6 MB`）。
 >
 > 💡 *如果你手里有一台常年开机的闲置 VPS，想 24 小时挂着大屏看 1 秒级实时曲线且完全不想算计云端配额，也可以直接看姊妹篇 👉 [《自部署 `uniob-hub` 独立中枢 + CF 看门狗与无感热迁移教程（人话版）》](./deploy-self-hosted.md)，或者先搭好本文的免费 CF 中枢，日后随时一键热迁移过去！*
@@ -18,7 +12,7 @@
 
 这话一点不假——传统的云端监控做法是「每台小鸡开一个独立实例、每秒钟往数据库里硬塞一条记录」，免费额度神仙也扛不住。
 
-UniOB 通过 **SCCH（同址收敛休眠中枢 / `FleetHubDO`）** 减少云端开销：
+UniOB 之所以敢让你放心白嫖，是因为它在底层搞了一套叫 **SCCH（同址收敛休眠中枢 / `FleetHubDO`）** 的省钱绝活。把它翻译成人话就是：
 
 > **所有小鸡和你的浏览器，全都住进同一个自带本地小账本的值班室（单个 `FleetHubDO` 实例）里。**
 >
@@ -26,13 +20,25 @@ UniOB 通过 **SCCH（同址收敛休眠中枢 / `FleetHubDO`）** 减少云端�
 > - **半夜机器出事了会耽误报警吗？绝对不会！** 探针脑子里记着你的告警水位线。哪怕在 5 分钟静默期里，只要某台机器 CPU 突然暴涨（单次跳变 `>= 35%`）、内存/硬盘越过红线或者刚发生重启，探针会**当场踹门秒发紧急帧**，告警延迟照样是 **0 秒**！
 > - **当你打开网页看盘时（直播模式）**：值班室瞬间开灯，通知小鸡切回秒级实时上报，让你丝滑看曲线、查进程；等你关掉网页（或者挂着标签页 **超过 10 分钟没动鼠标**），前端会自动发指令让探针缩回 5 分钟一报的省电模式。
 
-### Free 与 Paid 怎么选？
+### 算笔明白账：免费档（Free） vs $5 付费档（Paid）怎么选？
 
-先按实际运行方式评估用量：节点数、三网检测的启用目标、每天看盘时长及历史访问频率都会影响开销。资源监控的 Idle 基线为 888 行/节点/日，适用于已建立历史环槽、每五分钟批量上报且无实时订阅的条件；网络检测、配置、告警、重连与集群闹钟另计。完整口径见[技术规范](SPEC.md)。
+| 对比项 | Workers Free（$0/月 纯白嫖档） | Workers Paid（$5/月 省心档） |
+| :--- | :--- | :--- |
+| **核心卡脖子指标** | Durable Objects SQLite 每天免费写入 **`100,000` 行** | 每月基础费 `$5`，包含海量读写配额 |
+| **纯后台挂机等告警（默认关闭网络探测）** | 稳带 **~112 台** 小鸡（`888` 行/台/天） | 几百台随便塞 |
+| **开启三网 TCP 探测后台挂机（3 目标 / 20s）** | 稳带 **~52 台** 小鸡（`1,922` 行/台/天） | 几百台随便塞 |
+| **正常使用（每天打开看盘约 2 小时）** | 稳带 **~75 台** 小鸡 | 200 台机器全天候跑也才约 **`$5.24/月`** |
+| **24×7 全天挂着大屏盯秒级曲线** | 约 **~16 台** 就会触顶当天免费上限 | 毫无压力 |
 
-使用 Free 前核对账户的请求、计算、SQL 读写和存储额度，并为日常操作与异常事件留出余量。持续高频看盘或较大机群可结合实际用量选择 Paid，也可使用[自建 `uniob-hub`](./deploy-self-hosted.md) 承担采集、计算和历史存储。套餐额度与价格以 [Cloudflare 官方计费](https://developers.cloudflare.com/durable-objects/platform/pricing/) 为准。
+**给你的实在建议**：
+- 手里 `3 ~ 50` 台小鸡的个人玩家，**直接用免费的 Workers Free 就够了，一分钱不用掏！**
+- ⚠️ **白嫖党唯一要守的规矩**：看完面板顺手关标签页（或者切到别的标签页），**千万别在电脑上开十几个监控标签页 24 小时亮屏死盯着秒级刷新**——只要有人盯着实时画面，所有小鸡就得陪着高频干活，免费额度自然掉得快。如果你就是喜欢副屏 24 小时挂着监控墙看秒级跳动，要么花 `$5/月` 升 Paid，要么用 [自建 `uniob-hub`](./deploy-self-hosted.md) 扛日常、留着免费 CF 当失联报警器！
 
-看完面板关闭或隐藏标签页，可以让订阅回到现有 Idle 策略，减少无效的高频上报。
+### 可选扩展功能（默认均不打扰你的核心配额）
+
+- **自定义 TCP 延迟探测（默认关闭，`0` 额外写入）**：可在网页 **「服务器」->「网络检测」** 开启 `1..=8` 路公网 IPv4 TCP 探测并调小鸡探测间隔（`10..=300` 秒，默认 `20` 秒），内置 **三网默认 CT/CU/CM**、**亚太节点 HK/JP/SG**、**海外节点 US/EU/JP** 3 套预设并支持单机覆盖或单独关闭。完整配额开销与游标分页机制见 [网络质量检测指南](./features/network-quality.md)。
+- **机群总览 Bento 卡片主指标定制**：总览页 2 列 Bento 卡片顶栏可直接把主图切换为 **实时网络**（默认）、**CPU**、**TCP 延迟** 或 **内存**，偏好自动持久化；切为 CPU 或内存时，底部小指标槽位会自动补回实时网络不丢数据。离线小鸡显示灰线与“离线”状态徽章。
+- **节点签名自动更新（`auto_update_v1`）**：在 **「服务器」->「自动更新」** 可配置全局自动更新、切换 `stable`（优先 Worker 同源 `/releases/SHA256SUMS`，缺省自动查 GitHub Releases）、`github` 或自定义镜像源 `custom_base_url`，也可给单台节点设置「跟随全局 / 启用 / 禁用」。下发采用节点 `token_sha256` HMAC 签名，探针在 `ProtectSystem=strict` 下暂存校验，通过 root `systemd.path` 备份 `.prev` 原子切换并在 2 秒内自检失败时自动回滚。
 
 ---
 
@@ -175,7 +181,7 @@ cd worker && npx wrangler d1 migrations apply uniob-meta --remote && cd ..
 
 > ⚠️ **千万别漏掉尾巴上的 `--remote`！**
 > 不带 `--remote` 的话，Wrangler 只会在你电脑本地建个模拟库，云端数据库里一张表都没有——等你打开线上网页直接给你甩一脸 `500 Internal Server Error (no such table)`！
-> 终端问你确认时输入 `y` 回车，看到 `0001_init.sql` 后面打上绿勾就妥了。
+> 终端问你确认时输入 `y` 回车，看到 `0001_init.sql` 与 `0002_auto_update.sql` 后面打上绿勾就妥了。
 
 ---
 
@@ -383,22 +389,26 @@ sudo journalctl -u uniob-agent -f
   npm run build:web
   cd worker && npx wrangler d1 migrations apply uniob-meta --remote && npx wrangler deploy && cd ..
   ```
-- **升级小鸡上的 `uniob-agent` 探针**（超级省心：**不用再传 `--url` / `--id` / `--token`！**）：
-  当安装脚本发现 `/etc/uniob/agent.toml` 已经存在时，不带参数执行会**完整保留原有配置与热迁移记录**，只把二进制平滑换成最新版并重启服务：
-  ```bash
-  curl -fsSL https://monitor.example.com/install.sh | sudo bash
-  ```
+- **升级小鸡上的 `uniob-agent` 探针**：
+  - **方式 A（推荐，网页端 `auto_update_v1` 一键/自动更新）**：
+    打开网页 **「服务器」->「自动更新」**，即可检查最新版本并选择 **触发更新**（支持全量或勾选中/低版本节点；也可开启自动更新按 `check_interval_sec` 定期巡检并仅向老版本推新）。中枢下发带 HMAC 签名的 `ctrl.update` 指令后，探针自动下载校验 `\x7fELF` + SHA-256 并暂存至 `/var/lib/uniob/update/`，由安装器自带的 `uniob-agent-update.path` + `/usr/local/sbin/uniob-agent-apply-update` 完成 `--verify-staged-update` 二次验签、`.prev` 备份切换与 2 秒健康回滚。
+    *(注：从早期 `v0.1.x` 探针升级到 `0.2.0+` 前，先用下面方式 B 跑一次安装脚本把新的 `uniob-agent-update.path` 单元补齐，之后全部机器都能网页端直接升级。)*
+  - **方式 B（手动 SSH 重跑一键脚本，不用再传 `--url` / `--id` / `--token`）**：
+    当安装脚本发现 `/etc/uniob/agent.toml` 已经存在时，不带参数执行会**完整保留原有配置与热迁移记录**，同时更新二进制并自动装好 `uniob-agent-update.path` / `uniob-agent-update.service`：
+    ```bash
+    curl -fsSL https://monitor.example.com/install.sh | sudo bash
+    ```
 
 ---
 
 ### Q3：某台小鸡到期不玩了，怎么彻底卸载干净不留垃圾？
 
-在小鸡上跑这一行，自动停掉服务，并把二进制（`/usr/local/bin/uniob-agent`）、配置目录（`/etc/uniob`）、状态目录（`/var/lib/uniob`）和 systemd 单元文件删得干干净净：
+在小鸡上跑这一行，自动停掉服务，并把二进制（`/usr/local/bin/uniob-agent` 与 `.prev`）、特权更新助手（`/usr/local/sbin/uniob-agent-apply-update`）、配置目录（`/etc/uniob`）、状态目录（`/var/lib/uniob`）以及 `uniob-agent.service` / `uniob-agent-update.{path,service}` 删得干干净净：
 
 ```bash
 curl -fsSL https://monitor.example.com/install.sh | sudo bash -s -- --uninstall
 ```
-卸完再去网页「服务器管理」里点垃圾桶把这台服务器删掉即可。
+卸完再去网页 **「服务器」** 页面点垃圾桶把这台服务器删掉即可。
 
 ---
 
