@@ -1343,31 +1343,46 @@ impl HubState {
         }))
     }
 
+    pub async fn sync_after_bundle_import(&self, origin: &str) {
+        self.invalidate_agent_update_cache().await;
+        self.dispatch_auto_updates_inner(origin, true).await;
+    }
+
     pub async fn maybe_dispatch_auto_updates(&self, origin: &str) {
-        let Ok(cfg) = self.db.agent_update_config() else {
-            return;
-        };
-        let Ok(nodes) = self.load_update_target_nodes() else {
-            return;
-        };
-        if !cfg.auto_update_enabled && !nodes.iter().any(|n| n.auto_update_override == Some(1)) {
+        self.dispatch_auto_updates_inner(origin, false).await;
+    }
+
+    async fn dispatch_auto_updates_inner(&self, origin: &str, sync_all_agents: bool) {
+        if sync_all_agents {
+            self.self_probe_notify.notify_one();
+        }
+        let cfg = self.db.agent_update_config().ok();
+        let nodes = self.load_update_target_nodes().ok();
+        let now = now_sec();
+        let has_eligible_policy = cfg.as_ref().is_some_and(|c| c.auto_update_enabled)
+            || nodes
+                .as_ref()
+                .is_some_and(|ns| ns.iter().any(|n| n.auto_update_override == Some(1)));
+
+        if !has_eligible_policy && !sync_all_agents {
             return;
         }
 
-        let now = now_sec();
-        let needs_refresh = {
-            let guard = self.agent_update_cache.read().await;
-            match (&guard.latest, guard.checked_at) {
-                (Some(_), Some(ts)) => now.saturating_sub(ts) >= cfg.check_interval_sec as i64,
-                (None, Some(ts)) => {
-                    let retry_ttl = (cfg.check_interval_sec as i64).min(RELEASE_CACHE_TTL_SEC);
-                    now.saturating_sub(ts) >= retry_ttl
+        if let (Some(ref c), true) = (&cfg, has_eligible_policy) {
+            let needs_refresh = {
+                let guard = self.agent_update_cache.read().await;
+                match (&guard.latest, guard.checked_at) {
+                    (Some(_), Some(ts)) => now.saturating_sub(ts) >= c.check_interval_sec as i64,
+                    (None, Some(ts)) => {
+                        let retry_ttl = (c.check_interval_sec as i64).min(RELEASE_CACHE_TTL_SEC);
+                        now.saturating_sub(ts) >= retry_ttl
+                    }
+                    (_, None) => true,
                 }
-                (_, None) => true,
+            };
+            if needs_refresh {
+                let _ = self.check_latest_release(origin).await;
             }
-        };
-        if needs_refresh {
-            let _ = self.check_latest_release(origin).await;
         }
 
         let live_caps: HashMap<String, Vec<String>> = {
@@ -1378,15 +1393,38 @@ impl HubState {
                 .collect()
         };
 
+        let Some(nodes) = nodes else {
+            return;
+        };
+        let mut synced_ids = std::collections::HashSet::with_capacity(live_caps.len());
         for mut node in nodes {
             let Some(caps) = live_caps.get(&node.id) else {
                 continue;
             };
             node.caps = caps.clone();
-            if let Some(directive) = self.auto_directive_for_node_if_due(&node, &cfg, now).await {
-                let mut ctrl = self.compute_ctrl_for_node(&node.id, true).await;
-                ctrl.update = Some(directive);
+            let directive = if has_eligible_policy {
+                if let Some(ref c) = cfg {
+                    self.auto_directive_for_node_if_due(&node, c, now).await
+                } else {
+                    None
+                }
+            } else {
+                None
+            };
+            if directive.is_some() || sync_all_agents {
+                let mut ctrl = self
+                    .compute_ctrl_for_node(&node.id, directive.is_some())
+                    .await;
+                ctrl.update = directive;
                 let _ = self.send_ctrl_to_agent(&node.id, None, ctrl).await;
+                synced_ids.insert(node.id);
+            }
+        }
+        if sync_all_agents {
+            for id in live_caps.keys() {
+                if !synced_ids.contains(id) {
+                    self.push_ctrl_to_agent(id, false).await;
+                }
             }
         }
     }

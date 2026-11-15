@@ -1,4 +1,5 @@
 use crate::crypto::{hmac_sha256_hex, now_sec};
+use crate::network_quality::is_public_ipv4;
 use crate::protocol::{
     CtrlUpdateDirective, LatestRelease, NodeUpdateStatus, ReleaseAssetInfo, ReleaseAssetsMap,
 };
@@ -7,6 +8,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::cmp::Ordering;
 use std::collections::HashMap;
+use std::net::IpAddr;
 use std::path::Path;
 use url::Url;
 
@@ -58,24 +60,101 @@ pub struct AgentUpdateCache {
     pub dispatched_versions: HashMap<String, (String, i64)>,
 }
 
+pub const MAX_CUSTOM_BASE_URL_LEN: usize = 512;
+
+fn is_blocked_custom_base_host(host: &str) -> bool {
+    let h = host
+        .trim()
+        .trim_matches(|c| c == '[' || c == ']')
+        .trim_end_matches('.')
+        .to_ascii_lowercase();
+    if h.is_empty()
+        || h == "localhost"
+        || h.ends_with(".localhost")
+        || h.ends_with(".local")
+        || h.ends_with(".internal")
+        || h == "home.arpa"
+        || h.ends_with(".home.arpa")
+    {
+        return true;
+    }
+    if let Ok(ip) = h.parse::<IpAddr>() {
+        match ip {
+            IpAddr::V4(v4) => !is_public_ipv4(v4),
+            IpAddr::V6(v6) => {
+                if let Some(v4) = v6.to_ipv4_mapped() {
+                    return !is_public_ipv4(v4);
+                }
+                let seg0 = v6.segments()[0];
+                v6.is_loopback()
+                    || v6.is_unspecified()
+                    || v6.is_multicast()
+                    || (seg0 & 0xfe00) == 0xfc00
+                    || (seg0 & 0xffc0) == 0xfe80
+            }
+        }
+    } else {
+        false
+    }
+}
+
 pub fn normalize_base_url(raw: &str) -> Result<String, String> {
+    normalize_base_url_inner(raw, false)
+}
+
+pub fn normalize_base_url_with_policy(
+    raw: &str,
+    allow_private_hosts: bool,
+) -> Result<String, String> {
+    normalize_base_url_inner(raw, allow_private_hosts)
+}
+
+fn normalize_base_url_inner(raw: &str, allow_private_hosts: bool) -> Result<String, String> {
+    if raw.chars().any(char::is_control) {
+        return Err("custom_base_url contains control characters".to_string());
+    }
     let trimmed = raw.trim();
     if trimmed.is_empty() {
         return Ok(String::new());
+    }
+    if trimmed.len() > MAX_CUSTOM_BASE_URL_LEN {
+        return Err("custom_base_url is too long".to_string());
     }
     let parsed = Url::parse(trimmed).map_err(|e| format!("Invalid custom_base_url: {e}"))?;
     if !matches!(parsed.scheme(), "http" | "https") {
         return Err("custom_base_url must use http:// or https://".to_string());
     }
-    if parsed.host_str().is_none_or(str::is_empty) {
-        return Err("custom_base_url missing host".to_string());
+    if !parsed.username().is_empty() || parsed.password().is_some() {
+        return Err("custom_base_url must not contain credentials".to_string());
     }
-    Ok(trimmed.trim_end_matches('/').to_string())
+    if parsed.query().is_some() || parsed.fragment().is_some() {
+        return Err("custom_base_url must not include query parameters or fragments".to_string());
+    }
+    let Some(host) = parsed.host_str().filter(|s| !s.is_empty()) else {
+        return Err("custom_base_url missing host".to_string());
+    };
+    if !allow_private_hosts && is_blocked_custom_base_host(host) {
+        return Err("custom_base_url cannot target private or reserved addresses".to_string());
+    }
+    let origin = parsed.origin().ascii_serialization();
+    if origin.is_empty() || origin == "null" {
+        return Err("custom_base_url missing valid origin".to_string());
+    }
+    let clean_path = parsed.path().trim_end_matches('/');
+    Ok(format!("{origin}{clean_path}"))
 }
 
 pub fn parse_agent_update_config_patch(
     body: &Value,
     current: &AgentUpdateConfig,
+) -> Result<AgentUpdateConfig, String> {
+    parse_agent_update_config_patch_with_policy(body, current, false)
+}
+
+pub fn parse_agent_update_config_patch_with_policy(
+    body: &Value,
+    current: &AgentUpdateConfig,
+    allow_private_hosts: bool,
 ) -> Result<AgentUpdateConfig, String> {
     let Some(obj) = body.as_object() else {
         return Err("Invalid JSON body".to_string());
@@ -115,7 +194,7 @@ pub fn parse_agent_update_config_patch(
             let raw = v
                 .as_str()
                 .ok_or_else(|| "custom_base_url must be a string or null".to_string())?;
-            next.custom_base_url = normalize_base_url(raw)?;
+            next.custom_base_url = normalize_base_url_with_policy(raw, allow_private_hosts)?;
         }
     }
 
@@ -157,31 +236,129 @@ pub fn asset_candidates_for_arch(arch: &str) -> &'static [&'static str] {
     }
 }
 
-pub fn compare_semver(a: &str, b: &str) -> Ordering {
-    fn parse_parts(s: &str) -> ([u64; 3], bool) {
-        let trimmed = s.trim().trim_start_matches('v').trim_start_matches('V');
-        let (core, pre) = match trimmed.split_once('-') {
-            Some((c, p)) => (c, !p.is_empty()),
-            None => (trimmed, false),
-        };
-        let mut nums = [0u64; 3];
-        for (i, seg) in core.split('.').take(3).enumerate() {
-            let digits: String = seg.chars().take_while(|c| c.is_ascii_digit()).collect();
-            nums[i] = digits.parse::<u64>().unwrap_or(0);
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ParsedSemver<'a> {
+    major: u64,
+    minor: u64,
+    patch: u64,
+    pre: Vec<&'a str>,
+}
+
+fn parse_semver(raw: &str) -> Option<ParsedSemver<'_>> {
+    let trimmed = raw
+        .trim()
+        .strip_prefix('v')
+        .or_else(|| raw.trim().strip_prefix('V'))
+        .unwrap_or(raw.trim());
+    let without_build = match trimmed.split_once('+') {
+        Some((before, build)) => {
+            if build.is_empty()
+                || !build
+                    .bytes()
+                    .all(|b| b.is_ascii_alphanumeric() || b == b'.' || b == b'-')
+            {
+                return None;
+            }
+            before
         }
-        (nums, pre)
+        None => trimmed,
+    };
+    let (core, pre) = match without_build.split_once('-') {
+        Some((c, p)) => {
+            if p.is_empty()
+                || !p
+                    .bytes()
+                    .all(|b| b.is_ascii_alphanumeric() || b == b'.' || b == b'-')
+            {
+                return None;
+            }
+            let ids: Vec<&str> = p.split('.').collect();
+            if ids.iter().any(|id| id.is_empty()) {
+                return None;
+            }
+            (c, ids)
+        }
+        None => (without_build, Vec::new()),
+    };
+
+    let mut segs = core.split('.');
+    let major = segs
+        .next()
+        .filter(|s| !s.is_empty() && s.bytes().all(|b| b.is_ascii_digit()))?
+        .parse::<u64>()
+        .ok()?;
+    let minor = segs
+        .next()
+        .filter(|s| !s.is_empty() && s.bytes().all(|b| b.is_ascii_digit()))?
+        .parse::<u64>()
+        .ok()?;
+    let patch = segs
+        .next()
+        .filter(|s| !s.is_empty() && s.bytes().all(|b| b.is_ascii_digit()))?
+        .parse::<u64>()
+        .ok()?;
+    if segs.next().is_some() {
+        return None;
     }
 
-    let (an, apre) = parse_parts(a);
-    let (bn, bpre) = parse_parts(b);
-    match an.cmp(&bn) {
-        Ordering::Equal => match (apre, bpre) {
-            (true, false) => Ordering::Less,
-            (false, true) => Ordering::Greater,
-            _ => Ordering::Equal,
-        },
-        ord => ord,
+    Some(ParsedSemver {
+        major,
+        minor,
+        patch,
+        pre,
+    })
+}
+
+pub fn try_compare_semver(a_raw: &str, b_raw: &str) -> Option<Ordering> {
+    let a = parse_semver(a_raw)?;
+    let b = parse_semver(b_raw)?;
+    match (a.major, a.minor, a.patch).cmp(&(b.major, b.minor, b.patch)) {
+        Ordering::Equal => {}
+        ord => return Some(ord),
     }
+
+    match (a.pre.is_empty(), b.pre.is_empty()) {
+        (true, true) => return Some(Ordering::Equal),
+        (true, false) => return Some(Ordering::Greater),
+        (false, true) => return Some(Ordering::Less),
+        (false, false) => {}
+    }
+
+    for i in 0..a.pre.len().max(b.pre.len()) {
+        let Some(ai) = a.pre.get(i).copied() else {
+            return Some(Ordering::Less);
+        };
+        let Some(bi) = b.pre.get(i).copied() else {
+            return Some(Ordering::Greater);
+        };
+        let a_num = ai
+            .bytes()
+            .all(|b| b.is_ascii_digit())
+            .then(|| ai.parse::<u64>().ok())
+            .flatten();
+        let b_num = bi
+            .bytes()
+            .all(|b| b.is_ascii_digit())
+            .then(|| bi.parse::<u64>().ok())
+            .flatten();
+        match (a_num, b_num) {
+            (Some(an), Some(bn)) => match an.cmp(&bn) {
+                Ordering::Equal => {}
+                ord => return Some(ord),
+            },
+            (Some(_), None) => return Some(Ordering::Less),
+            (None, Some(_)) => return Some(Ordering::Greater),
+            (None, None) => match ai.cmp(bi) {
+                Ordering::Equal => {}
+                ord => return Some(ord),
+            },
+        }
+    }
+    Some(Ordering::Equal)
+}
+
+pub fn compare_semver(a: &str, b: &str) -> Ordering {
+    try_compare_semver(a, b).unwrap_or(Ordering::Equal)
 }
 
 pub fn parse_sha256sums(text: &str) -> (HashMap<String, String>, Option<String>) {
@@ -301,9 +478,16 @@ pub fn parse_agent_update_status(val: &Value, wall_sec: i64) -> Option<NodeUpdat
         .get("err")
         .or_else(|| obj.get("error"))
         .and_then(|v| v.as_str())
-        .map(str::trim)
-        .filter(|s| !s.is_empty())
-        .map(|s| s.chars().take(512).collect());
+        .map(|s| {
+            s.chars()
+                .filter(|c| !c.is_control())
+                .collect::<String>()
+                .trim()
+                .chars()
+                .take(512)
+                .collect::<String>()
+        })
+        .filter(|s| !s.is_empty());
 
     let ts = obj
         .get("ts")
@@ -641,7 +825,25 @@ mod tests {
         assert_eq!(compare_semver("0.2.0", "0.2.1"), Ordering::Less);
         assert_eq!(compare_semver("v0.2.10", "0.2.2"), Ordering::Greater);
         assert_eq!(compare_semver("0.2.1-rc.1", "0.2.1"), Ordering::Less);
+        assert_eq!(compare_semver("0.2.1-1", "0.2.1-2"), Ordering::Less);
+        assert_eq!(compare_semver("0.2.1-2", "0.2.1-10"), Ordering::Less);
+        assert_eq!(compare_semver("0.2.1-10", "0.2.1-alpha"), Ordering::Less);
+        assert_eq!(
+            compare_semver("0.2.1-alpha", "0.2.1-alpha.1"),
+            Ordering::Less
+        );
+        assert_eq!(
+            compare_semver("0.2.1-alpha.1", "0.2.1-alpha.beta"),
+            Ordering::Less
+        );
+        assert_eq!(
+            compare_semver("0.2.1-alpha.beta", "0.2.1-beta.2"),
+            Ordering::Less
+        );
+        assert_eq!(compare_semver("0.2.1+build.99", "0.2.1"), Ordering::Equal);
         assert_eq!(compare_semver("v1.0.0", "1.0.0"), Ordering::Equal);
+        assert!(try_compare_semver("not-semver", "0.2.0").is_none());
+        assert_eq!(compare_semver("not-semver", "0.2.0"), Ordering::Equal);
     }
 
     #[test]
@@ -674,6 +876,25 @@ bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb *./dist/uniob-a
 
         let invalid = serde_json::json!({ "st": "bogus_state" });
         assert!(parse_agent_update_status(&invalid, 100).is_none());
+
+        let dirty_err = serde_json::json!({
+            "st": "error",
+            "ver": "0.2.1",
+            "err": " bad\n\x00\x1b[31merror\r\n"
+        });
+        let cleaned = parse_agent_update_status(&dirty_err, 100).unwrap();
+        assert_eq!(cleaned.error.as_deref(), Some("bad[31merror"));
+
+        let only_ctrl_err = serde_json::json!({
+            "st": "error",
+            "err": "\x00\x07\n\r"
+        });
+        assert_eq!(
+            parse_agent_update_status(&only_ctrl_err, 100)
+                .unwrap()
+                .error,
+            None
+        );
     }
 
     #[test]
@@ -714,6 +935,34 @@ bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb *./dist/uniob-a
             &base
         )
         .is_err());
+        for bad_url in [
+            "https://user:pass@mirror.example.com/releases",
+            "https://mirror.example.com/releases?token=1",
+            "https://mirror.example.com/releases#frag",
+            "https://mirror.example.com/rel\nease",
+            &format!("https://mirror.example.com/{}", "a".repeat(500)),
+            "http://localhost:8080/releases",
+            "http://127.0.0.1:8080/releases",
+            "http://10.0.0.1/releases",
+            "http://169.254.169.254/latest",
+            "http://192.0.2.1/releases",
+            "http://[::1]:8080/releases",
+            "http://[fe80::1]/releases",
+            "http://[fc00::1]/releases",
+        ] {
+            assert!(
+                parse_agent_update_config_patch(
+                    &serde_json::json!({ "custom_base_url": bad_url }),
+                    &base
+                )
+                .is_err(),
+                "expected custom_base_url rejection for {bad_url}"
+            );
+        }
+        assert_eq!(
+            normalize_base_url("https://Mirror.Example.COM:8443/v1/").unwrap(),
+            "https://mirror.example.com:8443/v1"
+        );
     }
 
     #[tokio::test]

@@ -1,4 +1,4 @@
-use crate::agent_update::parse_agent_update_config_patch;
+use crate::agent_update::parse_agent_update_config_patch_with_policy;
 use crate::alerts::{send_channel_notification, AlertNotificationPayload};
 use crate::auth::{
     build_clear_session_cookie, create_admin_session_cookie, extract_client_ip,
@@ -505,11 +505,13 @@ async fn export_bundle_handler(State(hub): State<HubState>) -> Response {
 
 async fn import_bundle_handler(
     State(hub): State<HubState>,
+    headers: HeaderMap,
     Json(payload): Json<ImportBundlePayload>,
 ) -> Response {
     match hub.db.import_bundle(&payload, now_sec()) {
         Ok(res) => {
-            hub.sync_ctrl_to_all_agents(false).await;
+            let origin = resolve_request_origin(&headers, &hub);
+            hub.sync_after_bundle_import(&origin).await;
             Json(res).into_response()
         }
         Err(e) => json_error(StatusCode::BAD_REQUEST, &e),
@@ -1634,7 +1636,11 @@ async fn put_agent_update_config_handler(
         Ok(c) => c,
         Err(e) => return json_error(StatusCode::INTERNAL_SERVER_ERROR, &e),
     };
-    let next = match parse_agent_update_config_patch(&body, &current) {
+    let next = match parse_agent_update_config_patch_with_policy(
+        &body,
+        &current,
+        hub.cfg.allow_insecure_ws_for_test,
+    ) {
         Ok(c) => c,
         Err(e) => return json_error(StatusCode::BAD_REQUEST, &e),
     };
