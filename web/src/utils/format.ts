@@ -44,7 +44,7 @@ export function formatBytesCompact(bytes: number | null | undefined): string {
   return `${val.toFixed(digits)} ${SIZE_UNITS[idx]}`;
 }
 
-export function formatRate(bps: number | null | undefined): string {
+export function formatBytesPerSec(bps: number | null | undefined): string {
   if (bps === null || bps === undefined || !Number.isFinite(bps) || bps <= 0) {
     return "0 B/s";
   }
@@ -56,6 +56,10 @@ export function formatRate(bps: number | null | undefined): string {
   const val = bps / Math.pow(k, idx);
   const digits = idx === 0 ? 0 : val >= 100 ? 0 : 1;
   return `${val.toFixed(digits)} ${SIZE_UNITS[idx]}/s`;
+}
+
+export function formatRate(bps: number | null | undefined): string {
+  return formatBytesPerSec(bps);
 }
 
 export function formatPercent(
@@ -169,55 +173,29 @@ export interface OsBadgeInfo {
 }
 
 export function parseOsBadge(os: string | null | undefined): OsBadgeInfo {
+  const neutralClass =
+    "bg-[var(--bg-subtle)] text-[var(--text-secondary)] border-[var(--border-hairline)]";
   if (!os) {
-    return {
-      short: "Linux",
-      colorClass:
-        "bg-slate-500/12 text-slate-700 dark:text-slate-300 border-slate-500/25",
-    };
+    return { short: "Linux", colorClass: neutralClass };
   }
   const lower = os.toLowerCase();
   if (lower.includes("debian")) {
-    return {
-      short: "Debian",
-      colorClass:
-        "bg-rose-500/12 text-rose-700 dark:text-rose-300 border-rose-500/25",
-    };
+    return { short: "Debian", colorClass: neutralClass };
   }
   if (lower.includes("ubuntu")) {
-    return {
-      short: "Ubuntu",
-      colorClass:
-        "bg-orange-500/12 text-orange-700 dark:text-orange-300 border-orange-500/25",
-    };
+    return { short: "Ubuntu", colorClass: neutralClass };
   }
   if (lower.includes("alpine")) {
-    return {
-      short: "Alpine",
-      colorClass:
-        "bg-sky-500/12 text-sky-700 dark:text-sky-300 border-sky-500/25",
-    };
+    return { short: "Alpine", colorClass: neutralClass };
   }
   if (lower.includes("arch")) {
-    return {
-      short: "Arch",
-      colorClass:
-        "bg-cyan-500/12 text-cyan-700 dark:text-cyan-300 border-cyan-500/25",
-    };
+    return { short: "Arch", colorClass: neutralClass };
   }
   if (lower.includes("rocky")) {
-    return {
-      short: "Rocky",
-      colorClass:
-        "bg-emerald-500/12 text-emerald-700 dark:text-emerald-300 border-emerald-500/25",
-    };
+    return { short: "Rocky", colorClass: neutralClass };
   }
   if (lower.includes("alma")) {
-    return {
-      short: "Alma",
-      colorClass:
-        "bg-indigo-500/12 text-indigo-700 dark:text-indigo-300 border-indigo-500/25",
-    };
+    return { short: "Alma", colorClass: neutralClass };
   }
   if (
     lower.includes("centos") ||
@@ -227,28 +205,26 @@ export function parseOsBadge(os: string | null | undefined): OsBadgeInfo {
   ) {
     return {
       short: lower.includes("fedora") ? "Fedora" : "RHEL",
-      colorClass:
-        "bg-blue-500/12 text-blue-700 dark:text-blue-300 border-blue-500/25",
+      colorClass: neutralClass,
     };
   }
   const firstWord = os.split(/[\s/(]/)[0] || "Linux";
   return {
     short: firstWord.slice(0, 12),
-    colorClass:
-      "bg-slate-500/12 text-slate-700 dark:text-slate-300 border-slate-500/25",
+    colorClass: neutralClass,
   };
 }
 
 export function getMetricBarColor(pct: number): string {
-  if (pct >= 90) return "bg-rose-500";
-  if (pct >= 70) return "bg-amber-500";
-  return "bg-emerald-500";
+  if (pct >= 88) return "bg-[var(--status-danger)]";
+  if (pct >= 75) return "bg-[var(--status-warn)]";
+  return "bg-[var(--accent)]";
 }
 
 export function getMetricTextColor(pct: number): string {
-  if (pct >= 90) return "text-rose-700 dark:text-rose-400";
-  if (pct >= 70) return "text-amber-700 dark:text-amber-400";
-  return "text-emerald-700 dark:text-emerald-400";
+  if (pct >= 88) return "text-[var(--status-danger-ink)]";
+  if (pct >= 75) return "text-[var(--status-warn-ink)]";
+  return "text-[var(--text-primary)]";
 }
 
 export function isNodeMuted(node: NodeSummary): boolean {
@@ -271,13 +247,13 @@ export function formatTrafficMode(mode: string | null | undefined): string {
 
 const ALERT_METRIC_LABELS: Record<string, string> = {
   offline: "服务器离线",
-  cpu: "处理器占用",
-  steal: "CPU 宿主机争抢",
+  cpu: "CPU 占用",
+  steal: "CPU 争抢",
   mem: "内存占用",
-  swap: "虚拟内存占用",
-  disk: "磁盘空间占用",
+  swap: "Swap 占用",
+  disk: "磁盘占用",
   traffic_pct: "月流量使用率",
-  watchdog: "自建中枢看门狗",
+  watchdog: "服务端连通性",
   firing: "告警中",
   FIRING: "告警中",
   resolved: "已恢复",
@@ -320,11 +296,11 @@ export function formatAlertCondition(
   operator: string,
   threshold: number,
 ): string {
-  const opText = operator === "gte" ? "达到或超过" : "超过";
+  const opText = operator === "gte" ? "≥" : ">";
   if (metric === "offline") {
-    return `离线${opText} ${formatDurationZh(threshold)}`;
+    return `离线 ${opText} ${formatDurationZh(threshold)}`;
   }
-  return `${formatAlertMetric(metric)}${opText} ${threshold}%`;
+  return `${formatAlertMetric(metric)} ${opText} ${threshold}%`;
 }
 
 export function formatCycleMonth(cycleKey: string | null | undefined): string {

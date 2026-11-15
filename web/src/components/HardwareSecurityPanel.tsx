@@ -1,33 +1,21 @@
-import { useEffect, useId, useRef, useState } from "react";
+import React, { useEffect, useState } from "react";
+import { BellOff, KeyRound, Loader2, Trash2 } from "lucide-react";
 import {
-  AlertTriangle,
-  ArrowDownToLine,
-  ArrowUpFromLine,
-  BellOff,
-  Check,
-  Copy,
-  Gauge,
-  HardDrive,
-  KeyRound,
-  Loader2,
-  Server,
-  ShieldCheck,
-  Trash2,
-  Volume2,
-  X,
-} from "lucide-react";
+  Badge,
+  Button,
+  Card,
+  CopyButton,
+  MetricBar,
+  formatBytesPerSec,
+} from "./ui/Primitives";
 import type { HorizonNode, RotateTokenResponse } from "../types";
 import {
   formatBytes,
-  formatCycleMonth,
-  formatNodeMetaLine,
-  formatRate,
   formatRelativeTime,
-  formatTimestamp,
   formatTrafficMode,
+  formatUptime,
   getDiskUsagePct,
-  getMetricBarColor,
-  getMetricTextColor,
+  getMemTotalBytes,
   getTrafficUsagePct,
   isNodeMuted,
 } from "../utils/format";
@@ -40,97 +28,54 @@ export interface HardwareSecurityPanelProps {
   onClose: () => void;
 }
 
-async function copyToClipboardSafe(text: string): Promise<boolean> {
-  if (typeof navigator !== "undefined" && navigator.clipboard?.writeText) {
-    try {
-      await navigator.clipboard.writeText(text);
-      return true;
-    } catch {
-      // Fallback below
-    }
-  }
-  if (typeof document === "undefined") return false;
-  const textarea = document.createElement("textarea");
-  textarea.value = text;
-  textarea.setAttribute("readonly", "");
-  textarea.style.position = "fixed";
-  textarea.style.left = "-9999px";
-  textarea.style.top = "-9999px";
-  document.body.appendChild(textarea);
-  textarea.select();
-  let ok = false;
-  try {
-    ok = document.execCommand("copy");
-  } catch {
-    ok = false;
-  } finally {
-    document.body.removeChild(textarea);
-  }
-  return ok;
-}
+function TrafficProgressRing({ valuePct }: { valuePct: number }): React.JSX.Element {
+  const size = 60;
+  const stroke = 5;
+  const radius = (size - stroke) / 2;
+  const circumference = 2 * Math.PI * radius;
+  const clamped = Math.max(0, Math.min(100, valuePct));
+  const dashOffset = circumference * (1 - clamped / 100);
 
-function InlineCopyButton({
-  text,
-  label,
-  ariaLabel,
-}: {
-  text: string;
-  label: string;
-  ariaLabel: string;
-}) {
-  const [copied, setCopied] = useState(false);
-  const [failed, setFailed] = useState(false);
-  const [announcement, setAnnouncement] = useState("");
-  const timerRef = useRef<number | null>(null);
-
-  useEffect(() => {
-    return () => {
-      if (timerRef.current !== null) window.clearTimeout(timerRef.current);
-    };
-  }, []);
-
-  const handleCopy = async () => {
-    if (timerRef.current !== null) {
-      window.clearTimeout(timerRef.current);
-      timerRef.current = null;
-    }
-    const ok = await copyToClipboardSafe(text);
-    setCopied(ok);
-    setFailed(!ok);
-    setAnnouncement(ok ? `${label}成功` : "复制失败，请手动选中复制");
-    timerRef.current = window.setTimeout(() => {
-      setCopied(false);
-      setFailed(false);
-      setAnnouncement("");
-      timerRef.current = null;
-    }, 2200);
-  };
+  const color =
+    clamped >= 88
+      ? "var(--status-danger)"
+      : clamped >= 75
+        ? "var(--status-warn)"
+        : "var(--accent)";
 
   return (
-    <span className="inline-flex items-center gap-1.5 shrink-0">
-      <button
-        type="button"
-        onClick={() => void handleCopy()}
-        aria-label={ariaLabel}
-        className={`inline-flex items-center gap-1 px-2.5 py-1 rounded-md text-xs font-medium border transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--accent-primary)] ${
-          copied
-            ? "border-emerald-500/45 bg-emerald-500/15 text-emerald-700 dark:text-emerald-300"
-            : failed
-              ? "border-rose-500/45 bg-rose-500/15 text-rose-700 dark:text-rose-300"
-              : "border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-800 text-slate-700 dark:text-slate-200 hover:bg-slate-50 dark:hover:bg-slate-700"
-        }`}
+    <div className="relative inline-flex h-[60px] w-[60px] shrink-0 items-center justify-center">
+      <svg
+        width={size}
+        height={size}
+        viewBox={`0 0 ${size} ${size}`}
+        aria-hidden="true"
+        className="-rotate-90"
       >
-        {copied ? (
-          <Check className="w-3.5 h-3.5 shrink-0" aria-hidden="true" />
-        ) : (
-          <Copy className="w-3.5 h-3.5 shrink-0" aria-hidden="true" />
-        )}
-        <span>{copied ? "已复制" : label}</span>
-      </button>
-      <span role="status" className="sr-only">
-        {announcement}
+        <circle
+          cx={size / 2}
+          cy={size / 2}
+          r={radius}
+          fill="none"
+          stroke="var(--bg-muted)"
+          strokeWidth={stroke}
+        />
+        <circle
+          cx={size / 2}
+          cy={size / 2}
+          r={radius}
+          fill="none"
+          stroke={color}
+          strokeWidth={stroke}
+          strokeDasharray={circumference}
+          strokeDashoffset={dashOffset}
+          strokeLinecap="round"
+        />
+      </svg>
+      <span className="font-mono-num absolute text-[12px] font-semibold">
+        {clamped.toFixed(0)}%
       </span>
-    </span>
+    </div>
   );
 }
 
@@ -141,9 +86,6 @@ export function HardwareSecurityPanel({
   onDeleteNode,
   onClose,
 }: HardwareSecurityPanelProps): React.JSX.Element {
-  const baseId = useId();
-  const diskCaptionId = `${baseId}-disk-caption`;
-
   const [mutingTarget, setMutingTarget] = useState<
     "30m" | "2h" | "unmute" | null
   >(null);
@@ -153,8 +95,7 @@ export function HardwareSecurityPanel({
   const [rotated, setRotated] = useState<RotateTokenResponse | null>(null);
   const [confirmDelete, setConfirmDelete] = useState(false);
 
-  const muting = mutingTarget !== null;
-  const busy = muting || rotating || deleting;
+  const busy = mutingTarget !== null || rotating || deleting;
 
   useEffect(() => {
     setRotated(null);
@@ -163,18 +104,14 @@ export function HardwareSecurityPanel({
   }, [node.id]);
 
   const muted = isNodeMuted(node);
+  const memTotal = getMemTotalBytes(node);
   const disks = node.metrics?.disks ?? [];
   const traffic = node.traffic;
-  const trafficPct = getTrafficUsagePct(traffic);
   const hasLimit = traffic.limit_bytes !== null && traffic.limit_bytes > 0;
-  const remainingBytes = hasLimit
-    ? Math.max(0, (traffic.limit_bytes ?? 0) - traffic.counted_bytes)
-    : null;
-
-  const metaLine = formatNodeMetaLine(node);
-  const hostAndIp = [node.hostname || "等待首次握手", node.ipv4_masked]
-    .filter(Boolean)
-    .join(" · ");
+  const fiveTb = 5 * 1024 * 1024 * 1024 * 1024;
+  const trafficPct = hasLimit
+    ? getTrafficUsagePct(traffic)
+    : Math.min(100, (traffic.counted_bytes / fiveTb) * 100);
 
   const handleMute = async (
     seconds: number | null,
@@ -186,7 +123,7 @@ export function HardwareSecurityPanel({
     try {
       await onMuteNode(node.id, seconds);
     } catch (err) {
-      setError(err instanceof Error ? err.message : "告警静默设置失败");
+      setError(err instanceof Error ? err.message : "操作失败");
     } finally {
       setMutingTarget(null);
     }
@@ -200,7 +137,7 @@ export function HardwareSecurityPanel({
       const res = await onRotateToken(node.id);
       setRotated(res);
     } catch (err) {
-      setError(err instanceof Error ? err.message : "轮换连接密钥失败");
+      setError(err instanceof Error ? err.message : "重置密钥失败");
     } finally {
       setRotating(false);
     }
@@ -214,7 +151,7 @@ export function HardwareSecurityPanel({
       await onDeleteNode(node.id);
       onClose();
     } catch (err) {
-      setError(err instanceof Error ? err.message : "移除服务器失败");
+      setError(err instanceof Error ? err.message : "删除失败");
       setDeleting(false);
     }
   };
@@ -224,535 +161,317 @@ export function HardwareSecurityPanel({
       {error && (
         <div
           role="alert"
-          className="surface-card rounded-xl px-4 py-3 border border-rose-500/40 bg-rose-500/10 flex items-center justify-between gap-3 text-xs text-rose-700 dark:text-rose-300"
+          style={{
+            backgroundColor: "var(--status-danger-bg)",
+            border: "1px solid var(--status-danger-border)",
+            color: "var(--status-danger-ink)",
+          }}
+          className="flex items-center justify-between gap-3 rounded-[9px] px-3.5 py-2 text-[12px]"
         >
-          <div className="flex items-center gap-2 min-w-0">
-            <AlertTriangle className="w-4 h-4 shrink-0" aria-hidden="true" />
-            <span className="break-words">{error}</span>
-          </div>
-          <button
-            type="button"
-            onClick={() => setError(null)}
-            aria-label="关闭错误提示"
-            className="p-1 rounded-md text-rose-600 dark:text-rose-300 hover:bg-rose-500/15 shrink-0"
-          >
-            <X className="w-3.5 h-3.5" aria-hidden="true" />
-          </button>
+          <span>{error}</span>
+          <Button variant="ghost" size="xs" onClick={() => setError(null)}>
+            关闭
+          </Button>
         </div>
       )}
 
-      {/* Bento 2-Column Hardware Specs & Traffic Billing Ledger */}
-      <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
-        {/* Column 1: Hardware & System Spec Sheet */}
-        <section className="surface-card rounded-xl p-4 space-y-3 min-w-0">
-          <div className="flex items-center justify-between gap-2">
-            <h3 className="text-xs font-semibold text-slate-800 dark:text-slate-100 flex items-center gap-1.5">
-              <Server
-                className="w-4 h-4 text-[var(--accent-primary)]"
-                aria-hidden="true"
-              />
-              <span>硬件与系统规格清单</span>
-            </h3>
-            <span className="text-[11px] font-mono-num text-slate-500 dark:text-slate-400 truncate">
-              {node.region_flag ? `${node.region_flag} ` : ""}
-              {metaLine || node.region_code}
-            </span>
+      {/* 1. Clean 4-Item Hardware Summary */}
+      <Card className="p-5">
+        <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
+          <div className="space-y-1">
+            <div
+              style={{ color: "var(--text-tertiary)" }}
+              className="text-[12px]"
+            >
+              操作系统
+            </div>
+            <div className="text-[13.5px] font-medium">
+              {[node.os || "Linux", node.arch].filter(Boolean).join(" · ")}
+            </div>
           </div>
 
-          <dl className="grid grid-cols-1 gap-y-2 text-xs">
-            <div className="flex items-center justify-between gap-3 py-1 border-b border-slate-200/70 dark:border-slate-800/80">
-              <dt className="text-slate-500 dark:text-slate-400 shrink-0">
-                {node.ipv4_masked ? "主机名 / 掩码 IP" : "主机名"}
-              </dt>
-              <dd className="font-mono-num text-slate-800 dark:text-slate-200 text-right truncate">
-                {hostAndIp}
-              </dd>
+          <div className="space-y-1">
+            <div
+              style={{ color: "var(--text-tertiary)" }}
+              className="text-[12px]"
+            >
+              处理器
             </div>
-            <div className="flex items-center justify-between gap-3 py-1 border-b border-slate-200/70 dark:border-slate-800/80">
-              <dt className="text-slate-500 dark:text-slate-400 shrink-0">
-                操作系统
-              </dt>
-              <dd className="font-mono-num text-slate-800 dark:text-slate-200 text-right truncate">
-                {node.os || "—"}
-              </dd>
+            <div
+              className="truncate text-[13.5px] font-medium"
+              title={node.cpu_model ?? undefined}
+            >
+              {node.cpu_model
+                ? `${node.cpu_model}${node.cpu_cores ? ` (${node.cpu_cores} 核)` : ""}`
+                : node.cpu_cores
+                  ? `${node.cpu_cores} 核`
+                  : "—"}
             </div>
-            <div className="flex items-center justify-between gap-3 py-1 border-b border-slate-200/70 dark:border-slate-800/80">
-              <dt className="text-slate-500 dark:text-slate-400 shrink-0">
-                内核版本 / 架构
-              </dt>
-              <dd className="font-mono-num text-slate-800 dark:text-slate-200 text-right truncate">
-                {[node.kernel, node.arch].filter(Boolean).join(" · ") || "—"}
-              </dd>
+          </div>
+
+          <div className="space-y-1">
+            <div
+              style={{ color: "var(--text-tertiary)" }}
+              className="text-[12px]"
+            >
+              内存容量
             </div>
-            <div className="flex items-center justify-between gap-3 py-1 border-b border-slate-200/70 dark:border-slate-800/80">
-              <dt className="text-slate-500 dark:text-slate-400 shrink-0">
-                处理器型号
-              </dt>
-              <dd
-                className="font-mono-num text-slate-800 dark:text-slate-200 text-right truncate"
-                title={node.cpu_model ?? undefined}
+            <div className="font-mono-num text-[13.5px] font-medium">
+              {memTotal > 0 ? formatBytes(memTotal) : "—"}
+              {node.swap_total !== null && node.swap_total > 0
+                ? ` · 交换 ${formatBytes(node.swap_total)}`
+                : ""}
+            </div>
+          </div>
+
+          <div className="space-y-1">
+            <div
+              style={{ color: "var(--text-tertiary)" }}
+              className="text-[12px]"
+            >
+              在线时长
+            </div>
+            <div className="font-mono-num text-[13.5px] font-medium">
+              {node.online
+                ? formatUptime(node.metrics?.up)
+                : `离线 · ${formatRelativeTime(node.last_seen_ts)}`}
+            </div>
+          </div>
+        </div>
+      </Card>
+
+      {/* 2. Monthly Traffic Ring + Bar */}
+      <Card className="p-5">
+        <div className="flex items-center gap-4">
+          <TrafficProgressRing valuePct={trafficPct} />
+          <div className="min-w-0 flex-1 space-y-2.5">
+            <div className="flex flex-wrap items-baseline justify-between gap-2">
+              <div className="flex items-center gap-2">
+                <h3 className="text-[13.5px] font-semibold">月度流量</h3>
+                <Badge tone="subtle">
+                  {formatTrafficMode(traffic.count_mode)}
+                </Badge>
+              </div>
+              <span
+                style={{ color: "var(--text-tertiary)" }}
+                className="font-mono-num text-[12px]"
               >
-                {node.cpu_model || "—"}
-                {node.cpu_cores ? ` (${node.cpu_cores} 核)` : ""}
-              </dd>
-            </div>
-            <div className="flex items-center justify-between gap-3 py-1 border-b border-slate-200/70 dark:border-slate-800/80">
-              <dt className="text-slate-500 dark:text-slate-400 shrink-0">
-                物理内存 / Swap
-              </dt>
-              <dd className="font-mono-num text-slate-800 dark:text-slate-200 text-right">
-                {node.mem_total ? formatBytes(node.mem_total) : "—"} /{" "}
-                {node.swap_total !== null ? formatBytes(node.swap_total) : "—"}
-              </dd>
-            </div>
-            <div className="flex items-center justify-between gap-3 py-1 border-b border-slate-200/70 dark:border-slate-800/80">
-              <dt className="text-slate-500 dark:text-slate-400 shrink-0">
-                探针版本 / /proc 权限
-              </dt>
-              <dd className="font-mono-num text-slate-800 dark:text-slate-200 text-right">
-                {node.agent_version ? `v${node.agent_version}` : "未安装"} ·{" "}
-                <span
-                  className={
-                    node.proc_enabled !== false
-                      ? "text-emerald-600 dark:text-emerald-400"
-                      : "text-amber-600 dark:text-amber-400"
-                  }
-                >
-                  {node.proc_enabled !== false ? "允许进程透视" : "隐私锁定已禁用"}
-                </span>
-              </dd>
-            </div>
-            <div className="flex items-center justify-between gap-3 py-1">
-              <dt className="text-slate-500 dark:text-slate-400 shrink-0">
-                最近心跳时间
-              </dt>
-              <dd className="font-mono-num text-slate-800 dark:text-slate-200 text-right">
-                {formatRelativeTime(node.last_seen_ts)} (
-                {formatTimestamp(node.last_seen_ts)})
-              </dd>
-            </div>
-          </dl>
-
-          {Array.isArray(node.tags) && node.tags.length > 0 && (
-            <div className="pt-1 flex flex-wrap items-center gap-1.5">
-              {node.tags.map((tag) => (
-                <span
-                  key={tag}
-                  className="px-2 py-0.5 rounded-md text-[11px] font-mono-num bg-slate-100 dark:bg-slate-800/80 text-slate-600 dark:text-slate-300 border border-slate-200 dark:border-slate-700/80"
-                >
-                  #{tag}
-                </span>
-              ))}
-            </div>
-          )}
-        </section>
-
-        {/* Column 2: Monthly Traffic Billing Ledger */}
-        <section className="surface-card rounded-xl p-4 space-y-3 min-w-0 flex flex-col justify-between">
-          <div className="space-y-3">
-            <div className="flex items-center justify-between gap-2">
-              <h3 className="text-xs font-semibold text-slate-800 dark:text-slate-100 flex items-center gap-1.5">
-                <Gauge
-                  className="w-4 h-4 text-[var(--accent-primary)]"
-                  aria-hidden="true"
-                />
-                <span>月度流量计费账本明细</span>
-              </h3>
-              <span className="px-2 py-0.5 rounded-md text-[11px] font-mono-num font-medium bg-slate-100 dark:bg-slate-800 text-slate-700 dark:text-slate-200 border border-slate-200 dark:border-slate-700">
-                {formatTrafficMode(traffic.count_mode)}
+                剩余 {traffic.days_remaining} 天
               </span>
             </div>
 
-            {/* Quota Progress Block */}
-            <div className="rounded-lg border border-slate-200/80 dark:border-slate-800/80 bg-slate-50/70 dark:bg-slate-900/50 p-3 space-y-2">
-              <div className="flex items-baseline justify-between gap-2 font-mono-num">
-                <div>
-                  <div className="text-[11px] text-slate-500 dark:text-slate-400">
-                    本周期已计费流量
-                  </div>
-                  <div className="text-base font-bold text-slate-900 dark:text-slate-50">
-                    {formatBytes(traffic.counted_bytes)}
-                    <span className="text-xs font-normal text-slate-500 dark:text-slate-400">
-                      {" "}
-                      /{" "}
-                      {hasLimit
-                        ? formatBytes(traffic.limit_bytes)
-                        : "无配额上限"}
-                    </span>
-                  </div>
-                </div>
-                <div className="text-right">
-                  {hasLimit ? (
-                    <span
-                      className={`text-sm font-bold ${getMetricTextColor(trafficPct)}`}
-                    >
-                      {trafficPct.toFixed(1)}%
-                    </span>
-                  ) : (
-                    <span className="text-xs font-medium text-emerald-600 dark:text-emerald-400">
-                      不限量
-                    </span>
-                  )}
-                </div>
-              </div>
-
-              {hasLimit && (
-                <div className="h-2 w-full rounded-full bg-slate-200 dark:bg-slate-800 overflow-hidden">
-                  <div
-                    className={`h-full rounded-full transition-[width] duration-300 ${getMetricBarColor(trafficPct)}`}
-                    style={{ width: `${Math.min(100, trafficPct)}%` }}
-                  />
-                </div>
-              )}
-            </div>
-
-            <dl className="grid grid-cols-1 gap-y-2 text-xs">
-              <div className="flex items-center justify-between gap-3 py-1 border-b border-slate-200/70 dark:border-slate-800/80">
-                <dt className="text-slate-500 dark:text-slate-400">账单周期</dt>
-                <dd className="font-mono-num text-slate-800 dark:text-slate-200">
-                  {formatCycleMonth(traffic.cycle_key)}
-                </dd>
-              </div>
-              <div className="flex items-center justify-between gap-3 py-1 border-b border-slate-200/70 dark:border-slate-800/80">
-                <dt className="text-slate-500 dark:text-slate-400">
-                  重置日与剩余天数
-                </dt>
-                <dd className="font-mono-num text-slate-800 dark:text-slate-200">
-                  每月 {traffic.reset_day} 号重置 · 剩余{" "}
-                  <strong>{traffic.days_remaining}</strong> 天
-                </dd>
-              </div>
-              <div className="flex items-center justify-between gap-3 py-1 border-b border-slate-200/70 dark:border-slate-800/80">
-                <dt className="text-slate-500 dark:text-slate-400">
-                  本周期剩余可用配额
-                </dt>
-                <dd className="font-mono-num text-slate-800 dark:text-slate-200">
-                  {remainingBytes !== null
-                    ? formatBytes(remainingBytes)
-                    : "无限制"}
-                </dd>
-              </div>
-              <div className="flex items-center justify-between gap-3 py-1">
-                <dt className="text-slate-500 dark:text-slate-400">
-                  下行 / 上行累计明细
-                </dt>
-                <dd className="font-mono-num text-slate-800 dark:text-slate-200 flex items-center gap-3">
-                  <span className="inline-flex items-center gap-1">
-                    <ArrowDownToLine
-                      className="w-3 h-3 text-cyan-500"
-                      aria-hidden="true"
-                    />
-                    {formatBytes(traffic.rx_bytes)}
-                  </span>
-                  <span className="inline-flex items-center gap-1">
-                    <ArrowUpFromLine
-                      className="w-3 h-3 text-indigo-500"
-                      aria-hidden="true"
-                    />
-                    {formatBytes(traffic.tx_bytes)}
-                  </span>
-                </dd>
-              </div>
-            </dl>
-          </div>
-        </section>
-      </div>
-
-      {/* Mounted Disk Partitions Real-Time Throughput Table */}
-      <section className="surface-card rounded-xl overflow-hidden">
-        <div className="px-4 py-3 border-b border-slate-200/80 dark:border-slate-800/80 flex items-center justify-between gap-2">
-          <h3 className="text-xs font-semibold text-slate-800 dark:text-slate-100 flex items-center gap-1.5">
-            <HardDrive
-              className="w-4 h-4 text-[var(--accent-primary)]"
-              aria-hidden="true"
+            <MetricBar
+              valuePct={trafficPct}
+              valueLabel={
+                hasLimit
+                  ? `${formatBytes(traffic.counted_bytes)} / ${formatBytes(traffic.limit_bytes)}`
+                  : formatBytes(traffic.counted_bytes)
+              }
+              thickness={4}
             />
-            <span>挂载磁盘分区与实时吞吐 ({disks.length})</span>
-          </h3>
-          <span className="text-[11px] font-mono-num text-slate-500 dark:text-slate-400">
-            实时块设备 I/O 速率
-          </span>
-        </div>
 
-        {disks.length === 0 ? (
-          <div className="p-6 text-center text-xs text-slate-500 dark:text-slate-400 font-mono-num">
-            {node.online
-              ? "暂无挂载磁盘分区上报数据"
-              : "节点离线，暂无挂载磁盘实时吞吐快照"}
+            <div
+              style={{ color: "var(--text-tertiary)" }}
+              className="font-mono-num flex flex-wrap items-center gap-3 text-[11.5px]"
+            >
+              <span>↓ {formatBytes(traffic.rx_bytes)}</span>
+              <span>↑ {formatBytes(traffic.tx_bytes)}</span>
+            </div>
           </div>
-        ) : (
-          <div
-            tabIndex={0}
-            role="region"
-            aria-labelledby={diskCaptionId}
-            className="overflow-x-auto focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-[var(--accent-primary)]"
+        </div>
+      </Card>
+
+      {/* 3. Visual Disk Mount Bars */}
+      <Card className="space-y-4 p-5">
+        <h3 className="text-[13.5px] font-semibold">磁盘空间</h3>
+        {disks.length === 0 ? (
+          <p
+            style={{ color: "var(--text-tertiary)" }}
+            className="text-[12.5px]"
           >
-            <table className="w-full text-left border-collapse text-xs">
-              <caption id={diskCaptionId} className="sr-only">
-                {node.name} 挂载磁盘分区容量与实时读写吞吐表
-              </caption>
-              <thead className="bg-slate-50/90 dark:bg-slate-900/70 border-b border-slate-200 dark:border-slate-800 text-[11px] text-slate-500 dark:text-slate-400 font-mono-num">
-                <tr>
-                  <th scope="col" className="py-2 px-3">
-                    挂载路径
-                  </th>
-                  <th scope="col" className="py-2 px-3">
-                    文件系统
-                  </th>
-                  <th scope="col" className="py-2 px-3 min-w-[150px]">
-                    空间使用率
-                  </th>
-                  <th scope="col" className="py-2 px-3 text-right">
-                    已用 / 总容量
-                  </th>
-                  <th scope="col" className="py-2 px-3 text-right">
-                    读取速率
-                  </th>
-                  <th scope="col" className="py-2 px-3 text-right">
-                    写入速率
-                  </th>
-                </tr>
-              </thead>
-              <tbody className="divide-y divide-slate-200/70 dark:divide-slate-800/80 font-mono-num">
-                {disks.map((d, idx) => {
-                  const pct = getDiskUsagePct(d);
-                  return (
-                    <tr
-                      key={`${d.mp}-${d.fs}-${idx}`}
-                      className="hover:bg-slate-500/[0.04]"
-                    >
-                      <td className="py-2.5 px-3 font-semibold text-slate-900 dark:text-slate-100 whitespace-nowrap">
-                        {d.mp}
-                      </td>
-                      <td className="py-2.5 px-3 text-slate-500 dark:text-slate-400 whitespace-nowrap">
-                        {d.fs}
-                      </td>
-                      <td className="py-2.5 px-3">
-                        <div className="flex items-center gap-2">
-                          <div className="flex-1 h-1.5 rounded-full bg-slate-200 dark:bg-slate-800 overflow-hidden">
-                            <div
-                              className={`h-full rounded-full ${getMetricBarColor(pct)}`}
-                              style={{ width: `${Math.min(100, pct)}%` }}
-                            />
-                          </div>
-                          <span
-                            className={`w-12 text-right font-semibold ${getMetricTextColor(pct)}`}
-                          >
-                            {pct.toFixed(1)}%
-                          </span>
-                        </div>
-                      </td>
-                      <td className="py-2.5 px-3 text-right text-slate-700 dark:text-slate-200 whitespace-nowrap">
+            暂无磁盘分区数据
+          </p>
+        ) : (
+          <div className="space-y-3.5">
+            {disks.map((d, idx) => {
+              const pct = getDiskUsagePct(d);
+              return (
+                <div key={`${d.mp}-${d.fs}-${idx}`} className="space-y-1.5">
+                  <div className="flex flex-wrap items-center justify-between gap-2 text-[12.5px]">
+                    <div className="flex items-center gap-2">
+                      <span className="font-mono font-medium">{d.mp}</span>
+                      <Badge tone="subtle">{d.fs}</Badge>
+                    </div>
+                    <div className="font-mono-num flex items-center gap-3">
+                      {(d.r_bps > 0 || d.w_bps > 0) && (
+                        <span
+                          style={{ color: "var(--text-tertiary)" }}
+                          className="text-[11.5px]"
+                        >
+                          读 {formatBytesPerSec(d.r_bps)} · 写{" "}
+                          {formatBytesPerSec(d.w_bps)}
+                        </span>
+                      )}
+                      <span className="font-medium">
                         {formatBytes(d.used)} / {formatBytes(d.total)}
-                      </td>
-                      <td className="py-2.5 px-3 text-right text-emerald-700 dark:text-emerald-400 whitespace-nowrap">
-                        {formatRate(d.r_bps)}
-                      </td>
-                      <td className="py-2.5 px-3 text-right text-orange-600 dark:text-orange-400 whitespace-nowrap">
-                        {formatRate(d.w_bps)}
-                      </td>
-                    </tr>
-                  );
-                })}
-              </tbody>
-            </table>
+                      </span>
+                    </div>
+                  </div>
+                  <MetricBar valuePct={pct} thickness={4} />
+                </div>
+              );
+            })}
           </div>
         )}
-      </section>
+      </Card>
 
-      {/* Maintenance Mute Panel */}
-      <section className="surface-card rounded-xl p-4">
+      {/* 4. Compact Node Management Actions */}
+      <Card className="space-y-3.5 p-5">
         <div className="flex flex-wrap items-center justify-between gap-3">
-          <div className="space-y-1">
-            <h3 className="text-xs font-semibold text-slate-800 dark:text-slate-100 flex items-center gap-1.5">
-              {muted ? (
-                <BellOff
-                  className="w-4 h-4 text-amber-500"
-                  aria-hidden="true"
-                />
-              ) : (
-                <Volume2
-                  className="w-4 h-4 text-emerald-500"
-                  aria-hidden="true"
-                />
-              )}
-              <span>维护静默与告警抑制</span>
-            </h3>
-            <p className="text-xs text-slate-500 dark:text-slate-400 font-mono-num">
-              {muted && node.mute_until
-                ? `维护静默生效中：所有告警推送将暂停至 ${formatTimestamp(node.mute_until)}`
-                : "告警通知正常激活：达到阈值或离线时将实时触发路由通知。"}
-            </p>
+          <div className="flex items-center gap-2">
+            <h3 className="text-[13.5px] font-semibold">快捷操作</h3>
+            {muted && <Badge tone="warn">告警静音中</Badge>}
           </div>
 
           <div className="flex flex-wrap items-center gap-2">
-            <button
-              type="button"
+            <Button
+              variant="secondary"
+              size="xs"
               disabled={busy}
               onClick={() => void handleMute(1800, "30m")}
-              className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-medium border border-amber-500/40 bg-amber-500/10 text-amber-700 dark:text-amber-300 hover:bg-amber-500/20 disabled:opacity-50 disabled:cursor-not-allowed transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-amber-500"
+              icon={
+                mutingTarget === "30m" ? (
+                  <Loader2
+                    className="h-3 w-3 animate-spin"
+                    aria-hidden="true"
+                  />
+                ) : (
+                  <BellOff className="h-3 w-3" aria-hidden="true" />
+                )
+              }
             >
-              {mutingTarget === "30m" && (
-                <Loader2 className="w-3.5 h-3.5 animate-spin" aria-hidden="true" />
-              )}
-              <span>静默 30 分钟</span>
-            </button>
-            <button
-              type="button"
+              静音 30 分钟
+            </Button>
+
+            <Button
+              variant="secondary"
+              size="xs"
               disabled={busy}
               onClick={() => void handleMute(7200, "2h")}
-              className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-medium border border-amber-500/40 bg-amber-500/10 text-amber-700 dark:text-amber-300 hover:bg-amber-500/20 disabled:opacity-50 disabled:cursor-not-allowed transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-amber-500"
             >
-              {mutingTarget === "2h" && (
-                <Loader2 className="w-3.5 h-3.5 animate-spin" aria-hidden="true" />
-              )}
-              <span>静默 2 小时</span>
-            </button>
-            <button
-              type="button"
-              disabled={!muted || busy}
-              onClick={() => void handleMute(null, "unmute")}
-              className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-medium border border-emerald-500/40 bg-emerald-500/10 text-emerald-700 dark:text-emerald-300 hover:bg-emerald-500/20 disabled:opacity-40 disabled:cursor-not-allowed transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-500"
-            >
-              {mutingTarget === "unmute" && (
-                <Loader2 className="w-3.5 h-3.5 animate-spin" aria-hidden="true" />
-              )}
-              <span>取消静默</span>
-            </button>
-          </div>
-        </div>
-      </section>
+              静音 2 小时
+            </Button>
 
-      {/* Token Rotation Security Panel */}
-      <section className="surface-card rounded-xl p-4 space-y-3">
-        <div className="flex flex-wrap items-center justify-between gap-3">
-          <div className="space-y-1">
-            <h3 className="text-xs font-semibold text-slate-800 dark:text-slate-100 flex items-center gap-1.5">
-              <ShieldCheck
-                className="w-4 h-4 text-[var(--accent-primary)]"
-                aria-hidden="true"
-              />
-              <span>连接密钥轮换与探针凭据安全</span>
-            </h3>
-            <p className="text-xs text-slate-500 dark:text-slate-400">
-              轮换后旧的 WebSocket Bearer Token 将立即吊销，仅一次性显示新密钥与重装命令。
-            </p>
-          </div>
-
-          <button
-            type="button"
-            disabled={busy}
-            onClick={() => void handleRotate()}
-            className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-semibold border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-800/80 text-slate-800 dark:text-slate-100 hover:bg-slate-50 dark:hover:bg-slate-700/80 disabled:opacity-50 disabled:cursor-not-allowed transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--accent-primary)]"
-          >
-            {rotating ? (
-              <Loader2
-                className="w-3.5 h-3.5 animate-spin text-[var(--accent-primary)]"
-                aria-hidden="true"
-              />
-            ) : (
-              <KeyRound
-                className="w-3.5 h-3.5 text-[var(--accent-primary)]"
-                aria-hidden="true"
-              />
+            {muted && (
+              <Button
+                variant="accent"
+                size="xs"
+                disabled={busy}
+                onClick={() => void handleMute(null, "unmute")}
+              >
+                取消静音
+              </Button>
             )}
-            <span>{rotating ? "轮换中..." : "轮换连接密钥"}</span>
-          </button>
+
+            <Button
+              variant="secondary"
+              size="xs"
+              disabled={busy}
+              onClick={() => void handleRotate()}
+              icon={
+                rotating ? (
+                  <Loader2
+                    className="h-3 w-3 animate-spin"
+                    aria-hidden="true"
+                  />
+                ) : (
+                  <KeyRound className="h-3 w-3" aria-hidden="true" />
+                )
+              }
+            >
+              重置密钥
+            </Button>
+
+            <Button
+              variant="danger"
+              size="xs"
+              disabled={busy || confirmDelete}
+              onClick={() => setConfirmDelete(true)}
+              icon={<Trash2 className="h-3 w-3" aria-hidden="true" />}
+            >
+              删除
+            </Button>
+          </div>
         </div>
 
         {rotated && (
-          <div className="rounded-lg border border-sky-500/35 bg-sky-500/[0.08] p-3.5 space-y-2.5 text-xs">
-            <div className="flex flex-wrap items-center justify-between gap-2">
-              <span className="font-semibold text-sky-800 dark:text-sky-300">
-                已生成一次性新凭据（旧密钥已失效，请尽快在目标主机更新）：
-              </span>
-            </div>
-
-            <div className="flex flex-wrap items-center justify-between gap-2 rounded-lg bg-slate-950 text-slate-100 p-2.5 border border-slate-800">
-              <code className="flex-1 min-w-0 font-mono-num text-[11px] break-all">
-                {rotated.install_cmd}
-              </code>
-              <InlineCopyButton
-                text={rotated.install_cmd}
-                label="复制重装命令"
-                ariaLabel="复制一次性重装命令"
+          <div
+            style={{
+              backgroundColor: "var(--bg-subtle)",
+              border: "1px solid var(--border-subtle)",
+            }}
+            className="space-y-2.5 rounded-[8px] p-3"
+          >
+            <div className="flex items-center justify-between gap-2">
+              <span className="text-[12px] font-medium">新安装命令</span>
+              <CopyButton
+                value={rotated.install_cmd}
+                label="复制命令"
+                copiedLabel="已复制"
               />
             </div>
-
-            <div className="flex flex-wrap items-center justify-between gap-2 rounded-lg border border-slate-200 dark:border-slate-700/80 bg-white/80 dark:bg-slate-900/70 px-3 py-2">
-              <span className="font-mono-num text-[11px] text-slate-700 dark:text-slate-300 break-all">
-                新 Agent Token：
-                <strong className="text-slate-900 dark:text-slate-100">
-                  {rotated.agent_token}
-                </strong>
-              </span>
-              <InlineCopyButton
-                text={rotated.agent_token}
-                label="复制密钥"
-                ariaLabel="复制新连接密钥"
-              />
-            </div>
+            <code
+              style={{ color: "var(--text-secondary)" }}
+              className="block font-mono text-[11px] break-all"
+            >
+              {rotated.install_cmd}
+            </code>
           </div>
         )}
-      </section>
-
-      {/* Stable Two-Step Remove Server Zone (Fixed trigger position prevents misclicks) */}
-      <section className="surface-card rounded-xl p-4 border border-rose-500/25 bg-rose-500/[0.03] space-y-3">
-        <div className="flex flex-wrap items-center justify-between gap-3">
-          <div className="space-y-0.5">
-            <h3 className="text-xs font-semibold text-rose-700 dark:text-rose-300 flex items-center gap-1.5">
-              <AlertTriangle className="w-4 h-4 shrink-0" aria-hidden="true" />
-              <span>移除服务器（危险操作）</span>
-            </h3>
-            <p className="text-xs text-slate-500 dark:text-slate-400">
-              永久删除节点注册信息与关联遥测归档；此操作不可逆转。
-            </p>
-          </div>
-
-          <button
-            type="button"
-            disabled={confirmDelete || busy}
-            onClick={() => setConfirmDelete(true)}
-            className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-semibold border border-rose-500/45 bg-rose-500/10 text-rose-700 dark:text-rose-300 hover:bg-rose-500/20 disabled:opacity-50 disabled:cursor-not-allowed transition-colors shrink-0 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-rose-500"
-          >
-            <Trash2 className="w-3.5 h-3.5" aria-hidden="true" />
-            <span>{confirmDelete ? "待下方二次确认" : "移除服务器"}</span>
-          </button>
-        </div>
 
         {confirmDelete && (
-          <div className="rounded-lg border border-rose-500/40 bg-rose-500/10 px-3.5 py-2.5 flex flex-wrap items-center justify-between gap-3">
-            <span className="text-xs font-medium text-rose-800 dark:text-rose-200">
-              确认永久移除节点{" "}
-              <strong className="font-mono-num">{node.name}</strong>{" "}
-              并清空监控账本？
+          <div
+            style={{
+              backgroundColor: "var(--status-danger-bg)",
+              border: "1px solid var(--status-danger-border)",
+            }}
+            className="flex flex-wrap items-center justify-between gap-3 rounded-[8px] px-3.5 py-2.5"
+          >
+            <span
+              style={{ color: "var(--status-danger-ink)" }}
+              className="text-[12.5px] font-medium"
+            >
+              确认永久删除 {node.name}？
             </span>
-            <div className="flex items-center gap-2 ml-auto">
-              <button
-                type="button"
+            <div className="flex items-center gap-2">
+              <Button
+                variant="secondary"
+                size="xs"
                 disabled={deleting}
                 onClick={() => setConfirmDelete(false)}
-                className="px-3 py-1 rounded-md text-xs font-medium border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-900 text-slate-700 dark:text-slate-200 hover:bg-slate-50 dark:hover:bg-slate-800 disabled:opacity-50"
               >
-                取消操作
-              </button>
-              <button
-                type="button"
+                取消
+              </Button>
+              <Button
+                variant="danger"
+                size="xs"
                 disabled={deleting}
                 onClick={() => void handleConfirmDelete()}
-                className="inline-flex items-center gap-1.5 px-3 py-1 rounded-md text-xs font-semibold bg-rose-600 text-white hover:bg-rose-500 disabled:opacity-60 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-rose-500"
+                icon={
+                  deleting ? (
+                    <Loader2
+                      className="h-3 w-3 animate-spin"
+                      aria-hidden="true"
+                    />
+                  ) : undefined
+                }
               >
-                {deleting && (
-                  <Loader2
-                    className="w-3.5 h-3.5 animate-spin"
-                    aria-hidden="true"
-                  />
-                )}
-                <span>{deleting ? "正在移除..." : "确认永久移除"}</span>
-              </button>
+                确认删除
+              </Button>
             </div>
           </div>
         )}
-      </section>
+      </Card>
     </div>
   );
 }

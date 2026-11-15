@@ -5,6 +5,22 @@ import { Check, Copy, X } from "lucide-react";
  * Telemetry Rate & Unit Formatting Helpers
  * ============================================================================ */
 
+const RATE_UNITS = ["B/s", "KB/s", "MB/s", "GB/s", "TB/s"];
+
+export function formatBytesPerSec(bps: number | null | undefined): string {
+  if (bps === null || bps === undefined || !Number.isFinite(bps) || bps <= 0) {
+    return "0 B/s";
+  }
+  const k = 1024;
+  const idx = Math.min(
+    Math.floor(Math.log(bps) / Math.log(k)),
+    RATE_UNITS.length - 1,
+  );
+  const val = bps / Math.pow(k, idx);
+  const digits = idx === 0 ? 0 : val >= 100 ? 0 : 1;
+  return `${val.toFixed(digits)} ${RATE_UNITS[idx]}`;
+}
+
 export function formatRateKbps(kbps: number): string {
   if (!Number.isFinite(kbps) || kbps <= 0) return "0 KB/s";
   if (kbps < 1000) {
@@ -18,9 +34,43 @@ export function formatRateKbps(kbps: number): string {
   return `${gbps.toFixed(2)} GB/s`;
 }
 
-function computeNiceCeiling(rawMax: number, isKbpsRate: boolean): number {
-  const safe = Math.max(rawMax, isKbpsRate ? 64 : 1);
-  if (isKbpsRate) {
+function computeNiceCeiling(
+  rawMax: number,
+  rateMode: "none" | "bps" | "kbps",
+): number {
+  if (rateMode === "bps") {
+    const safeBps = Math.max(rawMax, 10 * 1024);
+    const kb = 1024;
+    const mb = 1024 * 1024;
+    const gb = 1024 * 1024 * 1024;
+    const bpsSteps = [
+      10 * kb,
+      25 * kb,
+      50 * kb,
+      100 * kb,
+      250 * kb,
+      500 * kb,
+      1 * mb,
+      2 * mb,
+      5 * mb,
+      10 * mb,
+      20 * mb,
+      50 * mb,
+      100 * mb,
+      250 * mb,
+      500 * mb,
+      1 * gb,
+      2 * gb,
+      5 * gb,
+      10 * gb,
+    ];
+    for (const step of bpsSteps) {
+      if (safeBps <= step * 0.92) return step;
+    }
+  }
+
+  const safe = Math.max(rawMax, rateMode === "kbps" ? 64 : 1);
+  if (rateMode === "kbps") {
     const rateSteps = [
       100,
       250,
@@ -41,6 +91,7 @@ function computeNiceCeiling(rawMax: number, isKbpsRate: boolean): number {
       if (safe <= step * 0.92) return step;
     }
   }
+
   const exp = Math.floor(Math.log10(safe));
   const base = Math.pow(10, exp);
   const norm = safe / base;
@@ -414,6 +465,7 @@ export function Badge({
 
 /* ============================================================================
  * 3. StatusDot
+ * Distinct geometry per state (circle / hollow ring / diamond) per WCAG 1.4.1
  * ============================================================================ */
 export type StatusDotTone = "ok" | "warn" | "danger" | "idle" | "accent";
 
@@ -588,7 +640,12 @@ export function Sparkline({
 }: SparklineProps): React.JSX.Element {
   const gradId = useId();
   const [wrapRef, pxWidth] = useMeasuredWidth(width);
-  const safe = data.length >= 2 ? data : [0, 0];
+  const safe =
+    data.length >= 2
+      ? data
+      : data.length === 1
+        ? [data[0]!, data[0]!]
+        : [0, 0];
   const computedMax = Math.max(max ?? 0, ...safe, 1);
   const padY = 2;
   const usableH = Math.max(4, height - padY * 2);
@@ -698,6 +755,7 @@ export interface ObservabilityChartProps {
   height?: number;
   yMax?: number;
   yUnit?: string;
+  isRateBps?: boolean;
   isRateKbps?: boolean;
   formatValue?: (val: number) => string;
   formatYTick?: (val: number) => string;
@@ -716,6 +774,7 @@ export function ObservabilityChart({
   height = 88,
   yMax,
   yUnit = "",
+  isRateBps = false,
   isRateKbps = false,
   formatValue,
   formatYTick,
@@ -738,6 +797,13 @@ export function ObservabilityChart({
     onHoverIndexChange?.(idx);
   };
 
+  const rateMode: "none" | "bps" | "kbps" =
+    isRateBps || yUnit === "B/s"
+      ? "bps"
+      : isRateKbps || yUnit === "KB/s"
+        ? "kbps"
+        : "none";
+
   const pointCount = Math.max(
     2,
     ...series.map((s) => s.data.length),
@@ -745,24 +811,25 @@ export function ObservabilityChart({
 
   const resolvedValueFmt = useMemo(() => {
     if (formatValue) return formatValue;
-    if (isRateKbps || yUnit === "KB/s") return formatRateKbps;
+    if (rateMode === "bps") return formatBytesPerSec;
+    if (rateMode === "kbps") return formatRateKbps;
     return (v: number) =>
       `${Number.isInteger(v) ? v : v.toFixed(1)}${yUnit}`;
-  }, [formatValue, isRateKbps, yUnit]);
+  }, [formatValue, rateMode, yUnit]);
 
   const resolvedTickFmt = useMemo(() => {
     if (formatYTick) return formatYTick;
-    if (isRateKbps || yUnit === "KB/s") {
-      return (v: number) => {
-        if (v <= 0) return "0";
-        return formatRateKbps(v);
-      };
+    if (rateMode === "bps") {
+      return (v: number) => (v <= 0 ? "0" : formatBytesPerSec(v));
+    }
+    if (rateMode === "kbps") {
+      return (v: number) => (v <= 0 ? "0" : formatRateKbps(v));
     }
     return (v: number) => {
       if (v <= 0) return `0${yUnit}`;
       return `${Number.isInteger(v) ? v : v.toFixed(0)}${yUnit}`;
     };
-  }, [formatYTick, isRateKbps, yUnit]);
+  }, [formatYTick, rateMode, yUnit]);
 
   const ceiling = useMemo(() => {
     if (yMax !== undefined && yMax > 0) return yMax;
@@ -772,12 +839,12 @@ export function ObservabilityChart({
         if (Number.isFinite(v) && v > peak) peak = v;
       }
     }
-    return computeNiceCeiling(peak, isRateKbps || yUnit === "KB/s");
-  }, [series, yMax, isRateKbps, yUnit]);
+    return computeNiceCeiling(peak, rateMode);
+  }, [series, yMax, rateMode]);
 
   const axisMode =
     yAxisPlacement ?? (height >= 112 && showYAxis ? "left" : "overlay");
-  const padLeft = showYAxis && axisMode === "left" ? 54 : 2;
+  const padLeft = showYAxis && axisMode === "left" ? 56 : 2;
   const padRight = 2;
   const padTop = 6;
   const padBottom = showXAxisTicks ? 18 : 4;
@@ -789,7 +856,10 @@ export function ObservabilityChart({
   const xForIndex = (idx: number) =>
     padLeft + (idx / Math.max(1, pointCount - 1)) * plotW;
   const yForValue = (val: number) => {
-    const clamped = Math.max(0, Math.min(ceiling, Number.isFinite(val) ? val : 0));
+    const clamped = Math.max(
+      0,
+      Math.min(ceiling, Number.isFinite(val) ? val : 0),
+    );
     return padTop + plotH - (clamped / ceiling) * plotH;
   };
 
@@ -814,26 +884,39 @@ export function ObservabilityChart({
 
   const xTickLabels = useMemo(() => {
     if (!showXAxisTicks) return null;
-    if (timeLabels && timeLabels.length >= pointCount) {
-      const midIdx = Math.floor((pointCount - 1) / 2);
+    if (timeLabels && timeLabels.length > 0) {
+      const lastIdx = timeLabels.length - 1;
+      const midIdx = Math.floor(lastIdx / 2);
       return [
-        { x: padLeft, text: timeLabels[0] ?? "-2m", align: "start" as const },
-        { x: xForIndex(midIdx), text: timeLabels[midIdx] ?? "-1m", align: "middle" as const },
-        { x: padLeft + plotW, text: "现在", align: "end" as const },
+        { x: padLeft, text: timeLabels[0] ?? "", align: "start" as const },
+        {
+          x: padLeft + plotW * 0.5,
+          text: timeLabels[midIdx] ?? "",
+          align: "middle" as const,
+        },
+        {
+          x: padLeft + plotW,
+          text: timeLabels[lastIdx] ?? "现在",
+          align: "end" as const,
+        },
       ];
     }
     return [
-      { x: padLeft, text: "-2m", align: "start" as const },
-      { x: padLeft + plotW * 0.5, text: "-1m", align: "middle" as const },
+      { x: padLeft, text: "-1m", align: "start" as const },
+      { x: padLeft + plotW * 0.5, text: "-30s", align: "middle" as const },
       { x: padLeft + plotW, text: "现在", align: "end" as const },
     ];
-  }, [showXAxisTicks, timeLabels, pointCount, padLeft, plotW]);
+  }, [showXAxisTicks, timeLabels, padLeft, plotW]);
 
   const hoverTimeText = useMemo(() => {
     if (activeHover === null) return "";
-    if (timeLabels && timeLabels[activeHover]) return timeLabels[activeHover]!;
+    if (timeLabels && timeLabels.length > 0) {
+      const mapped =
+        timeLabels[Math.min(activeHover, timeLabels.length - 1)] ?? "";
+      if (mapped) return mapped;
+    }
     const secAgo = (pointCount - 1 - activeHover) * 2;
-    return secAgo === 0 ? "现在" : `-${secAgo}s`;
+    return secAgo <= 0 ? "现在" : `-${secAgo}s`;
   }, [activeHover, timeLabels, pointCount]);
 
   return (
@@ -917,12 +1000,11 @@ export function ObservabilityChart({
         {/* Series Fills & Crisp 1.25px Angular Polylines */}
         {series.map((s, sIdx) => {
           if (s.data.length === 0) return null;
-          const len = s.data.length;
-          const pts = s.data.map((v, i) => {
-            const x =
-              len === 1
-                ? padLeft + plotW
-                : padLeft + (i / (len - 1)) * plotW;
+          const samples =
+            s.data.length === 1 ? [s.data[0]!, s.data[0]!] : s.data;
+          const len = samples.length;
+          const pts = samples.map((v, i) => {
+            const x = padLeft + (i / (len - 1)) * plotW;
             const y = yForValue(v);
             return [x, y] as const;
           });
@@ -1042,12 +1124,7 @@ export function ObservabilityChart({
             pointerEvents="none"
           >
             {xTickLabels.map((tk, i) => (
-              <text
-                key={i}
-                x={tk.x}
-                y={height - 3}
-                textAnchor={tk.align}
-              >
+              <text key={i} x={tk.x} y={height - 3} textAnchor={tk.align}>
                 {tk.text}
               </text>
             ))}
@@ -1067,6 +1144,7 @@ export function ObservabilityChart({
               strokeDasharray="2 2"
             />
             {series.map((s, sIdx) => {
+              if (s.data.length === 0) return null;
               const val = s.data[Math.min(activeHover, s.data.length - 1)];
               if (val === undefined) return null;
               return (
@@ -1102,7 +1180,7 @@ export function ObservabilityChart({
           className="font-mono-num pointer-events-none absolute top-1 z-10 flex items-center gap-2 rounded-[6px] px-2 py-0.5 text-[10.5px] leading-tight whitespace-nowrap"
         >
           {series.map((s, sIdx) => {
-            const val = s.data[Math.min(activeHover, s.data.length - 1)] ?? 0;
+            const val = s.data[Math.min(activeHover, Math.max(0, s.data.length - 1))] ?? 0;
             return (
               <span
                 key={s.label + sIdx}
@@ -1420,6 +1498,30 @@ export function TabBar<T extends string>({
 /* ============================================================================
  * 12. CopyButton & IconCloseButton
  * ============================================================================ */
+export async function copyTextToClipboard(text: string): Promise<boolean> {
+  try {
+    if (navigator.clipboard?.writeText) {
+      await navigator.clipboard.writeText(text);
+      return true;
+    }
+  } catch {
+    // Fallback below for HTTP origins
+  }
+  try {
+    const ta = document.createElement("textarea");
+    ta.value = text;
+    ta.style.position = "fixed";
+    ta.style.opacity = "0";
+    document.body.appendChild(ta);
+    ta.select();
+    const ok = document.execCommand("copy");
+    ta.remove();
+    return ok;
+  } catch {
+    return false;
+  }
+}
+
 export function CopyButton({
   value,
   label = "复制",
@@ -1437,11 +1539,7 @@ export function CopyButton({
 
   const handleCopy = async (e: React.MouseEvent) => {
     e.stopPropagation();
-    try {
-      await navigator.clipboard?.writeText(value);
-    } catch {
-      // Fallback ignored in sandboxed preview
-    }
+    await copyTextToClipboard(value);
     setCopied(true);
     onCopied?.();
     window.setTimeout(() => setCopied(false), 1600);
@@ -1456,7 +1554,7 @@ export function CopyButton({
         color: copied ? "var(--status-ok-ink)" : "var(--text-secondary)",
         border: `1px solid ${copied ? "var(--status-ok-border)" : "var(--border-subtle)"}`,
       }}
-      className={`inline-flex h-7 cursor-pointer items-center gap-1 rounded-[6px] px-2 text-[11.5px] font-medium transition-colors duration-150 ${className}`}
+      className={`inline-flex h-7 shrink-0 cursor-pointer items-center gap-1 rounded-[6px] px-2 text-[11.5px] font-medium whitespace-nowrap transition-colors duration-150 ${className}`}
     >
       {copied ? (
         <Check className="h-3.5 w-3.5 shrink-0" aria-hidden="true" />
@@ -1481,7 +1579,7 @@ export function IconCloseButton({
       aria-label={ariaLabel}
       onClick={onClick}
       style={{ color: "var(--text-tertiary)" }}
-      className="inline-flex h-7 w-7 cursor-pointer items-center justify-center rounded-[7px] transition-colors hover:bg-[var(--bg-hover)] hover:text-[var(--text-primary)]"
+      className="inline-flex h-7 w-7 shrink-0 cursor-pointer items-center justify-center rounded-[7px] transition-colors hover:bg-[var(--bg-hover)] hover:text-[var(--text-primary)]"
     >
       <X className="h-4 w-4" strokeWidth={1.75} aria-hidden="true" />
     </button>

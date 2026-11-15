@@ -1,14 +1,14 @@
-import { useId, useMemo, useState } from "react";
+import React, { useId, useMemo } from "react";
 import {
-  AlertTriangle,
+  Grid3x3,
   LayoutGrid,
-  Layers,
   Plus,
   Search,
   Server,
   Table2,
   X,
 } from "lucide-react";
+import { Button, Card, SegmentedControl } from "./ui/Primitives";
 import type {
   AppRoute,
   DensityMode,
@@ -17,7 +17,6 @@ import type {
   HubStatusResponse,
   InspectorTab,
 } from "../types";
-import { getMemUsagePct, getTrafficUsagePct } from "../utils/format";
 import { BentoHeroStrip } from "./BentoHeroStrip";
 import { FleetBentoGrid } from "./FleetBentoGrid";
 import { FleetDataGrid } from "./FleetDataGrid";
@@ -41,23 +40,6 @@ export interface FleetOverviewPageProps {
   onNavigate: (route: AppRoute) => void;
 }
 
-type HealthFilter = "all" | "online" | "attention" | "offline";
-
-function isAttentionNode(node: HorizonNode): boolean {
-  if (!node.online) return true;
-  const steal = node.metrics?.cpu.steal ?? 0;
-  const memPct = getMemUsagePct(node);
-  const trafficPct = getTrafficUsagePct(node.traffic);
-  const hasTrafficWarn =
-    node.traffic.limit_bytes !== null &&
-    node.traffic.limit_bytes > 0 &&
-    trafficPct >= 85;
-  return steal >= 1.5 || memPct >= 85 || hasTrafficWarn;
-}
-
-/**
- * 机群总览主视图：整合 4 格 Bento 驾驶舱与 Bento卡片 / 精密表格 / 分组矩阵三态视图。
- */
 export function FleetOverviewPage({
   nodes,
   groups,
@@ -76,35 +58,17 @@ export function FleetOverviewPage({
   onNavigate,
 }: FleetOverviewPageProps): React.JSX.Element {
   const searchInputId = useId();
-  const [healthFilter, setHealthFilter] = useState<HealthFilter>("all");
-
-  const groupCounts = useMemo(() => {
-    const counts = new Map<string, number>();
-    for (const n of nodes) {
-      counts.set(n.group_name, (counts.get(n.group_name) ?? 0) + 1);
-    }
-    return counts;
-  }, [nodes]);
-
-  const attentionCount = useMemo(
-    () => nodes.filter(isAttentionNode).length,
-    [nodes],
-  );
-  const offlineCount = useMemo(
-    () => nodes.filter((n) => !n.online).length,
-    [nodes],
-  );
 
   const filteredNodes = useMemo(() => {
     const q = searchQuery.trim().toLowerCase();
     return nodes.filter((n) => {
-      if (selectedGroup && selectedGroup !== "ALL" && n.group_name !== selectedGroup) {
+      if (
+        selectedGroup &&
+        selectedGroup !== "ALL" &&
+        n.group_name !== selectedGroup
+      ) {
         return false;
       }
-      if (healthFilter === "online" && !n.online) return false;
-      if (healthFilter === "offline" && n.online) return false;
-      if (healthFilter === "attention" && !isAttentionNode(n)) return false;
-
       if (!q) return true;
       return (
         n.name.toLowerCase().includes(q) ||
@@ -114,25 +78,26 @@ export function FleetOverviewPage({
         n.region_code.toLowerCase().includes(q) ||
         n.ipv4_masked.toLowerCase().includes(q) ||
         (n.os ?? "").toLowerCase().includes(q) ||
-        (Array.isArray(n.tags) && n.tags.some((t) => t.toLowerCase().includes(q)))
+        (Array.isArray(n.tags) &&
+          n.tags.some((t) => t.toLowerCase().includes(q)))
       );
     });
-  }, [nodes, selectedGroup, healthFilter, searchQuery]);
+  }, [nodes, selectedGroup, searchQuery]);
 
   const hasActiveFilters =
     (selectedGroup !== "ALL" && selectedGroup !== "") ||
-    healthFilter !== "all" ||
     searchQuery.trim().length > 0;
 
   const resetFilters = () => {
     onGroupChange("ALL");
     onSearchChange("");
-    setHealthFilter("all");
   };
 
   return (
-    <div className={density === "compact" ? "space-y-3.5" : "space-y-5"}>
-      {/* Top 4-card Cockpit */}
+    <div
+      className={`min-w-0 ${density === "compact" ? "space-y-4" : "space-y-5"}`}
+    >
+      {/* 1. Top 5-Cell Hairline Summary Strip */}
       <BentoHeroStrip
         nodes={nodes}
         activeAlertsCount={activeAlertsCount}
@@ -141,217 +106,157 @@ export function FleetOverviewPage({
         onNavigate={onNavigate}
       />
 
-      {/* Filter & View Switcher Toolbar */}
+      {/* 2. Clean Single-Row Toolbar: Group Chips + Search + View Switcher */}
       <search
-        aria-label="筛选与搜索机群服务器"
-        className="block surface-card rounded-2xl p-3 sm:p-3.5 space-y-2.5"
+        aria-label="筛选服务器"
+        className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between"
       >
-        <div className="flex flex-col xl:flex-row xl:items-center xl:justify-between gap-3">
-          {/* Group Pills */}
-          <div
-            className="flex flex-wrap items-center gap-1.5"
-            role="group"
-            aria-label="按业务分组筛选"
+        <div
+          role="group"
+          aria-label="分组"
+          className="flex flex-wrap items-center gap-1.5"
+        >
+          <button
+            type="button"
+            aria-pressed={selectedGroup === "ALL" || selectedGroup === ""}
+            onClick={() => onGroupChange("ALL")}
+            style={
+              selectedGroup === "ALL" || selectedGroup === ""
+                ? {
+                    backgroundColor: "var(--ink-primary)",
+                    color: "var(--ink-on-primary)",
+                    border: "1px solid transparent",
+                  }
+                : {
+                    backgroundColor: "var(--bg-card)",
+                    color: "var(--text-secondary)",
+                    border: "1px solid var(--border-hairline)",
+                  }
+            }
+            className="inline-flex h-8 cursor-pointer items-center rounded-[8px] px-3 text-[12.5px] font-medium transition-colors hover:border-[var(--border-strong)]"
           >
-            <button
-              type="button"
-              onClick={() => onGroupChange("ALL")}
-              aria-pressed={selectedGroup === "ALL" || selectedGroup === ""}
-              className={`px-3 py-1.5 rounded-xl text-xs font-medium border transition-colors ${
-                selectedGroup === "ALL" || selectedGroup === ""
-                  ? "bg-[var(--accent-solid)] text-white border-[var(--accent-solid)] shadow-xs"
-                  : "bg-[var(--bg-elevated)] text-[var(--text-secondary)] border-[var(--border-subtle)] hover:text-[var(--text-primary)]"
-              }`}
-            >
-              全部 ({nodes.length})
-            </button>
+            全部
+          </button>
 
-            {groups.map((grp) => {
-              const count = groupCounts.get(grp) ?? 0;
-              const active = selectedGroup === grp;
-              return (
-                <button
-                  key={grp}
-                  type="button"
-                  onClick={() => onGroupChange(grp)}
-                  aria-pressed={active}
-                  className={`px-3 py-1.5 rounded-xl text-xs font-medium border transition-colors ${
-                    active
-                      ? "bg-[var(--accent-solid)] text-white border-[var(--accent-solid)] shadow-xs"
-                      : "bg-[var(--bg-elevated)] text-[var(--text-secondary)] border-[var(--border-subtle)] hover:text-[var(--text-primary)]"
-                  }`}
-                >
-                  {grp}{" "}
-                  <span className={active ? "opacity-85" : "opacity-70"}>
-                    ({count})
-                  </span>
-                </button>
-              );
-            })}
-          </div>
-
-          {/* Search + View Switcher */}
-          <div className="flex flex-wrap sm:flex-nowrap items-center gap-2">
-            <div className="relative flex-1 sm:w-64">
-              <label htmlFor={searchInputId} className="sr-only">
-                搜索服务器
-              </label>
-              <Search
-                className="w-3.5 h-3.5 text-[var(--text-secondary)] absolute left-3 top-1/2 -translate-y-1/2 pointer-events-none"
-                aria-hidden="true"
-              />
-              <input
-                id={searchInputId}
-                type="text"
-                value={searchQuery}
-                onChange={(e) => onSearchChange(e.target.value)}
-                placeholder="搜索名称、地区、服务商、标签..."
-                className="w-full pl-8 pr-8 py-1.5 text-xs rounded-xl border border-[var(--border-subtle)] bg-[var(--bg-elevated)] text-[var(--text-primary)] placeholder:text-[var(--text-muted,var(--text-secondary))] focus:outline-none focus:ring-2 focus:ring-[var(--accent-ring)]"
-              />
-              {searchQuery && (
-                <button
-                  type="button"
-                  onClick={() => onSearchChange("")}
-                  aria-label="清空搜索"
-                  className="absolute right-2 top-1/2 -translate-y-1/2 p-0.5 rounded-md text-[var(--text-secondary)] hover:text-[var(--text-primary)]"
-                >
-                  <X className="w-3.5 h-3.5" aria-hidden="true" />
-                </button>
-              )}
-            </div>
-
-            <div
-              className="inline-flex rounded-xl border border-[var(--border-subtle)] bg-[var(--bg-elevated)] p-0.5 shrink-0"
-              role="group"
-              aria-label="切换机群视图模式"
-            >
-              {(
-                [
-                  { key: "bento", label: "Bento 卡片", icon: LayoutGrid },
-                  { key: "table", label: "精密表格", icon: Table2 },
-                  { key: "matrix", label: "分组矩阵", icon: Layers },
-                ] as const
-              ).map(({ key, label, icon: Icon }) => {
-                const active = viewMode === key;
-                return (
-                  <button
-                    key={key}
-                    type="button"
-                    onClick={() => onViewModeChange(key)}
-                    aria-pressed={active}
-                    className={`inline-flex items-center gap-1.5 px-2.5 py-1 rounded-lg text-xs font-medium transition-colors ${
-                      active
-                        ? "bg-[var(--bg-surface)] text-[var(--accent-primary)] shadow-xs"
-                        : "text-[var(--text-secondary)] hover:text-[var(--text-primary)]"
-                    }`}
-                  >
-                    <Icon className="w-3.5 h-3.5" aria-hidden="true" />
-                    <span className="hidden sm:inline">{label}</span>
-                  </button>
-                );
-              })}
-            </div>
-          </div>
+          {groups.map((grp) => {
+            const active = selectedGroup === grp;
+            return (
+              <button
+                key={grp}
+                type="button"
+                aria-pressed={active}
+                onClick={() => onGroupChange(grp)}
+                style={
+                  active
+                    ? {
+                        backgroundColor: "var(--ink-primary)",
+                        color: "var(--ink-on-primary)",
+                        border: "1px solid transparent",
+                      }
+                    : {
+                        backgroundColor: "var(--bg-card)",
+                        color: "var(--text-secondary)",
+                        border: "1px solid var(--border-hairline)",
+                      }
+                }
+                className="inline-flex h-8 cursor-pointer items-center rounded-[8px] px-3 text-[12.5px] font-medium transition-colors hover:border-[var(--border-strong)]"
+              >
+                {grp}
+              </button>
+            );
+          })}
         </div>
 
-        {/* Sub-row: Health quick filter + result summary */}
-        <div className="flex flex-wrap items-center justify-between gap-2 pt-2 border-t border-[var(--border-subtle)] text-[11px]">
-          <div className="flex flex-wrap items-center gap-1.5">
-            {(
-              [
-                { key: "all", label: "全部状态" },
-                { key: "online", label: "仅在线" },
-                {
-                  key: "attention",
-                  label: `需关注 (${attentionCount})`,
-                  highlight: attentionCount > 0,
-                },
-                {
-                  key: "offline",
-                  label: `离线 (${offlineCount})`,
-                  critical: offlineCount > 0,
-                },
-              ] as const
-            ).map((item) => {
-              const active = healthFilter === item.key;
-              return (
-                <button
-                  key={item.key}
-                  type="button"
-                  onClick={() => setHealthFilter(item.key)}
-                  aria-pressed={active}
-                  className={`inline-flex items-center gap-1 px-2 py-0.5 rounded-lg border transition-colors font-medium ${
-                    active
-                      ? "border-[var(--accent-ring)] bg-[var(--accent-soft)] text-[var(--accent-primary)]"
-                      : "border-transparent text-[var(--text-secondary)] hover:bg-[var(--bg-elevated)] hover:text-[var(--text-primary)]"
-                  }`}
-                >
-                  {"highlight" in item && item.highlight && (
-                    <AlertTriangle className="w-3 h-3 text-amber-500" aria-hidden="true" />
-                  )}
-                  <span>{item.label}</span>
-                </button>
-              );
-            })}
-          </div>
-
-          <div className="flex items-center gap-2 font-mono-num text-[var(--text-secondary)]">
-            <span>
-              显示 <strong className="text-[var(--text-primary)]">{filteredNodes.length}</strong> /{" "}
-              {nodes.length} 台服务器
-            </span>
-            {hasActiveFilters && (
+        <div className="flex flex-wrap items-center gap-2.5 sm:flex-nowrap">
+          <div className="relative min-w-[180px] flex-1 sm:w-[220px] sm:flex-initial">
+            <label htmlFor={searchInputId} className="sr-only">
+              搜索服务器
+            </label>
+            <Search
+              style={{ color: "var(--text-tertiary)" }}
+              className="pointer-events-none absolute top-1/2 left-2.5 h-3.5 w-3.5 -translate-y-1/2"
+              strokeWidth={1.65}
+              aria-hidden="true"
+            />
+            <input
+              id={searchInputId}
+              type="text"
+              value={searchQuery}
+              onChange={(e) => onSearchChange(e.target.value)}
+              placeholder="搜索名称、分组或地域…"
+              style={{
+                backgroundColor: "var(--bg-card)",
+                border: "1px solid var(--border-subtle)",
+                color: "var(--text-primary)",
+              }}
+              className="h-8 w-full rounded-[8px] pr-7 pl-8 text-[12.5px] transition-colors outline-none placeholder:text-[var(--text-tertiary)] focus:border-[var(--accent)]"
+            />
+            {searchQuery && (
               <button
                 type="button"
-                onClick={resetFilters}
-                className="text-[var(--accent-primary)] hover:underline font-sans font-medium"
+                onClick={() => onSearchChange("")}
+                aria-label="清空搜索"
+                style={{ color: "var(--text-tertiary)" }}
+                className="absolute top-1/2 right-2 -translate-y-1/2 cursor-pointer hover:text-[var(--text-primary)]"
               >
-                重置筛选
+                <X className="h-3.5 w-3.5" aria-hidden="true" />
               </button>
             )}
           </div>
+
+          <SegmentedControl<FleetViewMode>
+            ariaLabel="视图布局"
+            value={viewMode}
+            onChange={onViewModeChange}
+            options={[
+              {
+                value: "bento",
+                label: "卡片",
+                icon: <LayoutGrid className="h-3.5 w-3.5" aria-hidden="true" />,
+              },
+              {
+                value: "table",
+                label: "列表",
+                icon: <Table2 className="h-3.5 w-3.5" aria-hidden="true" />,
+              },
+              {
+                value: "matrix",
+                label: "矩阵",
+                icon: <Grid3x3 className="h-3.5 w-3.5" aria-hidden="true" />,
+              },
+            ]}
+          />
         </div>
       </search>
 
-      {/* Main Fleet View */}
+      {/* 3. Fleet Views */}
       {filteredNodes.length === 0 ? (
-        <div className="surface-card rounded-2xl border-dashed p-12 text-center space-y-3">
+        <Card className="py-14 text-center">
           <Server
-            className="w-9 h-9 mx-auto text-[var(--text-muted,var(--text-secondary))]"
+            style={{ color: "var(--text-muted)" }}
+            className="mx-auto mb-3 h-7 w-7"
+            strokeWidth={1.5}
             aria-hidden="true"
           />
-          <div>
-            <p className="text-sm font-semibold text-[var(--text-primary)]">
-              {nodes.length === 0
-                ? "暂无已接入的服务器"
-                : "没有符合当前条件的服务器"}
-            </p>
-            <p className="text-xs text-[var(--text-secondary)] mt-1">
-              {nodes.length === 0
-                ? "点击下方「部署探针」添加第一台 Linux 服务器，开启实时遥测。"
-                : "可尝试放宽分组、状态或关键词过滤，或直接部署一台新节点探针。"}
-            </p>
-          </div>
-          <div className="flex items-center justify-center gap-2">
+          <p className="text-[13.5px] font-medium">
+            {nodes.length === 0 ? "暂无服务器" : "没有匹配的服务器"}
+          </p>
+          <div className="mt-4 flex items-center justify-center gap-2">
             {hasActiveFilters && (
-              <button
-                type="button"
-                onClick={resetFilters}
-                className="px-3.5 py-1.5 rounded-xl text-xs font-medium border border-[var(--border-subtle)] bg-[var(--bg-elevated)] text-[var(--text-primary)] hover:border-[var(--accent-ring)]"
-              >
+              <Button variant="secondary" size="sm" onClick={resetFilters}>
                 重置筛选
-              </button>
+              </Button>
             )}
-            <button
-              type="button"
+            <Button
+              variant="primary"
+              size="sm"
               onClick={onOpenAddServer}
-              className="inline-flex items-center gap-1.5 px-3.5 py-1.5 rounded-xl text-xs font-semibold bg-[var(--accent-solid)] hover:bg-[var(--accent-primary)] text-white shadow-xs transition-colors"
+              icon={<Plus className="h-3.5 w-3.5" aria-hidden="true" />}
             >
-              <Plus className="w-3.5 h-3.5" aria-hidden="true" />
-              部署探针
-            </button>
+              添加服务器
+            </Button>
           </div>
-        </div>
+        </Card>
       ) : viewMode === "bento" ? (
         <FleetBentoGrid
           nodes={filteredNodes}

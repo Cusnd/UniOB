@@ -1,46 +1,43 @@
-import { useCallback, useEffect, useId, useMemo, useRef, useState } from "react";
+import React, { useCallback, useEffect, useId, useMemo, useRef, useState } from "react";
 import {
-  AlertCircle,
-  ArrowLeftRight,
-  ArrowRight,
   Check,
-  CheckCircle2,
-  Clock,
+  ChevronDown,
+  ChevronUp,
   Cloud,
-  Copy,
-  Database,
   Download,
-  ExternalLink,
-  FileJson,
+  KeyRound,
   Loader2,
-  Radio,
+  Play,
   RefreshCw,
   Server,
-  ShieldAlert,
-  ShieldCheck,
+  SlidersHorizontal,
   Sparkles,
   Upload,
-  Wand2,
-  X,
-  Zap,
 } from "lucide-react";
 import type {
   ExportBundle,
   HorizonNode,
   HubStatusResponse,
-  ImportBundleResponse,
   MigrationTicketResponse,
   NotificationChannel,
   SmartMigrateResponse,
   WatchdogConfig,
-  WatchdogHealthStatus,
 } from "../types";
 import { api } from "../api/client";
+import { formatRelativeTime, formatTimestamp } from "../utils/format";
 import {
-  formatDurationZh,
-  formatRelativeTime,
-  formatTimestamp,
-} from "../utils/format";
+  Badge,
+  Button,
+  Card,
+  CopyButton,
+  IconCloseButton,
+  MetricBar,
+  NativeDialog,
+  SectionHeader,
+  SegmentedControl,
+  StatusDot,
+  Switch,
+} from "./ui/Primitives";
 
 export interface HubMigrationStudioProps {
   nodes: HorizonNode[];
@@ -53,241 +50,63 @@ export interface HubMigrationStudioProps {
   ) => void;
 }
 
-type MigrationTab = "outbound" | "inbound";
-type OutboundMethod = "existing" | "install";
-type CutoverStep = "idle" | "connecting" | "polling" | "done" | "error";
+type MigrationDirection = "outbound" | "inbound";
+type CutoverPhase = "idle" | "connecting" | "polling" | "done" | "error";
 
-interface PendingBackupImport {
+interface PendingBackupFile {
   fileName: string;
   bundle: ExportBundle;
-  counts: {
-    nodes: number;
-    channels: number;
-    rules: number;
-    traffic_ledgers: number;
-  };
+  nodesCount: number;
+  rulesCount: number;
+  channelsCount: number;
   exportedAt: number | null;
 }
 
-const WATCHDOG_TIMEOUT_PRESETS = [
+const TIMEOUT_OPTIONS = [
   { sec: 600, label: "10 分钟" },
-  { sec: 900, label: "15 分钟（推荐）" },
+  { sec: 900, label: "15 分钟" },
   { sec: 1800, label: "30 分钟" },
 ] as const;
 
-function generateHexSecret(byteLen = 24): string {
+function generateRandomSecret(byteLen = 24): string {
   const bytes = new Uint8Array(byteLen);
   crypto.getRandomValues(bytes);
   return Array.from(bytes, (b) => b.toString(16).padStart(2, "0")).join("");
 }
 
-function shellArg(val: string): string {
-  if (/^[A-Za-z0-9_.:/@-]+$/.test(val)) return val;
-  return `'${val.replace(/'/g, `'\\''`)}'`;
-}
-
-function formatRemainingCountdown(expiresAtSec: number, nowSec: number): string {
+function formatCountdown(expiresAtSec: number, nowSec: number): string {
   const rem = Math.max(0, expiresAtSec - nowSec);
   if (rem === 0) return "已过期";
   const mins = Math.floor(rem / 60);
   const secs = rem % 60;
   return mins > 0
-    ? `${mins} 分 ${String(secs).padStart(2, "0")} 秒`
-    : `${secs} 秒`;
+    ? `${mins}:${String(secs).padStart(2, "0")}`
+    : `${secs}s`;
 }
 
-function getWatchdogBadge(status?: WatchdogHealthStatus): {
-  label: string;
-  cls: string;
-} {
-  switch (status) {
-    case "healthy":
-      return {
-        label: "守护健康",
-        cls: "border-emerald-500/35 bg-emerald-500/12 text-emerald-700 dark:text-emerald-300",
-      };
-    case "waiting":
-      return {
-        label: "等待首帧心跳",
-        cls: "border-amber-500/35 bg-amber-500/12 text-amber-700 dark:text-amber-300",
-      };
-    case "stale":
-      return {
-        label: "失联告警中",
-        cls: "border-rose-500/35 bg-rose-500/12 text-rose-700 dark:text-rose-300",
-      };
-    case "disabled":
-    default:
-      return {
-        label: "未启用",
-        cls: "border-[var(--border-subtle)] bg-[var(--bg-elevated)] text-[var(--text-secondary)]",
-      };
-  }
-}
+export function HubMigrationStudio(
+  props: HubMigrationStudioProps,
+): React.JSX.Element {
+  const { nodes, hubStatus, onDataChanged, onNotify } = props;
 
-async function copyTextSafe(text: string): Promise<boolean> {
-  if (typeof navigator !== "undefined" && navigator.clipboard?.writeText) {
-    try {
-      await navigator.clipboard.writeText(text);
-      return true;
-    } catch {
-      // Fallback below
-    }
-  }
-  if (typeof document === "undefined") return false;
-  const textarea = document.createElement("textarea");
-  textarea.value = text;
-  textarea.setAttribute("readonly", "");
-  textarea.style.position = "fixed";
-  textarea.style.left = "-9999px";
-  textarea.style.top = "-9999px";
-  document.body.appendChild(textarea);
-  textarea.select();
-  let ok = false;
-  try {
-    ok = document.execCommand("copy");
-  } catch {
-    ok = false;
-  } finally {
-    document.body.removeChild(textarea);
-  }
-  return ok;
-}
+  const targetInputId = useId();
+  const wdModalTitleId = useId();
+  const importModalTitleId = useId();
+  const fileInputRef = useRef<HTMLInputElement | null>(null);
 
-function StudioCopyButton({
-  text,
-  label,
-  ariaLabel,
-}: {
-  text: string;
-  label: string;
-  ariaLabel: string;
-}) {
-  const [copied, setCopied] = useState(false);
-  const [failed, setFailed] = useState(false);
-  const [statusMsg, setStatusMsg] = useState("");
-  const timerRef = useRef<number | null>(null);
-
-  useEffect(() => {
-    return () => {
-      if (timerRef.current !== null) window.clearTimeout(timerRef.current);
-    };
-  }, []);
-
-  const handleCopy = async () => {
-    if (timerRef.current !== null) {
-      window.clearTimeout(timerRef.current);
-      timerRef.current = null;
-    }
-    const ok = await copyTextSafe(text);
-    setCopied(ok);
-    setFailed(!ok);
-    setStatusMsg(ok ? `${label}已复制` : "复制失败，请手动复制");
-    timerRef.current = window.setTimeout(() => {
-      setCopied(false);
-      setFailed(false);
-      setStatusMsg("");
-      timerRef.current = null;
-    }, 2000);
-  };
-
-  return (
-    <span className="inline-flex items-center gap-1.5 shrink-0">
-      <button
-        type="button"
-        onClick={() => void handleCopy()}
-        aria-label={ariaLabel}
-        className={`inline-flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg text-xs font-medium border transition-colors ${
-          copied
-            ? "border-emerald-500/45 bg-emerald-500/15 text-emerald-700 dark:text-emerald-300"
-            : failed
-              ? "border-rose-500/45 bg-rose-500/15 text-rose-700 dark:text-rose-300"
-              : "border-[var(--border-strong)] bg-[var(--bg-surface)] text-[var(--text-primary)] hover:bg-[var(--bg-card-hover)]"
-        }`}
-      >
-        {copied ? (
-          <Check className="w-3.5 h-3.5 shrink-0" aria-hidden="true" />
-        ) : (
-          <Copy className="w-3.5 h-3.5 shrink-0" aria-hidden="true" />
-        )}
-        <span>{copied ? "已复制" : label}</span>
-      </button>
-      <span role="status" className="sr-only">
-        {statusMsg}
-      </span>
-    </span>
-  );
-}
-
-function summarizeBundleForPreview(bundle: ExportBundle): string {
-  const sampleNode =
-    Array.isArray(bundle.nodes) &&
-    bundle.nodes[0] &&
-    typeof bundle.nodes[0] === "object"
-      ? (bundle.nodes[0] as Record<string, unknown>)
-      : null;
-
-  return JSON.stringify(
-    {
-      version: bundle.version ?? 2,
-      exported_at: bundle.exported_at ?? null,
-      nodes_count: Array.isArray(bundle.nodes) ? bundle.nodes.length : 0,
-      channels_count: Array.isArray(bundle.notification_channels)
-        ? bundle.notification_channels.length
-        : 0,
-      rules_count: Array.isArray(bundle.alert_rules)
-        ? bundle.alert_rules.length
-        : 0,
-      traffic_ledgers_count: Array.isArray(bundle.traffic_ledgers)
-        ? bundle.traffic_ledgers.length
-        : 0,
-      sample_node: sampleNode
-        ? {
-            id: sampleNode.id ?? null,
-            name: sampleNode.name ?? null,
-            group_name: sampleNode.group_name ?? null,
-          }
-        : null,
-    },
-    null,
-    2,
-  );
-}
-
-export function HubMigrationStudio({
-  nodes,
-  hubStatus,
-  onDataChanged,
-  onNotify,
-}: HubMigrationStudioProps) {
-  const baseId = useId();
-  const outboundTabId = `${baseId}-tab-outbound`;
-  const inboundTabId = `${baseId}-tab-inbound`;
-  const outboundPanelId = `${baseId}-panel-outbound`;
-  const inboundPanelId = `${baseId}-panel-inbound`;
-  const codeInputId = `${baseId}-code-input`;
-  const canaryCheckId = `${baseId}-canary-check`;
-  const canarySelectId = `${baseId}-canary-select`;
-  const targetUrlId = `${baseId}-target-url`;
-  const insecureWsId = `${baseId}-insecure-ws`;
-  const wdEnabledId = `${baseId}-wd-enabled`;
-  const wdLabelId = `${baseId}-wd-label`;
-  const wdCooldownId = `${baseId}-wd-cooldown`;
-  const wdSecretId = `${baseId}-wd-secret`;
-  const backupFileId = `${baseId}-backup-file`;
-
-  const outboundTabRef = useRef<HTMLButtonElement | null>(null);
-  const inboundTabRef = useRef<HTMLButtonElement | null>(null);
+  const onDataChangedRef = useRef(onDataChanged);
+  onDataChangedRef.current = onDataChanged;
+  const onNotifyRef = useRef(onNotify);
+  onNotifyRef.current = onNotify;
 
   const [liveStatus, setLiveStatus] = useState<HubStatusResponse | null>(
     hubStatus,
   );
   const [refreshingStatus, setRefreshingStatus] = useState(false);
+  const [showCloudDetails, setShowCloudDetails] = useState(false);
 
   useEffect(() => {
-    if (hubStatus) {
-      setLiveStatus(hubStatus);
-    }
+    if (hubStatus) setLiveStatus(hubStatus);
   }, [hubStatus]);
 
   useEffect(() => {
@@ -299,7 +118,7 @@ export function HubMigrationStudio({
         if (!cancelled) setLiveStatus(res);
       })
       .catch(() => {
-        // Parent manages top-level status; ignore transient mount miss
+        // Parent handles top-level connectivity
       });
     return () => {
       cancelled = true;
@@ -311,69 +130,47 @@ export function HubMigrationStudio({
   const isCloudflare = hubMode === "cloudflare-worker";
   const isSelfHosted = hubMode === "self-hosted-hub";
 
-  const [activeTab, setActiveTab] = useState<MigrationTab>("outbound");
-  const [outboundMethod, setOutboundMethod] =
-    useState<OutboundMethod>("existing");
-
-  // Outbound migration form state (no fake defaults)
-  const [migrationCodeInput, setMigrationCodeInput] = useState("");
-  const [codeError, setCodeError] = useState<string | null>(null);
-  const [newPanelUrlInput, setNewPanelUrlInput] = useState("");
-  const [urlError, setUrlError] = useState<string | null>(null);
-  const [allowInsecureWs, setAllowInsecureWs] = useState(false);
-  const [installTicket, setInstallTicket] =
-    useState<MigrationTicketResponse | null>(null);
-  const [generatingInstall, setGeneratingInstall] = useState(false);
-  const [installError, setInstallError] = useState<string | null>(null);
-
   const onlineNodes = useMemo(() => nodes.filter((n) => n.online), [nodes]);
   const orderedNodes = useMemo(
     () => [...onlineNodes, ...nodes.filter((n) => !n.online)],
     [nodes, onlineNodes],
   );
-  const [useCanary, setUseCanary] = useState(false);
-  const [canaryNodeId, setCanaryNodeId] = useState(
+
+  // Self-hosted one-click install ticket
+  const [installTicket, setInstallTicket] =
+    useState<MigrationTicketResponse | null>(null);
+  const [generatingInstall, setGeneratingInstall] = useState(false);
+
+  // Smooth Migration state
+  const [direction, setDirection] = useState<MigrationDirection>("outbound");
+  const [targetInput, setTargetInput] = useState("");
+  const [pilotOnly, setPilotOnly] = useState(false);
+  const [pilotNodeId, setPilotNodeId] = useState(
     () => orderedNodes[0]?.id ?? "",
   );
+  const [allowInsecureHttp, setAllowInsecureHttp] = useState(false);
 
-  useEffect(() => {
-    if (orderedNodes.length === 0) {
-      if (canaryNodeId) setCanaryNodeId("");
-      return;
-    }
-    if (!canaryNodeId || !orderedNodes.some((n) => n.id === canaryNodeId)) {
-      setCanaryNodeId(orderedNodes[0].id);
-    }
-  }, [canaryNodeId, orderedNodes]);
-
-  // Real cutover execution & 2s polling telemetry state
   const [migrating, setMigrating] = useState(false);
-  const [cutoverStep, setCutoverStep] = useState<CutoverStep>("idle");
+  const [cutoverPhase, setCutoverPhase] = useState<CutoverPhase>("idle");
   const [migrationError, setMigrationError] = useState<string | null>(null);
   const [migrationResult, setMigrationResult] =
     useState<SmartMigrateResponse | null>(null);
   const [baselineConnected, setBaselineConnected] = useState(0);
-  const [pollElapsedSec, setPollElapsedSec] = useState(0);
-  const [lastMigratedMode, setLastMigratedMode] = useState<"canary" | "full">(
-    "full",
-  );
-  const [lastMigrationTarget, setLastMigrationTarget] = useState("");
-  const outboundPollTimerRef = useRef<number | null>(null);
+  const [lastWasPilot, setLastWasPilot] = useState(false);
+  const [lastTargetUsed, setLastTargetUsed] = useState("");
+  const outboundPollRef = useRef<number | null>(null);
 
-  // Inbound migration state
+  // Inbound receive ticket state
   const [receiveTicket, setReceiveTicket] =
     useState<MigrationTicketResponse | null>(null);
   const [generatingReceive, setGeneratingReceive] = useState(false);
-  const [receiveError, setReceiveError] = useState<string | null>(null);
-  const [receiveBaseTotal, setReceiveBaseTotal] = useState(0);
-  const [receiveBaseConnected, setReceiveBaseConnected] = useState(0);
-  const lastInboundStatsRef = useRef<{ total: number; connected: number }>({
+  const inboundPollRef = useRef<number | null>(null);
+  const lastInboundCountsRef = useRef<{ total: number; connected: number }>({
     total: 0,
     connected: 0,
   });
-  const inboundPollTimerRef = useRef<number | null>(null);
 
-  // Countdown clock for active tickets
+  // Shared 1s clock for active ticket countdowns
   const [nowSec, setNowSec] = useState(() => Math.floor(Date.now() / 1000));
   const hasActiveTicket = Boolean(
     (installTicket && installTicket.expires_at > nowSec) ||
@@ -388,44 +185,27 @@ export function HubMigrationStudio({
     return () => window.clearInterval(id);
   }, [hasActiveTicket]);
 
-  // Cloudflare-only Watchdog state
-  const [wdDraft, setWdDraft] = useState<WatchdogConfig>({
-    enabled: false,
-    secret: "",
-    timeout_sec: 900,
-    cooldown_sec: 1800,
-    hub_label: "自建备用面板",
-    channel_ids: [],
-  });
-  const [channels, setChannels] = useState<NotificationChannel[]>([]);
-  const [loadingWatchdog, setLoadingWatchdog] = useState(false);
-  const [watchdogError, setWatchdogError] = useState<string | null>(null);
-  const [savingWatchdog, setSavingWatchdog] = useState(false);
-
-  // Backup & Restore state
-  const [exporting, setExporting] = useState(false);
-  const [importing, setImporting] = useState(false);
-  const [backupError, setBackupError] = useState<string | null>(null);
-  const [pendingImport, setPendingImport] =
-    useState<PendingBackupImport | null>(null);
-  const [importResult, setImportResult] = useState<ImportBundleResponse | null>(
-    null,
-  );
-  const [bundlePreviewText, setBundlePreviewText] = useState<string | null>(
-    null,
-  );
+  useEffect(() => {
+    if (orderedNodes.length === 0) {
+      if (pilotNodeId) setPilotNodeId("");
+      return;
+    }
+    if (!pilotNodeId || !orderedNodes.some((n) => n.id === pilotNodeId)) {
+      setPilotNodeId(orderedNodes[0].id);
+    }
+  }, [orderedNodes, pilotNodeId]);
 
   const stopOutboundPolling = useCallback(() => {
-    if (outboundPollTimerRef.current !== null) {
-      window.clearInterval(outboundPollTimerRef.current);
-      outboundPollTimerRef.current = null;
+    if (outboundPollRef.current !== null) {
+      window.clearInterval(outboundPollRef.current);
+      outboundPollRef.current = null;
     }
   }, []);
 
   const stopInboundPolling = useCallback(() => {
-    if (inboundPollTimerRef.current !== null) {
-      window.clearInterval(inboundPollTimerRef.current);
-      inboundPollTimerRef.current = null;
+    if (inboundPollRef.current !== null) {
+      window.clearInterval(inboundPollRef.current);
+      inboundPollRef.current = null;
     }
   }, []);
 
@@ -436,73 +216,51 @@ export function HubMigrationStudio({
     };
   }, [stopOutboundPolling, stopInboundPolling]);
 
-  // CRITICAL DUAL-MODE GUARD: Only fetch WatchdogConfig & channels in Cloudflare Worker mode
+  // Cloudflare-only Watchdog Config (CRITICAL DUAL-MODE GUARD)
+  const [wdConfig, setWdConfig] = useState<WatchdogConfig>({
+    enabled: false,
+    secret: "",
+    timeout_sec: 900,
+    cooldown_sec: 1800,
+    hub_label: "自建服务端",
+    channel_ids: [],
+  });
+  const [channels, setChannels] = useState<NotificationChannel[]>([]);
+  const [wdModalOpen, setWdModalOpen] = useState(false);
+  const [savingWd, setSavingWd] = useState(false);
+
   const loadWatchdogAux = useCallback(async () => {
     if (hubMode !== "cloudflare-worker") return;
-    setLoadingWatchdog(true);
-    setWatchdogError(null);
     try {
       const [wdRes, chRes] = await Promise.all([
         api.getWatchdogConfig(),
         api.getChannels(),
       ]);
-      setWdDraft(wdRes);
+      setWdConfig(wdRes);
       setChannels(Array.isArray(chRes?.channels) ? chRes.channels : []);
-    } catch (err) {
-      setWatchdogError(
-        err instanceof Error ? err.message : "加载 Cloudflare 看门狗配置失败",
-      );
-    } finally {
-      setLoadingWatchdog(false);
+    } catch {
+      // Non-blocking auxiliary fetch
     }
   }, [hubMode]);
 
   useEffect(() => {
     if (hubMode !== "cloudflare-worker") return;
-    let cancelled = false;
-    setLoadingWatchdog(true);
-    setWatchdogError(null);
-    void Promise.all([api.getWatchdogConfig(), api.getChannels()])
-      .then(([wdRes, chRes]) => {
-        if (cancelled) return;
-        setWdDraft(wdRes);
-        setChannels(Array.isArray(chRes?.channels) ? chRes.channels : []);
-      })
-      .catch((err) => {
-        if (cancelled) return;
-        setWatchdogError(
-          err instanceof Error
-            ? err.message
-            : "加载 Cloudflare 看门狗配置失败",
-        );
-      })
-      .finally(() => {
-        if (!cancelled) setLoadingWatchdog(false);
-      });
-    return () => {
-      cancelled = true;
-    };
-  }, [hubMode]);
+    void loadWatchdogAux();
+  }, [hubMode, loadWatchdogAux]);
 
-  // Keep latest callbacks in refs for async timers
-  const onDataChangedRef = useRef(onDataChanged);
-  onDataChangedRef.current = onDataChanged;
-  const onNotifyRef = useRef(onNotify);
-  onNotifyRef.current = onNotify;
-
-  // Inbound live 2s polling while inbound tab is active and ticket is valid
+  // Inbound live 2s polling while inbound ticket is active
   useEffect(() => {
     stopInboundPolling();
-    const currentSec = Math.floor(Date.now() / 1000);
+    const cur = Math.floor(Date.now() / 1000);
     if (
-      activeTab !== "inbound" ||
+      direction !== "inbound" ||
       !receiveTicket ||
-      receiveTicket.expires_at <= currentSec
+      receiveTicket.expires_at <= cur
     ) {
       return;
     }
 
-    inboundPollTimerRef.current = window.setInterval(async () => {
+    inboundPollRef.current = window.setInterval(async () => {
       const now = Math.floor(Date.now() / 1000);
       setNowSec(now);
       if (now >= receiveTicket.expires_at) {
@@ -510,118 +268,134 @@ export function HubMigrationStudio({
         return;
       }
       try {
-        const nextStatus = await api.getHubStatus();
-        setLiveStatus(nextStatus);
-        const prev = lastInboundStatsRef.current;
+        const next = await api.getHubStatus();
+        setLiveStatus(next);
+        const prev = lastInboundCountsRef.current;
         if (
-          nextStatus.total_nodes !== prev.total ||
-          nextStatus.connected_agents !== prev.connected
+          next.total_nodes !== prev.total ||
+          next.connected_agents !== prev.connected
         ) {
-          lastInboundStatsRef.current = {
-            total: nextStatus.total_nodes,
-            connected: nextStatus.connected_agents,
+          lastInboundCountsRef.current = {
+            total: next.total_nodes,
+            connected: next.connected_agents,
           };
           await onDataChangedRef.current();
         }
       } catch {
-        // Silent retry on transient network hiccup
+        // Ignore transient network hiccup
       }
     }, 2000);
 
     return () => stopInboundPolling();
-  }, [activeTab, receiveTicket, stopInboundPolling]);
+  }, [direction, receiveTicket, stopInboundPolling]);
 
-  const handleRefreshHubStatus = async () => {
+  // Backup & Restore state
+  const [exporting, setExporting] = useState(false);
+  const [importing, setImporting] = useState(false);
+  const [lastBackupNote, setLastBackupNote] = useState<string | null>(null);
+  const [pendingImport, setPendingImport] = useState<PendingBackupFile | null>(
+    null,
+  );
+
+  const handleRefreshStatus = async () => {
+    if (refreshingStatus) return;
     setRefreshingStatus(true);
     try {
-      const [nextStatus] = await Promise.all([
-        api.getHubStatus(),
-        onDataChanged(),
-      ]);
-      setLiveStatus(nextStatus);
-      if (nextStatus.mode === "cloudflare-worker") {
+      const [next] = await Promise.all([api.getHubStatus(), onDataChanged()]);
+      setLiveStatus(next);
+      if (next.mode === "cloudflare-worker") {
         await loadWatchdogAux();
       }
+      onNotify("success", "服务状态已刷新");
     } catch (err) {
       onNotify(
         "danger",
-        "刷新运行状态失败",
-        err instanceof Error ? err.message : undefined,
+        err instanceof Error ? err.message : "刷新状态失败",
       );
     } finally {
       setRefreshingStatus(false);
     }
   };
 
-  const handleTabKeyDown = (e: React.KeyboardEvent<HTMLButtonElement>) => {
-    if (
-      e.key !== "ArrowLeft" &&
-      e.key !== "ArrowRight" &&
-      e.key !== "Home" &&
-      e.key !== "End"
-    ) {
-      return;
+  const handleGenerateInstallCmd = async () => {
+    if (generatingInstall) return;
+    setGeneratingInstall(true);
+    try {
+      const res = await api.createMigrationTicket({
+        purpose: "install",
+        enable_watchdog: true,
+      });
+      setNowSec(Math.floor(Date.now() / 1000));
+      setInstallTicket(res);
+      onNotify("success", "已生成自建服务端一键部署命令");
+    } catch (err) {
+      onNotify(
+        "danger",
+        err instanceof Error ? err.message : "生成部署命令失败",
+      );
+    } finally {
+      setGeneratingInstall(false);
     }
-    e.preventDefault();
-    const nextTab: MigrationTab =
-      e.key === "Home"
-        ? "outbound"
-        : e.key === "End"
-          ? "inbound"
-          : activeTab === "outbound"
-            ? "inbound"
-            : "outbound";
-    setActiveTab(nextTab);
-    const targetRef = nextTab === "outbound" ? outboundTabRef : inboundTabRef;
-    targetRef.current?.focus();
+  };
+
+  const handleGenerateReceiveCode = async () => {
+    if (generatingReceive) return;
+    setGeneratingReceive(true);
+    try {
+      const res = await api.createMigrationTicket({ purpose: "receive" });
+      setNowSec(Math.floor(Date.now() / 1000));
+      lastInboundCountsRef.current = {
+        total: effectiveStatus?.total_nodes ?? nodes.length,
+        connected: effectiveStatus?.connected_agents ?? onlineNodes.length,
+      };
+      setReceiveTicket(res);
+      onNotify("success", "接收口令已生成，有效期 15 分钟");
+    } catch (err) {
+      onNotify(
+        "danger",
+        err instanceof Error ? err.message : "生成接收口令失败",
+      );
+    } finally {
+      setGeneratingReceive(false);
+    }
   };
 
   const startOutboundPolling = useCallback(
-    (
-      dispatchedCount: number,
-      initialConnected: number,
-      isCanaryRun: boolean,
-    ) => {
+    (dispatchedCount: number, initialConnected: number, isPilot: boolean) => {
       stopOutboundPolling();
-      setPollElapsedSec(0);
       if (dispatchedCount <= 0) {
-        setCutoverStep("done");
+        setCutoverPhase("done");
         void onDataChangedRef.current();
-        onNotifyRef.current(
-          "success",
-          "配置已全量同步至目标面板",
-          "当前源面板暂无在线节点需要实时切流",
-        );
+        onNotifyRef.current("success", "配置与数据已同步至目标面板");
         return;
       }
 
-      setCutoverStep("polling");
+      setCutoverPhase("polling");
       let elapsed = 0;
-      outboundPollTimerRef.current = window.setInterval(async () => {
+      outboundPollRef.current = window.setInterval(async () => {
         elapsed += 2;
-        setPollElapsedSec(elapsed);
         try {
           const next = await api.getHubStatus();
           setLiveStatus(next);
-          const switched = Math.max(0, initialConnected - next.connected_agents);
+          const switched = Math.max(
+            0,
+            initialConnected - next.connected_agents,
+          );
           if (switched >= dispatchedCount || elapsed >= 30) {
             stopOutboundPolling();
-            setCutoverStep("done");
+            setCutoverPhase("done");
             void onDataChangedRef.current();
             onNotifyRef.current(
               "success",
-              isCanaryRun
-                ? "金丝雀试路节点切流完成"
-                : `已完成 ${dispatchedCount} 台节点热迁移指令派发`,
-              switched >= dispatchedCount
-                ? "目标端探针已接管连接，原节点账本与规则已同步"
-                : "30 秒切流观察窗结束，请前往目标面板核验最终接入状态",
+              isPilot
+                ? "试迁服务器已完成平滑切换"
+                : `已完成 ${dispatchedCount} 台服务器平滑迁移`,
             );
           }
         } catch {
           if (elapsed >= 30) {
             stopOutboundPolling();
-            setCutoverStep("done");
+            setCutoverPhase("done");
             void onDataChangedRef.current();
           }
         }
@@ -630,1752 +404,1376 @@ export function HubMigrationStudio({
     [stopOutboundPolling],
   );
 
-  const runSmartMigration = async (
-    targetInput: string,
-    forceFullFleet = false,
+  const executeSmartMigration = async (
+    rawTarget: string,
+    forceAllNodes = false,
   ) => {
-    const isCanaryRun =
-      !forceFullFleet && outboundMethod === "existing" && useCanary;
-
-    if (isCanaryRun && !canaryNodeId) {
-      setCodeError("请选择 1 台用于金丝雀试路的节点，或取消勾选金丝雀试路");
+    const trimmed = rawTarget.trim();
+    if (!trimmed) {
+      setMigrationError("请填写目标面板地址或接收口令");
       return;
     }
 
+    const isPilot = !forceAllNodes && pilotOnly && Boolean(pilotNodeId);
     stopOutboundPolling();
-    const startConnected =
+    const initialConn =
       effectiveStatus?.connected_agents ?? onlineNodes.length;
-    setBaselineConnected(startConnected);
+    setBaselineConnected(initialConn);
     setMigrating(true);
     setMigrationError(null);
     setMigrationResult(null);
-    setLastMigratedMode(isCanaryRun ? "canary" : "full");
-    setLastMigrationTarget(targetInput);
-    setCutoverStep("connecting");
+    setLastWasPilot(isPilot);
+    setLastTargetUsed(trimmed);
+    setCutoverPhase("connecting");
 
     try {
       const res = await api.smartMigrateHub({
-        target_input: targetInput,
-        ...(isCanaryRun ? { node_ids: [canaryNodeId] } : {}),
-        ...(allowInsecureWs && targetInput.toLowerCase().startsWith("http://")
+        target_input: trimmed,
+        ...(isPilot ? { node_ids: [pilotNodeId] } : {}),
+        ...(allowInsecureHttp && trimmed.toLowerCase().startsWith("http://")
           ? { allow_insecure_ws: true }
           : {}),
       });
       setMigrationResult(res);
-      startOutboundPolling(res.dispatched, startConnected, isCanaryRun);
+      startOutboundPolling(res.dispatched, initialConn, isPilot);
     } catch (err) {
       const msg =
-        err instanceof Error ? err.message : "热迁移失败，请检查目标地址与网络";
-      setCutoverStep("error");
+        err instanceof Error ? err.message : "迁移请求失败，请检查目标地址或口令";
+      setCutoverPhase("error");
       setMigrationError(msg);
-      onNotify("danger", "热迁移执行失败", msg);
+      onNotify("danger", "平滑迁移未完成", msg);
     } finally {
       setMigrating(false);
     }
   };
 
-  const handleOutboundSubmit = async (e: React.FormEvent) => {
-    e.preventDefault();
-    if (migrating || cutoverStep === "polling") return;
-
-    if (outboundMethod === "existing") {
-      const trimmed = migrationCodeInput.trim();
-      if (!trimmed) {
-        setCodeError("请粘贴目标面板生成的 uobm1_ 迁移口令");
-        return;
-      }
-      if (!trimmed.startsWith("uobm1_")) {
-        setCodeError("迁移口令格式无效，必须以 uobm1_ 开头");
-        return;
-      }
-      setCodeError(null);
-      await runSmartMigration(trimmed, false);
-      return;
-    }
-
-    const trimmedUrl = newPanelUrlInput.trim();
-    if (!trimmedUrl) {
-      setUrlError("请填写目标自建面板域名或访问地址");
-      return;
-    }
-    if (trimmedUrl.startsWith("uobm1_")) {
-      setUrlError("此处需填写新面板网址；若已有口令请切换到第一种方式");
-      return;
-    }
-    setUrlError(null);
-    await runSmartMigration(trimmedUrl, false);
-  };
-
-  const handleGenerateInstallTicket = async () => {
-    if (generatingInstall) return;
-    setGeneratingInstall(true);
-    setInstallError(null);
-    try {
-      const res = await api.createMigrationTicket({
-        purpose: "install",
-        enable_watchdog: true,
-      });
-      setNowSec(Math.floor(Date.now() / 1000));
-      setInstallTicket(res);
-      onNotify(
-        "info",
-        "已签发自建 uniob-hub 一键安装命令",
-        `有效期至 ${formatTimestamp(res.expires_at)}`,
-      );
-      if (isCloudflare) {
-        void loadWatchdogAux();
-      }
-      void onDataChanged();
-    } catch (err) {
-      const msg = err instanceof Error ? err.message : "生成安装命令失败";
-      setInstallError(msg);
-      onNotify("danger", "生成安装命令失败", msg);
-    } finally {
-      setGeneratingInstall(false);
-    }
-  };
-
-  const handleGenerateReceiveTicket = async () => {
-    if (generatingReceive) return;
-    setGeneratingReceive(true);
-    setReceiveError(null);
-    try {
-      const baseTotal = effectiveStatus?.total_nodes ?? nodes.length;
-      const baseConnected =
-        effectiveStatus?.connected_agents ?? onlineNodes.length;
-      const res = await api.createMigrationTicket({ purpose: "receive" });
-      setNowSec(Math.floor(Date.now() / 1000));
-      setReceiveBaseTotal(baseTotal);
-      setReceiveBaseConnected(baseConnected);
-      lastInboundStatsRef.current = {
-        total: baseTotal,
-        connected: baseConnected,
-      };
-      setReceiveTicket(res);
-      onNotify(
-        "info",
-        "已签发一次性接收口令",
-        `有效期至 ${formatTimestamp(res.expires_at)}`,
-      );
-    } catch (err) {
-      const msg = err instanceof Error ? err.message : "生成接收口令失败";
-      setReceiveError(msg);
-      onNotify("danger", "生成接收口令失败", msg);
-    } finally {
-      setGeneratingReceive(false);
-    }
-  };
-
-  const handleSaveWatchdogSubmit = async (e: React.FormEvent) => {
-    e.preventDefault();
-    if (!isCloudflare || savingWatchdog) return;
-
-    const trimmedSecret = wdDraft.secret.trim();
-    if (trimmedSecret.length > 0 && trimmedSecret.length < 8) {
-      setWatchdogError("看门狗通信密钥至少需要 8 个字符");
-      return;
-    }
-
-    const nextCfg: WatchdogConfig = {
-      enabled: Boolean(wdDraft.enabled),
-      secret: trimmedSecret || (wdDraft.enabled ? generateHexSecret(24) : ""),
-      timeout_sec: Math.max(60, Math.round(wdDraft.timeout_sec || 900)),
-      cooldown_sec: Math.max(60, Math.round(wdDraft.cooldown_sec || 1800)),
-      hub_label: wdDraft.hub_label.trim() || "自建备用面板",
-      channel_ids: wdDraft.channel_ids ?? [],
+  const handleToggleWatchdogQuick = async (nextEnabled: boolean) => {
+    if (!isCloudflare || savingWd) return;
+    const nextPayload: WatchdogConfig = {
+      ...wdConfig,
+      enabled: nextEnabled,
+      secret:
+        nextEnabled && !wdConfig.secret.trim()
+          ? generateRandomSecret()
+          : wdConfig.secret,
     };
-
-    setSavingWatchdog(true);
-    setWatchdogError(null);
+    setSavingWd(true);
     try {
-      const updated = await api.updateWatchdogConfig(nextCfg);
-      setWdDraft(updated);
-      const nextStatus = await api.getHubStatus();
-      setLiveStatus(nextStatus);
-      await onDataChanged();
+      const saved = await api.updateWatchdogConfig(nextPayload);
+      setWdConfig(saved);
+      const latest = await api.getHubStatus();
+      setLiveStatus(latest);
       onNotify(
-        "success",
-        "Cloudflare 看门狗配置已保存",
-        updated.enabled
-          ? `超时阈值 ${formatDurationZh(updated.timeout_sec)}`
-          : "云端掉线看门狗已关闭",
+        "info",
+        saved.enabled ? "已开启掉线提醒" : "已关闭掉线提醒",
       );
     } catch (err) {
-      const msg = err instanceof Error ? err.message : "保存看门狗配置失败";
-      setWatchdogError(msg);
-      onNotify("danger", "保存看门狗配置失败", msg);
+      onNotify(
+        "danger",
+        err instanceof Error ? err.message : "更新掉线提醒失败",
+      );
     } finally {
-      setSavingWatchdog(false);
+      setSavingWd(false);
     }
   };
 
-  const handleExportJsonBackup = async () => {
+  const handleSaveWatchdogModal = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!isCloudflare || savingWd) return;
+    const payload: WatchdogConfig = {
+      ...wdConfig,
+      secret: wdConfig.secret.trim() || generateRandomSecret(),
+    };
+    setSavingWd(true);
+    try {
+      const saved = await api.updateWatchdogConfig(payload);
+      setWdConfig(saved);
+      const latest = await api.getHubStatus();
+      setLiveStatus(latest);
+      setWdModalOpen(false);
+      onNotify("success", "掉线提醒配置已保存");
+    } catch (err) {
+      onNotify(
+        "danger",
+        err instanceof Error ? err.message : "保存掉线提醒配置失败",
+      );
+    } finally {
+      setSavingWd(false);
+    }
+  };
+
+  const handleExportBackup = async () => {
     if (exporting) return;
     setExporting(true);
-    setBackupError(null);
     try {
       const bundle = await api.exportBundle();
-      const json = JSON.stringify(bundle, null, 2);
-      const blob = new Blob([json], { type: "application/json" });
+      const jsonText = JSON.stringify(bundle, null, 2);
+      const blob = new Blob([jsonText], { type: "application/json" });
       const url = URL.createObjectURL(blob);
-      const d = new Date();
-      const fname = `uniob-backup-${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}.json`;
+      const now = new Date();
+      const datePart = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, "0")}-${String(now.getDate()).padStart(2, "0")}`;
       const a = document.createElement("a");
       a.href = url;
-      a.download = fname;
+      a.download = `uniob-backup-${datePart}.json`;
       document.body.appendChild(a);
       a.click();
       a.remove();
       URL.revokeObjectURL(url);
 
-      setBundlePreviewText(summarizeBundleForPreview(bundle));
-      onNotify(
-        "success",
-        `已导出全量备份 ${fname}`,
-        `包含 ${Array.isArray(bundle.nodes) ? bundle.nodes.length : 0} 台节点与月度流量账本`,
-      );
+      const sizeKb = Math.max(1, Math.round(jsonText.length / 1024));
+      setLastBackupNote(`已导出 ${sizeKb} KB`);
+      onNotify("success", `备份文件已导出（${sizeKb} KB）`);
     } catch (err) {
-      const msg = err instanceof Error ? err.message : "导出全量备份失败";
-      setBackupError(msg);
-      onNotify("danger", "导出备份失败", msg);
+      onNotify(
+        "danger",
+        err instanceof Error ? err.message : "导出备份失败",
+      );
     } finally {
       setExporting(false);
     }
   };
 
-  const handleSelectBackupFile = async (
-    e: React.ChangeEvent<HTMLInputElement>,
-  ) => {
+  const handleFileChange = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
     e.target.value = "";
     if (!file) return;
-    setBackupError(null);
-    setImportResult(null);
+
     try {
-      const text = await file.text();
-      const parsed = JSON.parse(text) as ExportBundle;
-      if (
-        !parsed ||
-        typeof parsed !== "object" ||
-        Array.isArray(parsed) ||
-        !Array.isArray(parsed.nodes)
-      ) {
-        throw new Error("备份文件缺少有效的 nodes 数组，请选择 UniOB 导出的 JSON 备份");
+      const raw = await file.text();
+      const parsed = JSON.parse(raw) as unknown;
+      if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+        onNotify("danger", "备份文件格式无效");
+        return;
       }
-
-      const counts = {
-        nodes: parsed.nodes.length,
-        channels: Array.isArray(parsed.notification_channels)
-          ? parsed.notification_channels.length
-          : 0,
-        rules: Array.isArray(parsed.alert_rules) ? parsed.alert_rules.length : 0,
-        traffic_ledgers: Array.isArray(parsed.traffic_ledgers)
-          ? parsed.traffic_ledgers.length
-          : 0,
-      };
-
+      const bundle = parsed as ExportBundle;
       setPendingImport({
         fileName: file.name,
-        bundle: parsed,
-        counts,
+        bundle,
+        nodesCount: Array.isArray(bundle.nodes) ? bundle.nodes.length : 0,
+        rulesCount: Array.isArray(bundle.alert_rules)
+          ? bundle.alert_rules.length
+          : 0,
+        channelsCount: Array.isArray(bundle.notification_channels)
+          ? bundle.notification_channels.length
+          : 0,
         exportedAt:
-          typeof parsed.exported_at === "number" ? parsed.exported_at : null,
+          typeof bundle.exported_at === "number" ? bundle.exported_at : null,
       });
-      setBundlePreviewText(summarizeBundleForPreview(parsed));
-    } catch (err) {
-      const msg = err instanceof Error ? err.message : "解析备份文件失败";
-      setPendingImport(null);
-      setBackupError(msg);
-      onNotify("danger", "备份文件格式校验失败", msg);
+    } catch {
+      onNotify("danger", "无法解析所选 JSON 备份文件");
     }
   };
 
   const handleConfirmImport = async () => {
     if (!pendingImport || importing) return;
     setImporting(true);
-    setBackupError(null);
     try {
       const res = await api.importBundle(pendingImport.bundle);
-      setImportResult(res);
-      setPendingImport(null);
       await onDataChanged();
-      if (isCloudflare) {
-        void loadWatchdogAux();
-      }
+      setLastBackupNote(`已恢复 ${res.imported.nodes} 台服务器配置`);
+      setPendingImport(null);
       onNotify(
         "success",
-        "备份恢复成功",
-        `已导入 ${res.imported.nodes} 台节点、${res.imported.channels} 个渠道、${res.imported.rules} 条规则、${res.imported.traffic_ledgers} 条流量账本`,
+        `已恢复 ${res.imported.nodes} 台服务器与 ${res.imported.rules} 条规则`,
       );
     } catch (err) {
-      const msg = err instanceof Error ? err.message : "导入备份恢复失败";
-      setBackupError(msg);
-      onNotify("danger", "导入恢复失败", msg);
+      onNotify(
+        "danger",
+        err instanceof Error ? err.message : "导入恢复失败",
+      );
     } finally {
       setImporting(false);
     }
   };
 
-  const connectedAgents = effectiveStatus?.connected_agents ?? onlineNodes.length;
+  const connectedAgents =
+    effectiveStatus?.connected_agents ?? onlineNodes.length;
   const totalNodes = effectiveStatus?.total_nodes ?? nodes.length;
-  const wdBadge = getWatchdogBadge(effectiveStatus?.watchdog.status);
+  const onlineRatioPct =
+    totalNodes > 0 ? Math.round((connectedAgents / totalNodes) * 100) : 0;
 
   const dispatchedCount = migrationResult?.dispatched ?? 0;
-  const switchedEstimate =
-    dispatchedCount > 0
-      ? Math.max(0, Math.min(dispatchedCount, baselineConnected - connectedAgents))
-      : 0;
-  const progressPct =
-    cutoverStep === "done"
-      ? 100
-      : cutoverStep === "connecting"
-        ? 25
-        : cutoverStep === "polling"
-          ? dispatchedCount > 0
-            ? Math.min(
-                95,
-                Math.max(40, Math.round((switchedEstimate / dispatchedCount) * 100)),
-              )
-            : 95
-          : 0;
+  const switchedCount =
+    cutoverPhase === "done"
+      ? dispatchedCount
+      : cutoverPhase === "polling"
+        ? Math.min(
+            dispatchedCount,
+            Math.max(0, baselineConnected - connectedAgents),
+          )
+        : 0;
 
-  const arrivedTotalDelta = Math.max(0, totalNodes - receiveBaseTotal);
-  const arrivedConnectedDelta = Math.max(
-    0,
-    connectedAgents - receiveBaseConnected,
-  );
+  const stepIndex: 0 | 1 | 2 =
+    cutoverPhase === "done" ? 2 : cutoverPhase === "polling" ? 1 : 0;
+  const steps = ["连接校验", "平滑切换", "完成"] as const;
 
-  const watchdogPingUrl =
-    typeof window !== "undefined"
-      ? `${window.location.origin}/api/watchdog/ping`
-      : "/api/watchdog/ping";
-  const manualFlags = `--watchdog-url ${shellArg(watchdogPingUrl)} --watchdog-secret ${shellArg(
-    wdDraft.secret || "<未生成密钥>",
-  )}`;
-
-  const defaultSummarySnippet = useMemo(
-    () =>
-      JSON.stringify(
-        {
-          version: 2,
-          mode: hubMode ?? "loading",
-          nodes_count: nodes.length,
-          connected_agents: connectedAgents,
-          ...(isCloudflare ? { channels_count: channels.length } : {}),
-          note: "点击「导出全量 JSON 备份」以获取完整服务端快照，或选择本地备份文件校验导入",
-        },
-        null,
-        2,
-      ),
-    [hubMode, nodes.length, connectedAgents, isCloudflare, channels.length],
-  );
-
-  const displayedPreviewJson = bundlePreviewText ?? defaultSummarySnippet;
+  const wdStatus = effectiveStatus?.watchdog.status ?? "disabled";
+  const wdDotTone =
+    wdStatus === "healthy"
+      ? "ok"
+      : wdStatus === "waiting"
+        ? "warn"
+        : wdStatus === "stale"
+          ? "danger"
+          : "idle";
+  const wdLabelText = !isCloudflare
+    ? "自建端在线运行中"
+    : !wdConfig.enabled
+      ? "未开启"
+      : wdStatus === "healthy"
+        ? `正常 · ${formatRelativeTime(effectiveStatus?.watchdog.last_ping_ts)}`
+        : wdStatus === "stale"
+          ? "连接超时告警中"
+          : "等待首次信号";
 
   return (
-    <section className="space-y-5">
-      {/* Page Title & Live Engine Status */}
-      <div className="flex flex-col gap-3 lg:flex-row lg:items-end lg:justify-between">
-        <div>
-          <div className="flex flex-wrap items-center gap-2">
-            <h1 className="text-lg sm:text-xl font-bold tracking-tight text-[var(--text-primary)]">
-              双模控制面架构与无感热迁移工作台
-            </h1>
-            <span className="px-2 py-0.5 rounded-full text-[11px] font-mono-num font-medium bg-[var(--bg-elevated)] border border-[var(--border-subtle)] text-[var(--text-secondary)]">
-              {effectiveStatus?.version ?? "状态读取中..."}
-            </span>
-          </div>
-          <p className="mt-1 text-xs text-[var(--text-secondary)]">
-            在 Cloudflare Workers SCCH（边缘休眠）与自建 Rust uniob-hub（SQLite WAL）之间无损迁移全部节点、账本与告警路由。
-          </p>
-        </div>
-
-        <div className="flex flex-wrap items-center gap-2 text-xs">
-          <span className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-xl border border-[var(--border-subtle)] bg-[var(--bg-surface)] font-mono-num">
-            <Radio
-              className="w-3.5 h-3.5 text-emerald-500 animate-status-pulse"
-              aria-hidden="true"
-            />
-            <span>
-              在线探针 {connectedAgents} / {totalNodes}
-            </span>
-          </span>
-          <span
-            className={`inline-flex items-center gap-1.5 px-3 py-1.5 rounded-xl border font-medium ${wdBadge.cls}`}
-          >
-            <ShieldAlert className="w-3.5 h-3.5" aria-hidden="true" />
-            <span>看门狗：{wdBadge.label}</span>
-          </span>
-          <button
-            type="button"
+    <div className="space-y-6">
+      {/* Page Header */}
+      <SectionHeader
+        title="服务与迁移"
+        actions={
+          <Button
+            size="sm"
+            variant="ghost"
             disabled={refreshingStatus}
-            onClick={() => void handleRefreshHubStatus()}
-            className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-xl border border-[var(--border-subtle)] bg-[var(--bg-surface)] text-[var(--text-secondary)] hover:text-[var(--text-primary)] hover:bg-[var(--bg-card-hover)] disabled:opacity-50"
-          >
-            <RefreshCw
-              className={`w-3.5 h-3.5 ${refreshingStatus ? "animate-spin" : ""}`}
-              aria-hidden="true"
-            />
-            <span>刷新</span>
-          </button>
-        </div>
-      </div>
-
-      {/* 1. Dual-Mode Architecture Comparison Topology Cards */}
-      <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
-        {/* Card B: Cloudflare Workers SCCH */}
-        <article
-          className={`surface-card rounded-2xl p-5 space-y-4 transition-all ${
-            isCloudflare ? "ring-1" : "opacity-90"
-          }`}
-          style={
-            isCloudflare
-              ? {
-                  borderColor: "var(--accent-ring)",
-                  boxShadow: "0 0 0 1px var(--accent-ring)",
-                }
-              : undefined
-          }
-        >
-          <div className="flex items-start justify-between gap-3">
-            <div className="flex items-start gap-3">
-              <div className="w-10 h-10 rounded-xl bg-sky-500/15 border border-sky-500/35 flex items-center justify-center shrink-0">
-                <Cloud
-                  className="w-5 h-5 text-sky-600 dark:text-sky-400"
-                  aria-hidden="true"
-                />
-              </div>
-              <div>
-                <div className="flex flex-wrap items-center gap-2">
-                  <h2 className="text-sm font-bold text-[var(--text-primary)]">
-                    方向 B · Cloudflare Workers SCCH
-                  </h2>
-                  <span className="px-2 py-0.5 rounded-full text-[10px] font-mono-num font-semibold bg-emerald-500/15 text-emerald-700 dark:text-emerald-300 border border-emerald-500/30">
-                    $0.00 / 月 边缘休眠
-                  </span>
-                </div>
-                <p className="text-xs text-[var(--text-secondary)] mt-0.5">
-                  Co-Located 单例 FleetHubDO + Ring-Slab 分块环存 + 5m UTC Cohort 批
-                </p>
-              </div>
-            </div>
-
-            {isCloudflare ? (
-              <span className="shrink-0 inline-flex items-center gap-1 px-2.5 py-1 rounded-full text-[11px] font-semibold bg-emerald-500/15 text-emerald-700 dark:text-emerald-300 border border-emerald-500/35">
-                <CheckCircle2 className="w-3.5 h-3.5" aria-hidden="true" />
-                运行中
-              </span>
-            ) : (
-              <span className="shrink-0 px-2.5 py-1 rounded-full text-[11px] font-medium border border-[var(--border-subtle)] bg-[var(--bg-elevated)] text-[var(--text-muted)]">
-                {effectiveStatus ? "备用对等端" : "检测中"}
-              </span>
-            )}
-          </div>
-
-          <div className="rounded-xl border border-[var(--border-subtle)] bg-[var(--bg-inset)] p-3 flex flex-wrap items-center gap-2 text-[11px] font-mono-num">
-            <span className="px-2 py-1 rounded-lg bg-[var(--bg-surface)] border border-[var(--border-subtle)] text-[var(--text-primary)]">
-              uniob-agent v2
-            </span>
-            <ArrowRight
-              className="w-3.5 h-3.5 text-[var(--text-muted)]"
-              aria-hidden="true"
-            />
-            <span className="px-2 py-1 rounded-lg bg-sky-500/10 border border-sky-500/30 text-sky-700 dark:text-sky-300">
-              CF Edge Auth (0 DO唤醒)
-            </span>
-            <ArrowRight
-              className="w-3.5 h-3.5 text-[var(--text-muted)]"
-              aria-hidden="true"
-            />
-            <span className="px-2 py-1 rounded-lg bg-emerald-500/10 border border-emerald-500/30 text-emerald-700 dark:text-emerald-300">
-              FleetHubDO (1×128MB)
-            </span>
-          </div>
-
-          <div className="grid grid-cols-3 gap-2 text-center font-mono-num">
-            <div className="rounded-xl border border-[var(--border-subtle)] bg-[var(--bg-elevated)]/60 p-2">
-              <div className="text-[10px] text-[var(--text-muted)]">D1 写降幅</div>
-              <div className="text-xs font-bold text-emerald-600 dark:text-emerald-400 mt-0.5">
-                -93.4%
-              </div>
-            </div>
-            <div className="rounded-xl border border-[var(--border-subtle)] bg-[var(--bg-elevated)]/60 p-2">
-              <div className="text-[10px] text-[var(--text-muted)]">Free 承载力</div>
-              <div className="text-xs font-bold text-[var(--text-primary)] mt-0.5">
-                ≤ 112 台 Idle
-              </div>
-            </div>
-            <div className="rounded-xl border border-[var(--border-subtle)] bg-[var(--bg-elevated)]/60 p-2">
-              <div className="text-[10px] text-[var(--text-muted)]">水位滞回冲刷</div>
-              <div className="text-xs font-bold text-sky-600 dark:text-sky-400 mt-0.5">
-                0s 危急告警
-              </div>
-            </div>
-          </div>
-        </article>
-
-        {/* Card A: Self-hosted uniob-hub */}
-        <article
-          className={`surface-card rounded-2xl p-5 space-y-4 transition-all ${
-            isSelfHosted ? "ring-1" : "opacity-90"
-          }`}
-          style={
-            isSelfHosted
-              ? {
-                  borderColor: "var(--accent-ring)",
-                  boxShadow: "0 0 0 1px var(--accent-ring)",
-                }
-              : undefined
-          }
-        >
-          <div className="flex items-start justify-between gap-3">
-            <div className="flex items-start gap-3">
-              <div className="w-10 h-10 rounded-xl bg-emerald-500/15 border border-emerald-500/35 flex items-center justify-center shrink-0">
-                <Server
-                  className="w-5 h-5 text-emerald-600 dark:text-emerald-400"
-                  aria-hidden="true"
-                />
-              </div>
-              <div>
-                <div className="flex flex-wrap items-center gap-2">
-                  <h2 className="text-sm font-bold text-[var(--text-primary)]">
-                    方向 A · 自建 uniob-hub 节点中枢
-                  </h2>
-                  <span className="px-2 py-0.5 rounded-full text-[10px] font-mono-num font-semibold bg-indigo-500/15 text-indigo-700 dark:text-indigo-300 border border-indigo-500/30">
-                    Rust axum + SQLite WAL
-                  </span>
-                </div>
-                <p className="text-xs text-[var(--text-secondary)] mt-0.5">
-                  独立 VPS 零云端 DO 配额限制 + 本机 /proc 自采集 + CF 看门狗守卫
-                </p>
-              </div>
-            </div>
-
-            {isSelfHosted ? (
-              <span className="shrink-0 inline-flex items-center gap-1 px-2.5 py-1 rounded-full text-[11px] font-semibold bg-emerald-500/15 text-emerald-700 dark:text-emerald-300 border border-emerald-500/35">
-                <CheckCircle2 className="w-3.5 h-3.5" aria-hidden="true" />
-                运行中
-              </span>
-            ) : (
-              <span className="shrink-0 px-2.5 py-1 rounded-full text-[11px] font-medium border border-[var(--border-subtle)] bg-[var(--bg-elevated)] text-[var(--text-muted)]">
-                {effectiveStatus ? "备用对等端" : "检测中"}
-              </span>
-            )}
-          </div>
-
-          <div className="rounded-xl border border-[var(--border-subtle)] bg-[var(--bg-inset)] p-3 flex flex-wrap items-center gap-2 text-[11px] font-mono-num">
-            <span className="px-2 py-1 rounded-lg bg-[var(--bg-surface)] border border-[var(--border-subtle)] text-[var(--text-primary)]">
-              uniob-agent v2
-            </span>
-            <ArrowRight
-              className="w-3.5 h-3.5 text-[var(--text-muted)]"
-              aria-hidden="true"
-            />
-            <span className="px-2 py-1 rounded-lg bg-emerald-500/10 border border-emerald-500/30 text-emerald-700 dark:text-emerald-300">
-              uniob-hub (SQLite WAL)
-            </span>
-            <ArrowRight
-              className="w-3.5 h-3.5 text-[var(--text-muted)]"
-              aria-hidden="true"
-            />
-            <span className="px-2 py-1 rounded-lg bg-amber-500/10 border border-amber-500/30 text-amber-700 dark:text-amber-300">
-              Watchdog Ping
-            </span>
-          </div>
-
-          <div className="grid grid-cols-3 gap-2 text-center font-mono-num">
-            <div className="rounded-xl border border-[var(--border-subtle)] bg-[var(--bg-elevated)]/60 p-2">
-              <div className="text-[10px] text-[var(--text-muted)]">DO 计算账单</div>
-              <div className="text-xs font-bold text-emerald-600 dark:text-emerald-400 mt-0.5">
-                0 GB-s ($0)
-              </div>
-            </div>
-            <div className="rounded-xl border border-[var(--border-subtle)] bg-[var(--bg-elevated)]/60 p-2">
-              <div className="text-[10px] text-[var(--text-muted)]">大盘并发规模</div>
-              <div className="text-xs font-bold text-[var(--text-primary)] mt-0.5">
-                24×7 无上限
-              </div>
-            </div>
-            <div className="rounded-xl border border-[var(--border-subtle)] bg-[var(--bg-elevated)]/60 p-2">
-              <div className="text-[10px] text-[var(--text-muted)]">看门狗 Cron</div>
-              <div className="text-xs font-bold text-amber-600 dark:text-amber-400 mt-0.5">
-                每 5 分钟巡检
-              </div>
-            </div>
-          </div>
-        </article>
-      </div>
-
-      {/* 2. Zero-Downtime Canary Live Migration Workspace */}
-      <div className="surface-card rounded-2xl overflow-hidden">
-        <div className="px-5 pt-5 pb-0 border-b border-[var(--border-subtle)] space-y-3">
-          <div className="flex flex-wrap items-center justify-between gap-2">
-            <div className="flex items-center gap-2">
-              <ArrowLeftRight
-                className="w-4 h-4 text-[var(--accent-primary)]"
+            icon={
+              <RefreshCw
+                className={`h-3.5 w-3.5 ${refreshingStatus ? "animate-spin" : ""}`}
                 aria-hidden="true"
               />
-              <h2 className="text-sm font-bold text-[var(--text-primary)]">
-                无感金丝雀热迁移工作台（2-Phase Canary Cutover）
-              </h2>
-            </div>
-            <span className="text-[11px] text-[var(--text-muted)]">
-              基于 HMAC-SHA256 签名迁移指令 · 异常 60s 自动切回
-            </span>
-          </div>
-
-          <div
-            role="tablist"
-            aria-label="迁移方向切换"
-            className="flex gap-6"
+            }
+            onClick={() => void handleRefreshStatus()}
           >
-            <button
-              ref={outboundTabRef}
-              id={outboundTabId}
-              type="button"
-              role="tab"
-              aria-selected={activeTab === "outbound"}
-              aria-controls={outboundPanelId}
-              tabIndex={activeTab === "outbound" ? 0 : -1}
-              onClick={() => setActiveTab("outbound")}
-              onKeyDown={handleTabKeyDown}
-              className={`pb-3 text-xs font-medium transition-colors ${
-                activeTab === "outbound"
-                  ? "text-[var(--accent-primary)] border-b-2 border-[var(--accent-primary)]"
-                  : "text-[var(--text-secondary)] hover:text-[var(--text-primary)]"
-              }`}
-            >
-              迁往其他面板（Outbound）
-            </button>
-            <button
-              ref={inboundTabRef}
-              id={inboundTabId}
-              type="button"
-              role="tab"
-              aria-selected={activeTab === "inbound"}
-              aria-controls={inboundPanelId}
-              tabIndex={activeTab === "inbound" ? 0 : -1}
-              onClick={() => setActiveTab("inbound")}
-              onKeyDown={handleTabKeyDown}
-              className={`pb-3 text-xs font-medium transition-colors ${
-                activeTab === "inbound"
-                  ? "text-[var(--accent-primary)] border-b-2 border-[var(--accent-primary)]"
-                  : "text-[var(--text-secondary)] hover:text-[var(--text-primary)]"
-              }`}
-            >
-              迁入到此面板（Inbound）
-            </button>
-          </div>
-        </div>
+            刷新状态
+          </Button>
+        }
+      />
 
-        <div className="p-5 text-xs">
-          {/* TabPanel 1: Outbound */}
-          <div
-            id={outboundPanelId}
-            role="tabpanel"
-            aria-labelledby={outboundTabId}
-            hidden={activeTab !== "outbound"}
-            className="space-y-4"
+      {/* Block 1: 运行模式 */}
+      <section className="space-y-3">
+        <h3
+          style={{ color: "var(--text-secondary)" }}
+          className="text-[13px] font-medium"
+        >
+          运行模式
+        </h3>
+
+        <div className="grid grid-cols-1 gap-4 md:grid-cols-2">
+          {/* Card 1: Cloudflare 云端托管 */}
+          <Card
+            style={{
+              borderColor: isCloudflare
+                ? "var(--accent-border)"
+                : "var(--border-hairline)",
+            }}
+            className="flex flex-col justify-between gap-5 p-5"
           >
-            <form
-              noValidate
-              onSubmit={(e) => void handleOutboundSubmit(e)}
-              className="space-y-4"
-            >
-              <fieldset className="space-y-2">
-                <legend className="font-semibold text-[var(--text-primary)]">
-                  第 1 步：选择目标面板准备方式
-                </legend>
-                <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
-                  <label
-                    className={`flex items-start gap-2.5 rounded-xl border p-3.5 cursor-pointer transition-colors ${
-                      outboundMethod === "existing"
-                        ? "border-[var(--accent-ring)] bg-[var(--accent-soft)]"
-                        : "border-[var(--border-subtle)] bg-[var(--bg-inset)] hover:bg-[var(--bg-card-hover)]"
-                    }`}
+            <div className="space-y-4">
+              <div className="flex items-center justify-between gap-3">
+                <div className="flex items-center gap-2.5">
+                  <span
+                    style={{
+                      backgroundColor: "var(--accent-soft)",
+                      color: "var(--accent-ink)",
+                      border: "1px solid var(--accent-border)",
+                    }}
+                    className="inline-flex h-8 w-8 items-center justify-center rounded-[8px]"
                   >
-                    <input
-                      type="radio"
-                      name={`${baseId}-outbound-method`}
-                      checked={outboundMethod === "existing"}
-                      onChange={() => {
-                        setOutboundMethod("existing");
-                        setCodeError(null);
-                        setUrlError(null);
-                      }}
-                      className="mt-0.5 accent-emerald-600"
-                    />
-                    <div>
-                      <div className="font-semibold text-[var(--text-primary)]">
-                        已有目标面板（粘贴 uobm1_... 迁移口令）
-                      </div>
-                      <p className="text-[11px] text-[var(--text-secondary)] mt-0.5">
-                        目标 Cloudflare 或自建面板已启动，支持单节点金丝雀先导试路。
-                      </p>
-                    </div>
-                  </label>
-
-                  <label
-                    className={`flex items-start gap-2.5 rounded-xl border p-3.5 cursor-pointer transition-colors ${
-                      outboundMethod === "install"
-                        ? "border-[var(--accent-ring)] bg-[var(--accent-soft)]"
-                        : "border-[var(--border-subtle)] bg-[var(--bg-inset)] hover:bg-[var(--bg-card-hover)]"
-                    }`}
-                  >
-                    <input
-                      type="radio"
-                      name={`${baseId}-outbound-method`}
-                      checked={outboundMethod === "install"}
-                      onChange={() => {
-                        setOutboundMethod("install");
-                        setCodeError(null);
-                        setUrlError(null);
-                      }}
-                      className="mt-0.5 accent-emerald-600"
-                    />
-                    <div>
-                      <div className="font-semibold text-[var(--text-primary)]">
-                        全新安装一台自建 uniob-hub 并接管
-                      </div>
-                      <p className="text-[11px] text-[var(--text-secondary)] mt-0.5">
-                        生成含一次性同步票据与看门狗参数的一键部署命令。
-                      </p>
-                    </div>
-                  </label>
-                </div>
-              </fieldset>
-
-              {outboundMethod === "existing" ? (
-                <div className="rounded-xl border border-[var(--border-subtle)] bg-[var(--bg-inset)] p-4 space-y-4">
+                    <Cloud className="h-4 w-4" aria-hidden="true" />
+                  </span>
                   <div>
-                    <label
-                      htmlFor={codeInputId}
-                      className="block font-medium text-[var(--text-primary)] mb-1.5"
+                    <div
+                      style={{ color: "var(--text-primary)" }}
+                      className="text-[15px] font-semibold"
                     >
-                      目标面板迁移口令（uobm1_...）
-                    </label>
-                    <input
-                      id={codeInputId}
-                      type="text"
-                      value={migrationCodeInput}
-                      onChange={(e) => {
-                        setMigrationCodeInput(e.target.value);
-                        if (codeError) setCodeError(null);
-                      }}
-                      autoCorrect="off"
-                      autoCapitalize="none"
-                      spellCheck={false}
-                      placeholder="粘贴目标面板生成的 uobm1_ 开头迁移口令"
-                      className="w-full px-3 py-2 rounded-xl border border-[var(--border-subtle)] bg-[var(--bg-surface)] font-mono-num text-xs text-[var(--text-primary)]"
-                    />
-                    {codeError ? (
-                      <p className="mt-1.5 text-[11px] text-rose-600 dark:text-rose-400 flex items-center gap-1">
-                        <AlertCircle className="w-3.5 h-3.5 shrink-0" aria-hidden="true" />
-                        <span>{codeError}</span>
-                      </p>
-                    ) : (
-                      <p className="mt-1.5 text-[11px] text-[var(--text-muted)]">
-                        在目标面板打开「双模热迁移工作台 → 迁入到此面板」即可一键生成口令（30 分钟内有效）。
-                      </p>
-                    )}
+                      Cloudflare 云端托管
+                    </div>
+                    <div
+                      style={{ color: "var(--text-tertiary)" }}
+                      className="text-[12px]"
+                    >
+                      全球边缘接入 · 免维护部署
+                    </div>
                   </div>
+                </div>
 
-                  {/* Canary Trial Toggle */}
-                  <div className="space-y-2.5 pt-2 border-t border-[var(--border-subtle)]">
-                    <label
-                      htmlFor={canaryCheckId}
-                      className="inline-flex items-center gap-2 cursor-pointer font-medium text-[var(--text-primary)]"
+                {isCloudflare ? (
+                  <Badge tone="accent">当前使用</Badge>
+                ) : (
+                  <Badge tone="neutral">支持随时迁回</Badge>
+                )}
+              </div>
+
+              <MetricBar
+                label="当前节点在线率"
+                valueLabel={`${connectedAgents} / ${totalNodes}`}
+                valuePct={isCloudflare ? onlineRatioPct : 0}
+                thickness={4}
+              />
+
+              <div>
+                <button
+                  type="button"
+                  aria-expanded={showCloudDetails}
+                  onClick={() => setShowCloudDetails((v) => !v)}
+                  style={{ color: "var(--text-tertiary)" }}
+                  className="inline-flex cursor-pointer items-center gap-1 text-[12px] font-medium hover:text-[var(--text-primary)]"
+                >
+                  <span>{showCloudDetails ? "收起细项" : "查看细项"}</span>
+                  {showCloudDetails ? (
+                    <ChevronUp className="h-3.5 w-3.5" aria-hidden="true" />
+                  ) : (
+                    <ChevronDown className="h-3.5 w-3.5" aria-hidden="true" />
+                  )}
+                </button>
+
+                {showCloudDetails && (
+                  <div className="mt-2.5 grid grid-cols-3 gap-2">
+                    <div
+                      style={{
+                        backgroundColor: "var(--bg-subtle)",
+                        border: "1px solid var(--border-hairline)",
+                      }}
+                      className="rounded-[8px] px-3 py-2"
                     >
-                      <input
-                        id={canaryCheckId}
-                        type="checkbox"
-                        checked={useCanary}
-                        onChange={(e) => setUseCanary(e.target.checked)}
-                        className="rounded accent-emerald-600"
-                      />
-                      <span>
-                        启用金丝雀试路（先切流 1 台节点验证握手与心跳，再全量放行）
-                      </span>
-                    </label>
-
-                    {useCanary && (
-                      <div className="pl-6 flex flex-col sm:flex-row sm:items-center gap-2">
-                        <label
-                          htmlFor={canarySelectId}
-                          className="text-[11px] text-[var(--text-secondary)] shrink-0"
-                        >
-                          金丝雀试路节点：
-                        </label>
-                        {orderedNodes.length === 0 ? (
-                          <span className="text-[11px] text-amber-600 dark:text-amber-400">
-                            当前暂无服务器节点，取消勾选可直接同步全局配置。
-                          </span>
-                        ) : (
-                          <select
-                            id={canarySelectId}
-                            value={canaryNodeId}
-                            onChange={(e) => setCanaryNodeId(e.target.value)}
-                            className="w-full sm:max-w-xs px-3 py-1.5 rounded-xl border border-[var(--border-subtle)] bg-[var(--bg-surface)] text-[var(--text-primary)] text-xs"
-                          >
-                            {orderedNodes.map((n) => (
-                              <option key={n.id} value={n.id}>
-                                {n.region_flag ? `${n.region_flag} ` : ""}
-                                {n.name}（{n.online ? "在线" : "离线"}）
-                              </option>
-                            ))}
-                          </select>
-                        )}
+                      <div
+                        style={{ color: "var(--text-tertiary)" }}
+                        className="text-[11px]"
+                      >
+                        在线探针
                       </div>
-                    )}
+                      <div
+                        style={{ color: "var(--text-primary)" }}
+                        className="font-mono-num tabular-nums mt-0.5 text-[13.5px] font-semibold"
+                      >
+                        {connectedAgents} 台
+                      </div>
+                    </div>
+
+                    <div
+                      style={{
+                        backgroundColor: "var(--bg-subtle)",
+                        border: "1px solid var(--border-hairline)",
+                      }}
+                      className="rounded-[8px] px-3 py-2"
+                    >
+                      <div
+                        style={{ color: "var(--text-tertiary)" }}
+                        className="text-[11px]"
+                      >
+                        纳管总数
+                      </div>
+                      <div
+                        style={{ color: "var(--text-primary)" }}
+                        className="font-mono-num tabular-nums mt-0.5 text-[13.5px] font-semibold"
+                      >
+                        {totalNodes} 台
+                      </div>
+                    </div>
+
+                    <div
+                      style={{
+                        backgroundColor: "var(--bg-subtle)",
+                        border: "1px solid var(--border-hairline)",
+                      }}
+                      className="rounded-[8px] px-3 py-2"
+                    >
+                      <div
+                        style={{ color: "var(--text-tertiary)" }}
+                        className="text-[11px]"
+                      >
+                        服务版本
+                      </div>
+                      <div
+                        style={{ color: "var(--text-primary)" }}
+                        className="font-mono-num tabular-nums mt-0.5 text-[13.5px] font-semibold"
+                      >
+                        {effectiveStatus?.version
+                          ? `v${effectiveStatus.version.replace(/^v/, "")}`
+                          : "—"}
+                      </div>
+                    </div>
+                  </div>
+                )}
+              </div>
+            </div>
+          </Card>
+
+          {/* Card 2: 自建服务端 */}
+          <Card
+            style={{
+              borderColor: isSelfHosted
+                ? "var(--status-ok-border)"
+                : "var(--border-hairline)",
+            }}
+            className="flex flex-col justify-between gap-5 p-5"
+          >
+            <div className="space-y-4">
+              <div className="flex items-center justify-between gap-3">
+                <div className="flex items-center gap-2.5">
+                  <span
+                    style={{
+                      backgroundColor: "var(--bg-subtle)",
+                      color: "var(--text-primary)",
+                      border: "1px solid var(--border-hairline)",
+                    }}
+                    className="inline-flex h-8 w-8 items-center justify-center rounded-[8px]"
+                  >
+                    <Server className="h-4 w-4" aria-hidden="true" />
+                  </span>
+                  <div>
+                    <div
+                      style={{ color: "var(--text-primary)" }}
+                      className="text-[15px] font-semibold"
+                    >
+                      自建服务端
+                    </div>
+                    <div
+                      style={{ color: "var(--text-tertiary)" }}
+                      className="text-[12px]"
+                    >
+                      无额度限制 · 本地独立存储
+                    </div>
+                  </div>
+                </div>
+
+                {isSelfHosted ? (
+                  <Badge tone="ok">当前使用</Badge>
+                ) : (
+                  <Button
+                    size="xs"
+                    variant="secondary"
+                    disabled={generatingInstall}
+                    icon={
+                      generatingInstall ? (
+                        <Loader2
+                          className="h-3 w-3 animate-spin"
+                          aria-hidden="true"
+                        />
+                      ) : (
+                        <Sparkles className="h-3 w-3" aria-hidden="true" />
+                      )
+                    }
+                    onClick={() => void handleGenerateInstallCmd()}
+                  >
+                    生成部署命令
+                  </Button>
+                )}
+              </div>
+
+              {isSelfHosted ? (
+                <MetricBar
+                  label="当前自建节点在线率"
+                  valueLabel={`${connectedAgents} / ${totalNodes}`}
+                  valuePct={onlineRatioPct}
+                  toneOverride="ok"
+                  thickness={4}
+                />
+              ) : installTicket?.install_cmd &&
+                installTicket.expires_at > nowSec ? (
+                <div
+                  style={{
+                    backgroundColor: "var(--bg-subtle)",
+                    border: "1px solid var(--border-hairline)",
+                  }}
+                  className="space-y-2 rounded-[8px] p-3"
+                >
+                  <code
+                    style={{ color: "var(--text-primary)" }}
+                    className="block break-all font-mono text-[11.5px] leading-relaxed"
+                  >
+                    {installTicket.install_cmd}
+                  </code>
+                  <div className="flex items-center justify-between gap-2">
+                    <span
+                      style={{ color: "var(--text-tertiary)" }}
+                      className="font-mono-num tabular-nums text-[11px]"
+                    >
+                      有效期 {formatCountdown(installTicket.expires_at, nowSec)}
+                    </span>
+                    <CopyButton
+                      value={installTicket.install_cmd}
+                      label="复制安装命令"
+                    />
                   </div>
                 </div>
               ) : (
-                <div className="rounded-xl border border-[var(--border-subtle)] bg-[var(--bg-inset)] p-4 space-y-3.5">
-                  <div className="flex flex-wrap items-center justify-between gap-2">
-                    <div>
-                      <div className="font-semibold text-[var(--text-primary)]">
-                        生成自建 uniob-hub 一键安装与同步票据
-                      </div>
-                      <p className="text-[11px] text-[var(--text-secondary)] mt-0.5">
-                        部署时自动拉取当前所有节点哈希、月流量账本、告警规则与管理员密码，并配置看门狗心跳。
-                      </p>
-                    </div>
-                    <button
-                      type="button"
-                      disabled={generatingInstall}
-                      onClick={() => void handleGenerateInstallTicket()}
-                      className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-xl border border-[var(--accent-ring)] bg-[var(--accent-soft)] text-[var(--accent-primary)] font-semibold disabled:opacity-60"
-                    >
-                      {generatingInstall ? (
-                        <Loader2
-                          className="w-3.5 h-3.5 animate-spin"
-                          aria-hidden="true"
-                        />
-                      ) : (
-                        <Wand2 className="w-3.5 h-3.5" aria-hidden="true" />
-                      )}
-                      <span>
-                        {installTicket ? "重新生成命令" : "生成安装命令"}
-                      </span>
-                    </button>
-                  </div>
-
-                  {installError && (
-                    <div
-                      role="alert"
-                      className="rounded-xl border border-rose-500/40 bg-rose-500/10 px-3 py-2 text-[11px] text-rose-700 dark:text-rose-300"
-                    >
-                      {installError}
-                    </div>
-                  )}
-
-                  {installTicket?.install_cmd && (
-                    <div className="rounded-xl bg-[#070b14] border border-slate-800 p-3 space-y-2">
-                      <div className="flex flex-wrap items-center justify-between gap-2">
-                        <div className="flex flex-wrap items-center gap-2 text-[10px] font-mono-num text-slate-400">
-                          <span className="inline-flex items-center gap-1">
-                            <Clock className="w-3 h-3" aria-hidden="true" />
-                            <span>
-                              有效期至 {formatTimestamp(installTicket.expires_at)}（剩余{" "}
-                              {formatRemainingCountdown(
-                                installTicket.expires_at,
-                                nowSec,
-                              )}
-                              ）
-                            </span>
-                          </span>
-                          {installTicket.watchdog_armed && (
-                            <span className="px-1.5 py-0.5 rounded bg-emerald-500/20 text-emerald-300">
-                              已自动注入看门狗参数
-                            </span>
-                          )}
-                        </div>
-                        <StudioCopyButton
-                          text={installTicket.install_cmd}
-                          label="复制命令"
-                          ariaLabel="复制自建面板安装命令"
-                        />
-                      </div>
-                      <pre className="font-mono-num text-[11px] text-emerald-300 break-all whitespace-pre-wrap">
-                        {installTicket.install_cmd}
-                      </pre>
-                    </div>
-                  )}
-
-                  <div className="space-y-2">
-                    <label
-                      htmlFor={targetUrlId}
-                      className="block font-medium text-[var(--text-primary)]"
-                    >
-                      新自建面板访问地址（部署完成后输入地址并点击下方启动切流）
-                    </label>
-                    <input
-                      id={targetUrlId}
-                      type="text"
-                      value={newPanelUrlInput}
-                      onChange={(e) => {
-                        setNewPanelUrlInput(e.target.value);
-                        if (urlError) setUrlError(null);
-                      }}
-                      autoCorrect="off"
-                      autoCapitalize="none"
-                      spellCheck={false}
-                      placeholder="例如：hub.example.com 或 https://hub.example.com"
-                      className="w-full px-3 py-2 rounded-xl border border-[var(--border-subtle)] bg-[var(--bg-surface)] font-mono-num text-xs text-[var(--text-primary)]"
-                    />
-                    {urlError && (
-                      <p className="text-[11px] text-rose-600 dark:text-rose-400 flex items-center gap-1">
-                        <AlertCircle className="w-3.5 h-3.5 shrink-0" aria-hidden="true" />
-                        <span>{urlError}</span>
-                      </p>
-                    )}
-
-                    {newPanelUrlInput.trim().toLowerCase().startsWith("http://") && (
-                      <label
-                        htmlFor={insecureWsId}
-                        className="inline-flex cursor-pointer items-center gap-2 pt-1 text-[11px] text-amber-700 dark:text-amber-300"
-                      >
-                        <input
-                          id={insecureWsId}
-                          type="checkbox"
-                          checked={allowInsecureWs}
-                          onChange={(e) => setAllowInsecureWs(e.target.checked)}
-                          className="rounded accent-amber-600"
-                        />
-                        <span>
-                          允许非 HTTPS 明文 WebSocket 连接（allow_insecure_ws，仅内网或测试环境使用）
-                        </span>
-                      </label>
-                    )}
-                  </div>
+                <div
+                  style={{
+                    backgroundColor: "var(--bg-subtle)",
+                    border: "1px solid var(--border-hairline)",
+                    color: "var(--text-secondary)",
+                  }}
+                  className="flex items-center justify-between gap-3 rounded-[8px] px-3.5 py-2.5 text-[12.5px]"
+                >
+                  <span>一键部署新服务端并自动同步当前配置</span>
+                  <Button
+                    size="xs"
+                    variant="ghost"
+                    disabled={generatingInstall}
+                    onClick={() => void handleGenerateInstallCmd()}
+                  >
+                    获取命令
+                  </Button>
                 </div>
               )}
+            </div>
+          </Card>
+        </div>
+      </section>
 
-              {/* Action Bar */}
-              <div className="flex flex-wrap items-center justify-between gap-3">
-                <span className="text-[11px] text-[var(--text-muted)]">
-                  第 2 步：下发切流指令后，探针将持久化 /var/lib/uniob/endpoint_override.toml
-                </span>
-                <button
+      {/* Block 2: 平滑迁移 */}
+      <section className="space-y-3">
+        <div className="flex flex-wrap items-center justify-between gap-2">
+          <div className="flex items-center gap-2">
+            <h3
+              style={{ color: "var(--text-secondary)" }}
+              className="text-[13px] font-medium"
+            >
+              平滑迁移
+            </h3>
+            <Badge tone="neutral">失败自动回退</Badge>
+          </div>
+
+          <SegmentedControl<MigrationDirection>
+            ariaLabel="迁移方向"
+            value={direction}
+            onChange={setDirection}
+            options={[
+              { value: "outbound", label: "迁出至目标面板" },
+              { value: "inbound", label: "接收外部迁入" },
+            ]}
+          />
+        </div>
+
+        {direction === "outbound" ? (
+          <Card className="space-y-5 p-5">
+            {/* Target URL / Code Input + Action */}
+            <form
+              onSubmit={(e) => {
+                e.preventDefault();
+                void executeSmartMigration(targetInput, false);
+              }}
+              className="space-y-3"
+            >
+              <div className="flex flex-col gap-2.5 sm:flex-row sm:items-center">
+                <label htmlFor={targetInputId} className="sr-only">
+                  目标面板地址或接收口令
+                </label>
+                <input
+                  id={targetInputId}
+                  type="text"
+                  value={targetInput}
+                  onChange={(e) => setTargetInput(e.target.value)}
+                  placeholder="粘贴目标面板地址（https://...）或接收口令"
+                  style={{
+                    backgroundColor: "var(--bg-subtle)",
+                    color: "var(--text-primary)",
+                    border: "1px solid var(--border-subtle)",
+                  }}
+                  className="font-mono-num h-9 flex-1 rounded-[8px] px-3 text-[13px] outline-none"
+                />
+                <Button
                   type="submit"
-                  disabled={migrating || cutoverStep === "polling"}
-                  className="inline-flex items-center gap-1.5 px-4 py-2 rounded-xl text-white font-semibold shadow-sm disabled:opacity-60"
-                  style={{ backgroundColor: "var(--accent-solid)" }}
+                  size="md"
+                  variant="primary"
+                  disabled={migrating || cutoverPhase === "polling"}
+                  icon={
+                    migrating || cutoverPhase === "polling" ? (
+                      <Loader2
+                        className="h-3.5 w-3.5 animate-spin"
+                        aria-hidden="true"
+                      />
+                    ) : (
+                      <Play className="h-3.5 w-3.5" aria-hidden="true" />
+                    )
+                  }
                 >
-                  {migrating || cutoverStep === "polling" ? (
+                  {migrating || cutoverPhase === "polling"
+                    ? "迁移中..."
+                    : "开始迁移"}
+                </Button>
+              </div>
+
+              {/* Optional Pilot Single-Server Row & HTTP toggle */}
+              {(orderedNodes.length > 1 ||
+                targetInput.trim().toLowerCase().startsWith("http://")) && (
+                <div className="flex flex-wrap items-center gap-4 text-[12px]">
+                  {orderedNodes.length > 1 && (
+                    <div className="flex items-center gap-2">
+                      <Switch
+                        checked={pilotOnly}
+                        onChange={setPilotOnly}
+                        ariaLabel="先用单台服务器试迁"
+                      />
+                      <span style={{ color: "var(--text-secondary)" }}>
+                        先用 1 台服务器试迁
+                      </span>
+                      {pilotOnly && (
+                        <select
+                          aria-label="选择试迁服务器"
+                          value={pilotNodeId}
+                          onChange={(e) => setPilotNodeId(e.target.value)}
+                          style={{
+                            backgroundColor: "var(--bg-subtle)",
+                            color: "var(--text-primary)",
+                            border: "1px solid var(--border-hairline)",
+                          }}
+                          className="h-7 rounded-[6px] px-2 text-[12px]"
+                        >
+                          {orderedNodes.map((n) => (
+                            <option key={n.id} value={n.id}>
+                              {n.name}
+                            </option>
+                          ))}
+                        </select>
+                      )}
+                    </div>
+                  )}
+
+                  {targetInput.trim().toLowerCase().startsWith("http://") && (
+                    <label
+                      style={{ color: "var(--text-secondary)" }}
+                      className="inline-flex cursor-pointer items-center gap-1.5"
+                    >
+                      <input
+                        type="checkbox"
+                        checked={allowInsecureHttp}
+                        onChange={(e) => setAllowInsecureHttp(e.target.checked)}
+                        style={{ accentColor: "var(--ink-primary)" }}
+                      />
+                      <span>允许内网 HTTP 明文地址</span>
+                    </label>
+                  )}
+                </div>
+              )}
+            </form>
+
+            {migrationError && (
+              <div
+                role="alert"
+                style={{
+                  backgroundColor: "var(--status-danger-bg)",
+                  border: "1px solid var(--status-danger-border)",
+                  color: "var(--status-danger-ink)",
+                }}
+                className="rounded-[8px] px-3.5 py-2.5 text-[12.5px]"
+              >
+                {migrationError}
+              </div>
+            )}
+
+            {/* 3-Step Visual Progress Bar */}
+            <div
+              style={{
+                backgroundColor: "var(--bg-subtle)",
+                border: "1px solid var(--border-hairline)",
+              }}
+              className="space-y-3 rounded-[10px] px-4 py-3.5"
+            >
+              <div className="flex flex-wrap items-center justify-between gap-2">
+                <div className="flex flex-1 items-center justify-between gap-2">
+                  {steps.map((label, idx) => {
+                    const isErr = cutoverPhase === "error" && idx === 0;
+                    const completed =
+                      cutoverPhase !== "idle" &&
+                      cutoverPhase !== "error" &&
+                      (stepIndex > idx || cutoverPhase === "done");
+                    const current =
+                      (cutoverPhase === "connecting" && idx === 0) ||
+                      (cutoverPhase === "polling" && idx === 1);
+
+                    return (
+                      <React.Fragment key={label}>
+                        <div className="flex items-center gap-2">
+                          <span
+                            style={
+                              isErr
+                                ? {
+                                    backgroundColor: "var(--status-danger-bg)",
+                                    color: "var(--status-danger-ink)",
+                                    border:
+                                      "1px solid var(--status-danger-border)",
+                                  }
+                                : completed
+                                  ? {
+                                      backgroundColor: "var(--ink-primary)",
+                                      color: "var(--ink-on-primary)",
+                                    }
+                                  : current
+                                    ? {
+                                        backgroundColor: "var(--accent-soft)",
+                                        color: "var(--accent-ink)",
+                                        border:
+                                          "1px solid var(--accent-border)",
+                                      }
+                                    : {
+                                        backgroundColor: "var(--bg-sheet)",
+                                        color: "var(--text-tertiary)",
+                                        border:
+                                          "1px solid var(--border-subtle)",
+                                      }
+                            }
+                            className="font-mono-num inline-flex h-6 w-6 shrink-0 items-center justify-center rounded-full text-[11px] font-semibold"
+                          >
+                            {completed ? (
+                              <Check className="h-3.5 w-3.5" aria-hidden="true" />
+                            ) : (
+                              idx + 1
+                            )}
+                          </span>
+                          <span
+                            style={{
+                              color:
+                                completed || current
+                                  ? "var(--text-primary)"
+                                  : "var(--text-tertiary)",
+                            }}
+                            className="text-[12.5px] font-medium whitespace-nowrap"
+                          >
+                            {label}
+                          </span>
+                        </div>
+
+                        {idx < steps.length - 1 && (
+                          <div
+                            style={{
+                              backgroundColor: completed
+                                ? "var(--ink-primary)"
+                                : "var(--border-subtle)",
+                            }}
+                            className="mx-2 h-[1.5px] flex-1 rounded-full transition-colors"
+                          />
+                        )}
+                      </React.Fragment>
+                    );
+                  })}
+                </div>
+
+                <span
+                  style={{
+                    color:
+                      cutoverPhase === "error"
+                        ? "var(--status-danger-ink)"
+                        : "var(--text-secondary)",
+                  }}
+                  className="font-mono-num tabular-nums ml-3 text-[12px] font-medium whitespace-nowrap"
+                >
+                  {cutoverPhase === "idle"
+                    ? `待命 · ${onlineNodes.length} 台在线`
+                    : cutoverPhase === "error"
+                      ? "原连接保持不变"
+                      : `${switchedCount} / ${dispatchedCount}`}
+                </span>
+              </div>
+
+              {cutoverPhase === "done" && lastWasPilot && lastTargetUsed && (
+                <div
+                  style={{ borderTop: "1px solid var(--border-hairline)" }}
+                  className="flex items-center justify-between gap-3 pt-2.5"
+                >
+                  <span
+                    style={{ color: "var(--text-secondary)" }}
+                    className="text-[12px]"
+                  >
+                    单台试迁已完成，可一键切换其余全部在线服务器
+                  </span>
+                  <Button
+                    size="xs"
+                    variant="primary"
+                    onClick={() =>
+                      void executeSmartMigration(lastTargetUsed, true)
+                    }
+                  >
+                    迁移全部服务器
+                  </Button>
+                </div>
+              )}
+            </div>
+
+            {/* Compact Visual Node Status Grid */}
+            {nodes.length > 0 && (
+              <div className="grid grid-cols-1 gap-2.5 sm:grid-cols-2 lg:grid-cols-4">
+                {nodes.map((node) => {
+                  const targetedByRun =
+                    cutoverPhase !== "idle" &&
+                    (!lastWasPilot || node.id === pilotNodeId);
+                  const isSwitched =
+                    targetedByRun &&
+                    (cutoverPhase === "done" || !node.online);
+                  const isSwitching =
+                    targetedByRun && cutoverPhase === "polling" && node.online;
+
+                  const dotTone = isSwitched
+                    ? "ok"
+                    : isSwitching
+                      ? "accent"
+                      : node.online
+                        ? "ok"
+                        : "idle";
+
+                  const phaseText = isSwitched
+                    ? "已切流"
+                    : isSwitching
+                      ? "切换中"
+                      : node.online
+                        ? "在线"
+                        : "离线";
+
+                  const barPct = isSwitched
+                    ? 100
+                    : isSwitching
+                      ? 65
+                      : node.online
+                        ? 100
+                        : 0;
+
+                  return (
+                    <div
+                      key={node.id}
+                      style={{
+                        backgroundColor: "var(--bg-card)",
+                        border: "1px solid var(--border-hairline)",
+                      }}
+                      className="flex flex-col gap-2 rounded-[8px] p-3"
+                    >
+                      <div className="flex items-center justify-between gap-1.5">
+                        <span
+                          style={{ color: "var(--text-primary)" }}
+                          className="truncate text-[12.5px] font-medium"
+                        >
+                          {node.name}
+                        </span>
+                        <StatusDot tone={dotTone} pulse={isSwitching} />
+                      </div>
+
+                      <div className="flex items-center justify-between text-[11px]">
+                        <span
+                          style={{ color: "var(--text-tertiary)" }}
+                          className="font-mono-num truncate"
+                        >
+                          {node.region_code || node.group_name || "Linux"}
+                        </span>
+                        <span style={{ color: "var(--text-secondary)" }}>
+                          {phaseText}
+                        </span>
+                      </div>
+
+                      <MetricBar
+                        valuePct={barPct}
+                        toneOverride={
+                          isSwitching ? "accent" : node.online ? "ok" : "ink"
+                        }
+                        thickness={3}
+                      />
+                    </div>
+                  );
+                })}
+              </div>
+            )}
+          </Card>
+        ) : (
+          /* Inbound Receive Card */
+          <Card className="space-y-4 p-5">
+            <div className="flex flex-wrap items-center justify-between gap-3">
+              <div>
+                <div
+                  style={{ color: "var(--text-primary)" }}
+                  className="text-[14px] font-semibold"
+                >
+                  生成接收口令
+                </div>
+                <div
+                  style={{ color: "var(--text-tertiary)" }}
+                  className="text-[12px]"
+                >
+                  将生成的口令粘贴至旧面板「迁出至目标面板」即可自动同步并切流
+                </div>
+              </div>
+
+              <Button
+                size="sm"
+                variant="primary"
+                disabled={generatingReceive}
+                icon={
+                  generatingReceive ? (
                     <Loader2
-                      className="w-3.5 h-3.5 animate-spin"
+                      className="h-3.5 w-3.5 animate-spin"
                       aria-hidden="true"
                     />
                   ) : (
-                    <Zap className="w-3.5 h-3.5" aria-hidden="true" />
-                  )}
-                  <span>
-                    {migrating
-                      ? "同步并下发切流中..."
-                      : cutoverStep === "polling"
-                        ? "实时观测切流状态..."
-                        : outboundMethod === "existing" && useCanary
-                          ? "启动金丝雀试路切流"
-                          : "一键同步并启动全量切流"}
-                  </span>
-                </button>
-              </div>
-            </form>
+                    <KeyRound className="h-3.5 w-3.5" aria-hidden="true" />
+                  )
+                }
+                onClick={() => void handleGenerateReceiveCode()}
+              >
+                {receiveTicket ? "重新生成口令" : "生成接收口令"}
+              </Button>
+            </div>
 
-            {/* Live 3-Phase Cutover Progress Telemetry */}
-            {cutoverStep !== "idle" && (
-              <div className="rounded-2xl border border-[var(--border-subtle)] bg-[var(--bg-elevated)]/65 p-4 space-y-3.5">
-                <div className="flex flex-wrap items-center justify-between gap-2">
-                  <div className="flex items-center gap-2 font-semibold text-[var(--text-primary)]">
-                    <Sparkles
-                      className="w-4 h-4 text-[var(--accent-primary)]"
+            {receiveTicket?.migration_code &&
+              receiveTicket.expires_at > nowSec && (
+                <div
+                  style={{
+                    backgroundColor: "var(--bg-subtle)",
+                    border: "1px solid var(--border-subtle)",
+                  }}
+                  className="space-y-2.5 rounded-[10px] p-3.5"
+                >
+                  <code
+                    style={{ color: "var(--text-primary)" }}
+                    className="block break-all font-mono text-[12px] leading-relaxed"
+                  >
+                    {receiveTicket.migration_code}
+                  </code>
+                  <div className="flex items-center justify-between gap-2">
+                    <StatusDot
+                      tone="accent"
+                      pulse
+                      label={`等待迁入 · 有效期 ${formatCountdown(receiveTicket.expires_at, nowSec)} · 当前在线 ${connectedAgents} / ${totalNodes}`}
+                      className="font-mono-num"
+                    />
+                    <CopyButton
+                      value={receiveTicket.migration_code}
+                      label="复制口令"
+                    />
+                  </div>
+                </div>
+              )}
+          </Card>
+        )}
+      </section>
+
+      {/* Block 3: 辅助保障 */}
+      <section className="space-y-3">
+        <h3
+          style={{ color: "var(--text-secondary)" }}
+          className="text-[13px] font-medium"
+        >
+          辅助保障
+        </h3>
+
+        <div className="grid grid-cols-1 gap-4 md:grid-cols-2">
+          {/* 掉线提醒 */}
+          <Card className="flex flex-wrap items-center justify-between gap-4 p-5">
+            <div className="space-y-1">
+              <div
+                style={{ color: "var(--text-primary)" }}
+                className="text-[14px] font-semibold"
+              >
+                掉线提醒
+              </div>
+              <StatusDot
+                tone={isCloudflare ? wdDotTone : "ok"}
+                pulse={isCloudflare && wdConfig.enabled}
+                label={wdLabelText}
+                className="font-mono-num"
+              />
+            </div>
+
+            {isCloudflare ? (
+              <div className="flex items-center gap-2.5">
+                <Button
+                  size="xs"
+                  variant="ghost"
+                  icon={
+                    <SlidersHorizontal
+                      className="h-3.5 w-3.5"
                       aria-hidden="true"
                     />
-                    <span>
-                      实时 3 阶段切流遥测（
-                      {lastMigratedMode === "canary" ? "金丝雀试路" : "全量集群"}
-                      ）
-                    </span>
-                  </div>
-                  <span className="font-mono-num text-[11px] font-semibold text-[var(--accent-primary)]">
-                    {progressPct}%
-                  </span>
-                </div>
+                  }
+                  onClick={() => setWdModalOpen(true)}
+                >
+                  设置
+                </Button>
+                <Switch
+                  checked={wdConfig.enabled}
+                  disabled={savingWd}
+                  onChange={(next) => void handleToggleWatchdogQuick(next)}
+                  ariaLabel="开启自建端掉线提醒"
+                />
+              </div>
+            ) : (
+              <Button
+                size="xs"
+                variant="secondary"
+                disabled={refreshingStatus}
+                onClick={() => void handleRefreshStatus()}
+              >
+                立即检测
+              </Button>
+            )}
+          </Card>
 
-                {cutoverStep === "error" && migrationError && (
-                  <div
-                    role="alert"
-                    className="rounded-xl border border-rose-500/40 bg-rose-500/10 px-3.5 py-2.5 text-rose-700 dark:text-rose-300 flex items-start gap-2"
-                  >
-                    <AlertCircle className="w-4 h-4 shrink-0 mt-0.5" aria-hidden="true" />
-                    <span>{migrationError}</span>
-                  </div>
-                )}
+          {/* 数据备份 */}
+          <Card className="flex flex-wrap items-center justify-between gap-4 p-5">
+            <div className="space-y-1">
+              <div
+                style={{ color: "var(--text-primary)" }}
+                className="text-[14px] font-semibold"
+              >
+                数据备份
+              </div>
+              <div
+                style={{ color: "var(--text-tertiary)" }}
+                className="font-mono-num text-[12px]"
+              >
+                {lastBackupNote ?? `${totalNodes} 台服务器配置与规则快照`}
+              </div>
+            </div>
 
-                <div className="h-2 w-full rounded-full bg-[var(--bg-inset)] overflow-hidden">
-                  <div
-                    className={`h-full rounded-full transition-all duration-300 ${
-                      cutoverStep === "error" ? "bg-rose-500" : ""
-                    }`}
-                    style={{
-                      width: `${cutoverStep === "error" ? 100 : progressPct}%`,
-                      backgroundColor:
-                        cutoverStep === "error"
-                          ? undefined
-                          : "var(--accent-primary)",
-                    }}
-                  />
-                </div>
+            <div className="flex items-center gap-2">
+              <input
+                ref={fileInputRef}
+                type="file"
+                accept=".json,application/json"
+                className="sr-only"
+                onChange={(e) => void handleFileChange(e)}
+              />
+              <Button
+                size="sm"
+                variant="secondary"
+                disabled={exporting}
+                icon={
+                  exporting ? (
+                    <Loader2
+                      className="h-3.5 w-3.5 animate-spin"
+                      aria-hidden="true"
+                    />
+                  ) : (
+                    <Download className="h-3.5 w-3.5" aria-hidden="true" />
+                  )
+                }
+                onClick={() => void handleExportBackup()}
+              >
+                导出备份
+              </Button>
+              <Button
+                size="sm"
+                variant="ghost"
+                disabled={importing}
+                icon={<Upload className="h-3.5 w-3.5" aria-hidden="true" />}
+                onClick={() => fileInputRef.current?.click()}
+              >
+                导入恢复
+              </Button>
+            </div>
+          </Card>
+        </div>
+      </section>
 
-                <ol className="grid grid-cols-1 sm:grid-cols-3 gap-2.5">
-                  <li
-                    className={`rounded-xl border p-3 ${
-                      cutoverStep === "error"
-                        ? "border-rose-500/40 bg-rose-500/10"
-                        : cutoverStep === "connecting"
-                          ? "border-[var(--accent-ring)] bg-[var(--accent-soft)]"
-                          : "border-emerald-500/30 bg-emerald-500/10"
-                    }`}
-                  >
-                    <div className="flex items-center gap-1.5 font-semibold text-[var(--text-primary)]">
-                      {cutoverStep === "connecting" ? (
-                        <Loader2
-                          className="w-3.5 h-3.5 animate-spin text-[var(--accent-primary)]"
-                          aria-hidden="true"
-                        />
-                      ) : cutoverStep === "error" ? (
-                        <AlertCircle
-                          className="w-3.5 h-3.5 text-rose-500"
-                          aria-hidden="true"
-                        />
-                      ) : (
-                        <CheckCircle2
-                          className="w-3.5 h-3.5 text-emerald-500"
-                          aria-hidden="true"
-                        />
-                      )}
-                      <span>1. 目标端握手与校验</span>
-                    </div>
-                    <p className="mt-1 text-[11px] font-mono-num text-[var(--text-secondary)] break-all">
-                      {migrationResult
-                        ? `epoch = ${migrationResult.epoch} · ${migrationResult.target_origin}`
-                        : cutoverStep === "error"
-                          ? "握手或传输校验失败"
-                          : "正在校验目标控制面与迁移凭据..."}
-                    </p>
-                  </li>
+      {/* Watchdog Settings Modal (Cloudflare mode only) */}
+      <NativeDialog
+        open={wdModalOpen && isCloudflare}
+        onClose={() => {
+          if (!savingWd) setWdModalOpen(false);
+        }}
+        titleId={wdModalTitleId}
+        maxWidthClass="max-w-[420px]"
+      >
+        <form
+          onSubmit={(e) => void handleSaveWatchdogModal(e)}
+          className="space-y-4 p-5"
+        >
+          <div className="flex items-center justify-between">
+            <h3
+              id={wdModalTitleId}
+              style={{ color: "var(--text-primary)" }}
+              className="text-[15px] font-semibold"
+            >
+              掉线提醒设置
+            </h3>
+            <IconCloseButton
+              onClick={() => {
+                if (!savingWd) setWdModalOpen(false);
+              }}
+            />
+          </div>
 
-                  <li
-                    className={`rounded-xl border p-3 ${
-                      migrationResult
-                        ? "border-emerald-500/30 bg-emerald-500/10"
-                        : "border-[var(--border-subtle)] bg-[var(--bg-surface)] opacity-75"
-                    }`}
-                  >
-                    <div className="flex items-center gap-1.5 font-semibold text-[var(--text-primary)]">
-                      {migrationResult ? (
-                        <CheckCircle2
-                          className="w-3.5 h-3.5 text-emerald-500"
-                          aria-hidden="true"
-                        />
-                      ) : (
-                        <span className="w-3.5 h-3.5 rounded-full border border-current opacity-40" />
-                      )}
-                      <span>2. 全量状态 Bundle 同步</span>
-                    </div>
-                    <p className="mt-1 text-[11px] font-mono-num text-[var(--text-secondary)]">
-                      {migrationResult
-                        ? `节点 ${migrationResult.synced.nodes} · 渠道 ${migrationResult.synced.channels} · 规则 ${migrationResult.synced.rules} · 账本 ${migrationResult.synced.traffic_ledgers}`
-                        : "等待状态快照写入目标端..."}
-                    </p>
-                  </li>
+          <div className="space-y-3">
+            <div className="space-y-1">
+              <label
+                htmlFor="wd-hub-label"
+                style={{ color: "var(--text-secondary)" }}
+                className="block text-[12px] font-medium"
+              >
+                守护对象名称
+              </label>
+              <input
+                id="wd-hub-label"
+                type="text"
+                value={wdConfig.hub_label}
+                onChange={(e) =>
+                  setWdConfig((prev) => ({
+                    ...prev,
+                    hub_label: e.target.value,
+                  }))
+                }
+                style={{
+                  backgroundColor: "var(--bg-subtle)",
+                  color: "var(--text-primary)",
+                  border: "1px solid var(--border-subtle)",
+                }}
+                className="h-9 w-full rounded-[8px] px-3 text-[13px] outline-none"
+              />
+            </div>
 
-                  <li
-                    className={`rounded-xl border p-3 ${
-                      cutoverStep === "done"
-                        ? "border-emerald-500/40 bg-emerald-500/12"
-                        : cutoverStep === "polling"
-                          ? "border-sky-500/40 bg-sky-500/12"
-                          : "border-[var(--border-subtle)] bg-[var(--bg-surface)] opacity-75"
-                    }`}
-                  >
-                    <div className="flex items-center gap-1.5 font-semibold text-[var(--text-primary)]">
-                      {cutoverStep === "polling" ? (
-                        <Loader2
-                          className="w-3.5 h-3.5 animate-spin text-sky-500"
-                          aria-hidden="true"
-                        />
-                      ) : cutoverStep === "done" ? (
-                        <CheckCircle2
-                          className="w-3.5 h-3.5 text-emerald-500"
-                          aria-hidden="true"
-                        />
-                      ) : (
-                        <span className="w-3.5 h-3.5 rounded-full border border-current opacity-40" />
-                      )}
-                      <span>3. 平滑切流与遥测确认</span>
-                    </div>
-                    <p className="mt-1 text-[11px] font-mono-num text-[var(--text-secondary)]">
-                      {!migrationResult
-                        ? "等待派发切流指令"
-                        : dispatchedCount === 0
-                          ? "当前无在线探针需要切流，配置已就绪"
-                          : cutoverStep === "done"
-                            ? `已派发 ${dispatchedCount} 台 · 本面板剩余在线 ${connectedAgents} 台`
-                            : `已切离 ${switchedEstimate} / ${dispatchedCount} 台（轮询 ${pollElapsedSec}s / 30s）`}
-                    </p>
-                  </li>
-                </ol>
-
-                {migrationResult && (
-                  <div className="flex flex-wrap items-center justify-between gap-2 pt-2 border-t border-[var(--border-subtle)]">
-                    <div className="flex flex-wrap items-center gap-2">
-                      {cutoverStep === "done" &&
-                        lastMigratedMode === "canary" &&
-                        lastMigrationTarget && (
-                          <button
-                            type="button"
-                            disabled={migrating}
-                            onClick={() =>
-                              void runSmartMigration(lastMigrationTarget, true)
+            <div className="space-y-1.5">
+              <span
+                style={{ color: "var(--text-secondary)" }}
+                className="block text-[12px] font-medium"
+              >
+                超时判定时长
+              </span>
+              <div className="grid grid-cols-3 gap-1.5">
+                {TIMEOUT_OPTIONS.map((opt) => {
+                  const selected = wdConfig.timeout_sec === opt.sec;
+                  return (
+                    <button
+                      key={opt.sec}
+                      type="button"
+                      aria-pressed={selected}
+                      onClick={() =>
+                        setWdConfig((prev) => ({
+                          ...prev,
+                          timeout_sec: opt.sec,
+                        }))
+                      }
+                      style={
+                        selected
+                          ? {
+                              backgroundColor: "var(--ink-primary)",
+                              color: "var(--ink-on-primary)",
                             }
-                            className="inline-flex items-center gap-1.5 px-3.5 py-1.5 rounded-xl text-xs font-semibold bg-emerald-600 hover:bg-emerald-500 text-white disabled:opacity-60"
-                          >
-                            <Zap className="w-3.5 h-3.5" aria-hidden="true" />
-                            <span>继续切流剩余节点</span>
-                          </button>
-                        )}
-                      <span className="text-[11px] text-[var(--text-secondary)]">
-                        {cutoverStep === "done" && lastMigratedMode === "canary"
-                          ? "金丝雀节点切流已完成，可点击右侧前往目标面板核验或一键全量放行。"
-                          : "目标面板已接收状态同步，可打开新面板实时查看探针上线。"}
-                      </span>
-                    </div>
-
-                    <a
-                      href={migrationResult.target_origin}
-                      target="_blank"
-                      rel="noopener noreferrer"
-                      className="inline-flex items-center gap-1.5 px-3.5 py-1.5 rounded-xl text-xs font-semibold border border-[var(--border-strong)] bg-[var(--bg-surface)] text-[var(--text-primary)] hover:bg-[var(--bg-card-hover)]"
+                          : {
+                              backgroundColor: "var(--bg-subtle)",
+                              color: "var(--text-secondary)",
+                              border: "1px solid var(--border-hairline)",
+                            }
+                      }
+                      className="font-mono-num h-8 cursor-pointer rounded-[7px] text-[12px] font-medium"
                     >
-                      <span>打开新面板</span>
-                      <ExternalLink className="w-3.5 h-3.5" aria-hidden="true" />
-                    </a>
-                  </div>
+                      {opt.label}
+                    </button>
+                  );
+                })}
+              </div>
+            </div>
+
+            <div className="space-y-1">
+              <div className="flex items-center justify-between">
+                <label
+                  htmlFor="wd-secret"
+                  style={{ color: "var(--text-secondary)" }}
+                  className="text-[12px] font-medium"
+                >
+                  通信密钥
+                </label>
+                <button
+                  type="button"
+                  onClick={() =>
+                    setWdConfig((prev) => ({
+                      ...prev,
+                      secret: generateRandomSecret(),
+                    }))
+                  }
+                  style={{ color: "var(--accent-ink)" }}
+                  className="cursor-pointer text-[11.5px] font-medium hover:underline"
+                >
+                  随机生成
+                </button>
+              </div>
+              <div className="flex items-center gap-1.5">
+                <input
+                  id="wd-secret"
+                  type="text"
+                  value={wdConfig.secret}
+                  onChange={(e) =>
+                    setWdConfig((prev) => ({ ...prev, secret: e.target.value }))
+                  }
+                  style={{
+                    backgroundColor: "var(--bg-subtle)",
+                    color: "var(--text-primary)",
+                    border: "1px solid var(--border-subtle)",
+                  }}
+                  className="font-mono-num h-9 flex-1 rounded-[8px] px-3 text-[12.5px] outline-none"
+                />
+                {wdConfig.secret && (
+                  <CopyButton value={wdConfig.secret} label="复制" />
                 )}
+              </div>
+            </div>
+
+            {channels.length > 0 && (
+              <div className="space-y-1.5">
+                <span
+                  style={{ color: "var(--text-secondary)" }}
+                  className="block text-[12px] font-medium"
+                >
+                  告警通知渠道
+                </span>
+                <div className="flex flex-wrap gap-1.5">
+                  {channels.map((ch) => {
+                    const selected = (wdConfig.channel_ids ?? []).includes(
+                      ch.id,
+                    );
+                    return (
+                      <button
+                        key={ch.id}
+                        type="button"
+                        aria-pressed={selected}
+                        onClick={() =>
+                          setWdConfig((prev) => {
+                            const cur = prev.channel_ids ?? [];
+                            return {
+                              ...prev,
+                              channel_ids: selected
+                                ? cur.filter((id) => id !== ch.id)
+                                : [...cur, ch.id],
+                            };
+                          })
+                        }
+                        style={
+                          selected
+                            ? {
+                                backgroundColor: "var(--ink-primary)",
+                                color: "var(--ink-on-primary)",
+                              }
+                            : {
+                                backgroundColor: "var(--bg-subtle)",
+                                color: "var(--text-secondary)",
+                                border: "1px solid var(--border-hairline)",
+                              }
+                        }
+                        className="h-7 cursor-pointer rounded-[6px] px-2.5 text-[12px] font-medium"
+                      >
+                        {ch.name}
+                      </button>
+                    );
+                  })}
+                </div>
               </div>
             )}
           </div>
 
-          {/* TabPanel 2: Inbound */}
-          <div
-            id={inboundPanelId}
-            role="tabpanel"
-            aria-labelledby={inboundTabId}
-            hidden={activeTab !== "inbound"}
-            className="space-y-4"
-          >
-            <div className="rounded-xl border border-[var(--border-subtle)] bg-[var(--bg-inset)] p-4 space-y-3.5">
-              <div className="flex flex-wrap items-center justify-between gap-3">
-                <div>
-                  <div className="font-semibold text-[var(--text-primary)]">
-                    签发一次性接收口令，从旧面板拉取完整状态 Bundle
-                  </div>
-                  <p className="text-[11px] text-[var(--text-secondary)] mt-0.5">
-                    自动接收原面板的节点密钥哈希、通知渠道、告警规则与本账期已累计流量。
-                  </p>
-                </div>
-                <button
-                  type="button"
-                  disabled={generatingReceive}
-                  onClick={() => void handleGenerateReceiveTicket()}
-                  className="inline-flex items-center gap-1.5 px-4 py-2 rounded-xl text-white font-semibold shadow-sm disabled:opacity-60"
-                  style={{ backgroundColor: "var(--accent-solid)" }}
-                >
-                  {generatingReceive ? (
-                    <Loader2
-                      className="w-3.5 h-3.5 animate-spin"
-                      aria-hidden="true"
-                    />
-                  ) : (
-                    <ShieldCheck className="w-3.5 h-3.5" aria-hidden="true" />
-                  )}
-                  <span>
-                    {receiveTicket ? "重新生成口令" : "生成 uobm1_ 接收口令"}
-                  </span>
-                </button>
-              </div>
-
-              {receiveError && (
-                <div
-                  role="alert"
-                  className="rounded-xl border border-rose-500/40 bg-rose-500/10 px-3 py-2 text-[11px] text-rose-700 dark:text-rose-300"
-                >
-                  {receiveError}
-                </div>
-              )}
-
-              {receiveTicket?.migration_code && (
-                <div className="space-y-3 pt-3 border-t border-[var(--border-subtle)]">
-                  <div className="flex flex-wrap items-center justify-between gap-2 rounded-xl border border-[var(--border-subtle)] bg-[var(--bg-surface)] px-3.5 py-2.5">
-                    <code className="font-mono-num text-xs font-semibold text-[var(--accent-primary)] break-all">
-                      {receiveTicket.migration_code}
-                    </code>
-                    <StudioCopyButton
-                      text={receiveTicket.migration_code}
-                      label="复制口令"
-                      ariaLabel="复制 uobm1 迁移接收口令"
-                    />
-                  </div>
-
-                  <div className="flex flex-wrap items-center justify-between gap-2 text-[11px] font-mono-num text-[var(--text-secondary)]">
-                    <span className="inline-flex items-center gap-1.5">
-                      <Clock className="w-3.5 h-3.5" aria-hidden="true" />
-                      <span>
-                        有效期至 {formatTimestamp(receiveTicket.expires_at)}（剩余{" "}
-                        {formatRemainingCountdown(
-                          receiveTicket.expires_at,
-                          nowSec,
-                        )}
-                        ）
-                      </span>
-                    </span>
-                    <span className="text-[var(--text-muted)]">
-                      在原面板「迁往其他面板」粘贴此口令即可推送同步
-                    </span>
-                  </div>
-
-                  <div className="flex flex-wrap items-center justify-between gap-3 rounded-xl border border-sky-500/35 bg-sky-500/10 px-3.5 py-2.5 text-sky-900 dark:text-sky-200">
-                    <div className="flex items-center gap-2 font-mono-num">
-                      {receiveTicket.expires_at > nowSec ? (
-                        <Loader2
-                          className="w-3.5 h-3.5 animate-spin text-sky-500"
-                          aria-hidden="true"
-                        />
-                      ) : (
-                        <AlertCircle
-                          className="w-3.5 h-3.5 text-amber-500"
-                          aria-hidden="true"
-                        />
-                      )}
-                      <span>
-                        {receiveTicket.expires_at > nowSec
-                          ? `实时监听接入中（每 2 秒轮询）· 当前在线 ${connectedAgents} / ${totalNodes} 台`
-                          : `接收口令已过期 · 当前在线 ${connectedAgents} / ${totalNodes} 台`}
-                      </span>
-                    </div>
-
-                    {(arrivedTotalDelta > 0 || arrivedConnectedDelta > 0) && (
-                      <span className="font-mono-num text-[11px] font-semibold text-emerald-700 dark:text-emerald-300">
-                        新增节点 +{arrivedTotalDelta} · 在线 +{arrivedConnectedDelta}
-                      </span>
-                    )}
-                  </div>
-                </div>
-              )}
-            </div>
-          </div>
-        </div>
-      </div>
-
-      {/* 3. Dual-Mode Watchdog Section */}
-      {isCloudflare ? (
-        <form
-          onSubmit={(e) => void handleSaveWatchdogSubmit(e)}
-          className="surface-card rounded-2xl p-5 space-y-4 text-xs"
-        >
-          <div className="flex flex-wrap items-start justify-between gap-3">
-            <div className="flex items-start gap-3">
-              <div className="w-9 h-9 rounded-xl bg-amber-500/15 border border-amber-500/35 flex items-center justify-center shrink-0">
-                <ShieldAlert
-                  className="w-4 h-4 text-amber-600 dark:text-amber-400"
-                  aria-hidden="true"
-                />
-              </div>
-              <div>
-                <h2 className="text-sm font-bold text-[var(--text-primary)]">
-                  Cloudflare 云端看门狗掉线守护（5m Cron Dead-Man’s Switch）
-                </h2>
-                <p className="text-[11px] text-[var(--text-secondary)] mt-0.5">
-                  迁移到自建 uniob-hub 后保留 Cloudflare Workers 独立值守；若自建服务器断电或失联超过阈值，云端立即推送告警。
-                </p>
-              </div>
-            </div>
-            <span
-              className={`px-2.5 py-1 rounded-full text-[11px] font-medium border ${wdBadge.cls}`}
+          <div className="flex justify-end gap-2 pt-2">
+            <Button
+              variant="ghost"
+              size="sm"
+              disabled={savingWd}
+              onClick={() => setWdModalOpen(false)}
             >
-              {wdBadge.label}
-              {effectiveStatus?.watchdog.last_ping_ts
-                ? ` · ${formatRelativeTime(effectiveStatus.watchdog.last_ping_ts)}`
-                : ""}
-            </span>
-          </div>
-
-          {watchdogError && (
-            <div
-              role="alert"
-              className="rounded-xl border border-rose-500/40 bg-rose-500/10 px-3.5 py-2.5 text-rose-700 dark:text-rose-300"
-            >
-              {watchdogError}
-            </div>
-          )}
-
-          {loadingWatchdog ? (
-            <div className="flex items-center gap-2 py-4 text-[var(--text-secondary)]">
-              <Loader2 className="w-4 h-4 animate-spin" aria-hidden="true" />
-              <span>正在加载 Cloudflare 看门狗配置...</span>
-            </div>
-          ) : (
-            <>
-              <div className="flex flex-wrap items-center gap-4 pt-1">
-                <label
-                  htmlFor={wdEnabledId}
-                  className="inline-flex items-center gap-2 cursor-pointer font-semibold text-[var(--text-primary)]"
-                >
-                  <input
-                    id={wdEnabledId}
-                    type="checkbox"
-                    checked={wdDraft.enabled}
-                    onChange={(e) =>
-                      setWdDraft((prev) => ({
-                        ...prev,
-                        enabled: e.target.checked,
-                        secret:
-                          prev.secret ||
-                          (e.target.checked ? generateHexSecret(24) : ""),
-                      }))
-                    }
-                    className="rounded accent-emerald-600"
-                  />
-                  <span>启用 Cloudflare 云端掉线看门狗</span>
-                </label>
-              </div>
-
-              <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
-                <fieldset className="space-y-1.5">
-                  <legend className="font-medium text-[var(--text-secondary)]">
-                    失联判定超时阈值
-                  </legend>
-                  <div className="flex flex-wrap gap-1.5">
-                    {WATCHDOG_TIMEOUT_PRESETS.map((p) => {
-                      const active = wdDraft.timeout_sec === p.sec;
-                      return (
-                        <button
-                          key={p.sec}
-                          type="button"
-                          onClick={() =>
-                            setWdDraft((prev) => ({
-                              ...prev,
-                              timeout_sec: p.sec,
-                            }))
-                          }
-                          className={`px-2.5 py-1.5 rounded-xl border text-[11px] font-medium transition-colors ${
-                            active
-                              ? "text-[var(--accent-primary)] font-semibold"
-                              : "border-[var(--border-subtle)] bg-[var(--bg-inset)] text-[var(--text-secondary)]"
-                          }`}
-                          style={
-                            active
-                              ? {
-                                  backgroundColor: "var(--accent-soft)",
-                                  borderColor: "var(--accent-ring)",
-                                }
-                              : undefined
-                          }
-                        >
-                          {p.label}
-                        </button>
-                      );
-                    })}
-                  </div>
-                  <div className="text-[10px] font-mono-num text-[var(--text-muted)]">
-                    当前设置：{formatDurationZh(wdDraft.timeout_sec)}
-                  </div>
-                </fieldset>
-
-                <div>
-                  <label
-                    htmlFor={wdLabelId}
-                    className="block font-medium text-[var(--text-secondary)] mb-1"
-                  >
-                    自建面板标识名（告警正文展示）
-                  </label>
-                  <input
-                    id={wdLabelId}
-                    type="text"
-                    value={wdDraft.hub_label}
-                    onChange={(e) =>
-                      setWdDraft((prev) => ({
-                        ...prev,
-                        hub_label: e.target.value,
-                      }))
-                    }
-                    placeholder="例如：新加坡主力 uniob-hub"
-                    className="w-full px-3 py-2 rounded-xl border border-[var(--border-subtle)] bg-[var(--bg-inset)] text-[var(--text-primary)]"
-                  />
-                </div>
-
-                <div>
-                  <label
-                    htmlFor={wdCooldownId}
-                    className="block font-medium text-[var(--text-secondary)] mb-1"
-                  >
-                    失联复发提醒冷却 (秒)
-                  </label>
-                  <input
-                    id={wdCooldownId}
-                    type="number"
-                    min="60"
-                    value={wdDraft.cooldown_sec}
-                    onChange={(e) =>
-                      setWdDraft((prev) => ({
-                        ...prev,
-                        cooldown_sec:
-                          Number.parseInt(e.target.value, 10) || 1800,
-                      }))
-                    }
-                    className="w-full px-3 py-2 rounded-xl border border-[var(--border-subtle)] bg-[var(--bg-inset)] text-[var(--text-primary)] font-mono-num"
-                  />
-                </div>
-              </div>
-
-              {/* Target Channels */}
-              <div className="space-y-1.5">
-                <span className="block font-medium text-[var(--text-secondary)]">
-                  看门狗告警通知路由渠道（不勾选默认推往全部已启用渠道）
-                </span>
-                {channels.length === 0 ? (
-                  <p className="text-[11px] text-[var(--text-muted)]">
-                    暂未配置通知渠道，可前往「告警事件中心」添加 Telegram 或 Webhook 通道。
-                  </p>
-                ) : (
-                  <div className="flex flex-wrap gap-2">
-                    {channels.map((ch) => {
-                      const checked = (wdDraft.channel_ids ?? []).includes(
-                        ch.id,
-                      );
-                      return (
-                        <label
-                          key={ch.id}
-                          className={`inline-flex items-center gap-1.5 px-3 py-1.5 rounded-xl border cursor-pointer text-xs ${
-                            checked
-                              ? "border-[var(--accent-ring)] bg-[var(--accent-soft)] text-[var(--accent-primary)] font-medium"
-                              : "border-[var(--border-subtle)] bg-[var(--bg-inset)] text-[var(--text-secondary)]"
-                          }`}
-                        >
-                          <input
-                            type="checkbox"
-                            checked={checked}
-                            onChange={() =>
-                              setWdDraft((prev) => {
-                                const list = prev.channel_ids ?? [];
-                                return {
-                                  ...prev,
-                                  channel_ids: list.includes(ch.id)
-                                    ? list.filter((id) => id !== ch.id)
-                                    : [...list, ch.id],
-                                };
-                              })
-                            }
-                            className="rounded accent-emerald-600"
-                          />
-                          <span>{ch.name}</span>
-                        </label>
-                      );
-                    })}
-                  </div>
-                )}
-              </div>
-
-              <div className="flex flex-wrap items-center justify-between gap-3 pt-2 border-t border-[var(--border-subtle)]">
-                <details className="flex-1 min-w-[16rem] rounded-xl border border-[var(--border-subtle)] bg-[var(--bg-inset)] px-3.5 py-2">
-                  <summary className="cursor-pointer font-medium text-[var(--text-primary)] select-none">
-                    查看或轮换看门狗 HMAC 通信密钥与 CLI 参数
-                  </summary>
-                  <div className="mt-3 space-y-2.5 pt-2.5 border-t border-[var(--border-subtle)]">
-                    <div className="flex flex-wrap items-center gap-2">
-                      <label htmlFor={wdSecretId} className="sr-only">
-                        看门狗通信密钥
-                      </label>
-                      <input
-                        id={wdSecretId}
-                        type="text"
-                        value={wdDraft.secret}
-                        onChange={(e) =>
-                          setWdDraft((prev) => ({
-                            ...prev,
-                            secret: e.target.value,
-                          }))
-                        }
-                        autoCorrect="off"
-                        autoCapitalize="none"
-                        spellCheck={false}
-                        placeholder="点击生成或输入至少 8 位通信密钥"
-                        className="min-w-0 flex-1 px-2.5 py-1.5 rounded-lg border border-[var(--border-subtle)] bg-[var(--bg-surface)] font-mono-num text-[11px]"
-                      />
-                      <button
-                        type="button"
-                        onClick={() =>
-                          setWdDraft((prev) => ({
-                            ...prev,
-                            secret: generateHexSecret(24),
-                          }))
-                        }
-                        className="inline-flex items-center gap-1 px-2.5 py-1.5 rounded-lg border border-[var(--border-subtle)] bg-[var(--bg-surface)] text-[11px] font-medium hover:bg-[var(--bg-card-hover)]"
-                      >
-                        <Wand2 className="w-3 h-3" aria-hidden="true" />
-                        <span>生成随机密钥</span>
-                      </button>
-                      {wdDraft.secret && (
-                        <StudioCopyButton
-                          text={wdDraft.secret}
-                          label="复制密钥"
-                          ariaLabel="复制看门狗通信密钥"
-                        />
-                      )}
-                    </div>
-                    <div className="flex flex-wrap items-center justify-between gap-2 rounded-lg bg-slate-950 p-2.5 text-[11px] font-mono-num text-emerald-300">
-                      <code className="break-all flex-1">{manualFlags}</code>
-                      <StudioCopyButton
-                        text={manualFlags}
-                        label="复制参数"
-                        ariaLabel="复制看门狗 CLI 启动参数"
-                      />
-                    </div>
-                  </div>
-                </details>
-
-                <button
-                  type="submit"
-                  disabled={savingWatchdog}
-                  className="shrink-0 inline-flex items-center gap-1.5 px-4 py-2 rounded-xl text-white font-semibold shadow-sm disabled:opacity-60"
-                  style={{ backgroundColor: "var(--accent-solid)" }}
-                >
-                  {savingWatchdog ? (
-                    <Loader2
-                      className="w-3.5 h-3.5 animate-spin"
-                      aria-hidden="true"
-                    />
-                  ) : (
-                    <ShieldCheck className="w-3.5 h-3.5" aria-hidden="true" />
-                  )}
-                  <span>{savingWatchdog ? "保存中..." : "保存看门狗配置"}</span>
-                </button>
-              </div>
-            </>
-          )}
-        </form>
-      ) : isSelfHosted && effectiveStatus ? (
-        <div className="surface-card rounded-2xl p-5 space-y-3 text-xs">
-          <div className="flex flex-wrap items-start justify-between gap-3">
-            <div className="flex items-start gap-3">
-              <div className="w-9 h-9 rounded-xl bg-amber-500/15 border border-amber-500/35 flex items-center justify-center shrink-0">
-                <ShieldAlert
-                  className="w-4 h-4 text-amber-600 dark:text-amber-400"
-                  aria-hidden="true"
-                />
-              </div>
-              <div>
-                <h2 className="text-sm font-bold text-[var(--text-primary)]">
-                  自建 uniob-hub 看门狗上报状态
-                </h2>
-                <p className="text-[11px] text-[var(--text-secondary)] mt-0.5">
-                  看门狗告警规则、失联超时阈值与通知路由均托管在 Cloudflare Workers 控制面；当前自建节点仅周期性发送 HMAC 签名心跳。
-                </p>
-              </div>
-            </div>
-            <span
-              className={`px-2.5 py-1 rounded-full text-[11px] font-medium border ${wdBadge.cls}`}
-            >
-              {wdBadge.label}
-            </span>
-          </div>
-
-          <div className="grid grid-cols-1 sm:grid-cols-3 gap-3 font-mono-num">
-            <div className="rounded-xl border border-[var(--border-subtle)] bg-[var(--bg-inset)] p-3">
-              <div className="text-[10px] text-[var(--text-muted)]">
-                心跳客户端状态
-              </div>
-              <div className="mt-1 font-semibold text-[var(--text-primary)]">
-                {effectiveStatus.watchdog.enabled
-                  ? "已配置 --watchdog-url"
-                  : "未配置看门狗参数"}
-              </div>
-            </div>
-            <div className="rounded-xl border border-[var(--border-subtle)] bg-[var(--bg-inset)] p-3">
-              <div className="text-[10px] text-[var(--text-muted)]">
-                最近一次心跳上报
-              </div>
-              <div className="mt-1 font-semibold text-[var(--text-primary)]">
-                {effectiveStatus.watchdog.last_ping_ts
-                  ? `${formatTimestamp(effectiveStatus.watchdog.last_ping_ts)}（${formatRelativeTime(effectiveStatus.watchdog.last_ping_ts)}）`
-                  : "尚无心跳记录"}
-              </div>
-            </div>
-            <div className="rounded-xl border border-[var(--border-subtle)] bg-[var(--bg-inset)] p-3">
-              <div className="text-[10px] text-[var(--text-muted)]">
-                云端超时参考窗口
-              </div>
-              <div className="mt-1 font-semibold text-[var(--text-primary)]">
-                {formatDurationZh(effectiveStatus.watchdog.timeout_sec)}
-              </div>
-            </div>
-          </div>
-        </div>
-      ) : (
-        <div className="surface-card rounded-2xl p-5 flex items-center gap-2 text-xs text-[var(--text-secondary)]">
-          <Loader2 className="w-4 h-4 animate-spin" aria-hidden="true" />
-          <span>正在获取控制面运行模式与看门狗状态...</span>
-        </div>
-      )}
-
-      {/* 4. Native <details> Collapsible Full Backup & Ledger JSON Export/Restore */}
-      <details className="surface-card rounded-2xl px-5 py-4 text-xs">
-        <summary className="cursor-pointer flex flex-wrap items-center justify-between gap-2 font-semibold text-sm text-[var(--text-primary)] select-none">
-          <span className="inline-flex items-center gap-2">
-            <FileJson
-              className="w-4 h-4 text-[var(--accent-primary)]"
-              aria-hidden="true"
-            />
-            <span>全量配置与账本 JSON 备份 / 恢复</span>
-          </span>
-          <span className="text-[11px] font-mono-num font-normal text-[var(--text-muted)]">
-            {nodes.length} 台节点 · 含通道、规则与当期月流量账本
-          </span>
-        </summary>
-
-        <div className="mt-4 pt-4 border-t border-[var(--border-subtle)] space-y-4">
-          <p className="text-xs text-[var(--text-secondary)]">
-            支持一键导出完整的 UniOB v2 JSON 快照（包含节点密钥哈希、分组标签、计费口径、当月流量账本与告警路由），用于离线灾备或跨云环境冷迁移。
-          </p>
-
-          {backupError && (
-            <div
-              role="alert"
-              className="rounded-xl border border-rose-500/40 bg-rose-500/10 px-3.5 py-2.5 text-rose-700 dark:text-rose-300"
-            >
-              {backupError}
-            </div>
-          )}
-
-          <div className="grid grid-cols-1 lg:grid-cols-12 gap-4 items-start">
-            <div className="lg:col-span-5 space-y-3">
-              <div className="flex flex-wrap gap-2">
-                <button
-                  type="button"
-                  disabled={exporting}
-                  onClick={() => void handleExportJsonBackup()}
-                  className="inline-flex items-center gap-1.5 px-3.5 py-2 rounded-xl border border-[var(--border-strong)] bg-[var(--bg-elevated)] hover:bg-[var(--bg-card-hover)] text-[var(--text-primary)] font-semibold disabled:opacity-60"
-                >
-                  {exporting ? (
-                    <Loader2
-                      className="w-3.5 h-3.5 animate-spin"
-                      aria-hidden="true"
-                    />
-                  ) : (
-                    <Download className="w-3.5 h-3.5" aria-hidden="true" />
-                  )}
-                  <span>{exporting ? "导出中..." : "导出全量 JSON 备份"}</span>
-                </button>
-
-                <label
-                  htmlFor={backupFileId}
-                  className="inline-flex cursor-pointer items-center gap-1.5 px-3.5 py-2 rounded-xl border border-[var(--accent-ring)] bg-[var(--accent-soft)] text-[var(--accent-primary)] font-semibold"
-                >
-                  <Upload className="w-3.5 h-3.5" aria-hidden="true" />
-                  <span>导入备份 JSON 恢复</span>
-                </label>
-                <input
-                  id={backupFileId}
-                  type="file"
-                  accept="application/json,.json"
-                  disabled={importing}
-                  onChange={(e) => void handleSelectBackupFile(e)}
-                  className="sr-only"
-                />
-              </div>
-
-              {pendingImport && (
-                <div className="rounded-xl border border-amber-500/40 bg-amber-500/10 p-3.5 space-y-2.5">
-                  <div className="font-semibold text-amber-900 dark:text-amber-200">
-                    待确认恢复：{pendingImport.fileName}
-                  </div>
-                  <div className="text-[11px] font-mono-num text-amber-800 dark:text-amber-300 space-y-0.5">
-                    <div>
-                      节点 {pendingImport.counts.nodes} 台 · 渠道{" "}
-                      {pendingImport.counts.channels} 个 · 规则{" "}
-                      {pendingImport.counts.rules} 条 · 流量账本{" "}
-                      {pendingImport.counts.traffic_ledgers} 条
-                    </div>
-                    {pendingImport.exportedAt && (
-                      <div>
-                        备份时间：{formatTimestamp(pendingImport.exportedAt)}
-                      </div>
-                    )}
-                  </div>
-                  <div className="flex flex-wrap items-center gap-2 pt-1">
-                    <button
-                      type="button"
-                      disabled={importing}
-                      onClick={() => void handleConfirmImport()}
-                      className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-emerald-600 hover:bg-emerald-500 text-white font-semibold disabled:opacity-60"
-                    >
-                      {importing ? (
-                        <Loader2
-                          className="w-3.5 h-3.5 animate-spin"
-                          aria-hidden="true"
-                        />
-                      ) : (
-                        <Check className="w-3.5 h-3.5" aria-hidden="true" />
-                      )}
-                      <span>{importing ? "正在恢复..." : "确认导入恢复"}</span>
-                    </button>
-                    <button
-                      type="button"
-                      disabled={importing}
-                      onClick={() => setPendingImport(null)}
-                      className="inline-flex items-center gap-1 px-3 py-1.5 rounded-lg border border-[var(--border-subtle)] bg-[var(--bg-surface)] text-[var(--text-secondary)] hover:text-[var(--text-primary)] disabled:opacity-50"
-                    >
-                      <X className="w-3 h-3" aria-hidden="true" />
-                      <span>取消</span>
-                    </button>
-                  </div>
-                </div>
-              )}
-
-              {importResult && (
-                <div className="rounded-xl border border-emerald-500/35 bg-emerald-500/12 px-3 py-2 text-emerald-700 dark:text-emerald-300">
-                  已恢复 {importResult.imported.nodes} 台节点、
-                  {importResult.imported.channels} 个通知渠道、
-                  {importResult.imported.rules} 条告警规则、
-                  {importResult.imported.traffic_ledgers} 条月度流量统计。
-                </div>
-              )}
-            </div>
-
-            <div className="lg:col-span-7 rounded-xl bg-[#070b14] border border-slate-800 p-3 space-y-2">
-              <div className="flex items-center justify-between text-[11px] font-mono-num text-slate-400">
-                <span className="inline-flex items-center gap-1.5">
-                  <Database
-                    className="w-3.5 h-3.5 text-emerald-400"
+              取消
+            </Button>
+            <Button
+              type="submit"
+              variant="primary"
+              size="sm"
+              disabled={savingWd}
+              icon={
+                savingWd ? (
+                  <Loader2
+                    className="h-3.5 w-3.5 animate-spin"
                     aria-hidden="true"
                   />
-                  <span>ExportBundle v2 摘要预览</span>
-                </span>
-                <StudioCopyButton
-                  text={displayedPreviewJson}
-                  label="复制预览"
-                  ariaLabel="复制 JSON 备份摘要预览"
-                />
+                ) : undefined
+              }
+            >
+              保存设置
+            </Button>
+          </div>
+        </form>
+      </NativeDialog>
+
+      {/* Import Backup Confirmation Modal */}
+      <NativeDialog
+        open={pendingImport !== null}
+        onClose={() => {
+          if (!importing) setPendingImport(null);
+        }}
+        titleId={importModalTitleId}
+        maxWidthClass="max-w-[400px]"
+      >
+        {pendingImport && (
+          <div className="space-y-4 p-5">
+            <div className="flex items-center justify-between">
+              <h3
+                id={importModalTitleId}
+                style={{ color: "var(--text-primary)" }}
+                className="text-[15px] font-semibold"
+              >
+                导入备份恢复
+              </h3>
+              <IconCloseButton
+                onClick={() => {
+                  if (!importing) setPendingImport(null);
+                }}
+              />
+            </div>
+
+            <div
+              style={{
+                backgroundColor: "var(--bg-subtle)",
+                border: "1px solid var(--border-hairline)",
+              }}
+              className="space-y-1.5 rounded-[8px] p-3 text-[12.5px]"
+            >
+              <div
+                style={{ color: "var(--text-primary)" }}
+                className="truncate font-mono font-medium"
+              >
+                {pendingImport.fileName}
               </div>
-              <pre className="font-mono-num text-[11px] text-slate-300 overflow-x-auto leading-relaxed">
-                {displayedPreviewJson}
-              </pre>
+              <div
+                style={{ color: "var(--text-secondary)" }}
+                className="font-mono-num"
+              >
+                包含 {pendingImport.nodesCount} 台服务器 ·{" "}
+                {pendingImport.rulesCount} 条规则 ·{" "}
+                {pendingImport.channelsCount} 个通知渠道
+              </div>
+              {pendingImport.exportedAt && (
+                <div
+                  style={{ color: "var(--text-tertiary)" }}
+                  className="font-mono-num text-[11.5px]"
+                >
+                  导出时间：{formatTimestamp(pendingImport.exportedAt)}
+                </div>
+              )}
+            </div>
+
+            <div className="flex justify-end gap-2 pt-1">
+              <Button
+                variant="ghost"
+                size="sm"
+                disabled={importing}
+                onClick={() => setPendingImport(null)}
+              >
+                取消
+              </Button>
+              <Button
+                autoFocus
+                variant="primary"
+                size="sm"
+                disabled={importing}
+                icon={
+                  importing ? (
+                    <Loader2
+                      className="h-3.5 w-3.5 animate-spin"
+                      aria-hidden="true"
+                    />
+                  ) : undefined
+                }
+                onClick={() => void handleConfirmImport()}
+              >
+                {importing ? "导入中..." : "确认恢复"}
+              </Button>
             </div>
           </div>
-        </div>
-      </details>
-    </section>
+        )}
+      </NativeDialog>
+    </div>
   );
 }
+
+export default HubMigrationStudio;

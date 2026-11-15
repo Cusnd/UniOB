@@ -12,18 +12,18 @@ const DENSITY_KEY = "uniob-density";
 const VIEW_MODE_KEY = "uniob-fleet-view";
 
 function getSystemDark(): boolean {
-  if (typeof window === "undefined") return true;
+  if (typeof window === "undefined") return false;
   return window.matchMedia("(prefers-color-scheme: dark)").matches;
 }
 
 function parseThemeMode(val: string | null): ThemeMode {
-  if (val === "dark" || val === "light") return val;
-  return "system";
+  if (val === "dark" || val === "light" || val === "system") return val;
+  return "light";
 }
 
 function parseAccent(val: string | null): AccentPreset {
-  if (val === "emerald" || val === "indigo" || val === "cyan") return val;
-  return "emerald";
+  if (val === "cobalt" || val === "vermilion" || val === "jade") return val;
+  return "cobalt";
 }
 
 function parseDensity(val: string | null): DensityMode {
@@ -59,7 +59,6 @@ export function useHorizonPrefs() {
     parseViewMode(safeGetStorage(VIEW_MODE_KEY)),
   );
 
-  // Follow OS color-scheme changes without ever wiping pinned user preference
   useEffect(() => {
     const mq = window.matchMedia("(prefers-color-scheme: dark)");
     const listener = (e: MediaQueryListEvent) => setSystemDark(e.matches);
@@ -67,7 +66,6 @@ export function useHorizonPrefs() {
     return () => mq.removeEventListener("change", listener);
   }, []);
 
-  // Cross-tab preference sync via storage events
   useEffect(() => {
     const onStorage = (e: StorageEvent) => {
       if (e.key === null || e.key === COLOR_SCHEME_KEY) {
@@ -92,14 +90,14 @@ export function useHorizonPrefs() {
 
   useEffect(() => {
     const root = document.documentElement;
-    root.dataset.theme = themeMode;
+    root.dataset.theme = resolvedTheme;
     root.classList.toggle("dark", resolvedTheme === "dark");
 
     const colorSchemeMeta = document.querySelector('meta[name="color-scheme"]');
     if (colorSchemeMeta) {
       colorSchemeMeta.setAttribute(
         "content",
-        themeMode === "system" ? "light dark" : themeMode,
+        themeMode === "system" ? "light dark" : resolvedTheme,
       );
     }
 
@@ -107,7 +105,7 @@ export function useHorizonPrefs() {
     if (themeColorMeta) {
       themeColorMeta.setAttribute(
         "content",
-        resolvedTheme === "dark" ? "#07090e" : "#f5f7fa",
+        resolvedTheme === "dark" ? "#111110" : "#f6f6f3",
       );
     }
   }, [themeMode, resolvedTheme]);
@@ -123,11 +121,7 @@ export function useHorizonPrefs() {
   const setThemeMode = useCallback((mode: ThemeMode) => {
     setThemeModeState(mode);
     try {
-      if (mode === "system") {
-        localStorage.removeItem(COLOR_SCHEME_KEY);
-      } else {
-        localStorage.setItem(COLOR_SCHEME_KEY, mode);
-      }
+      localStorage.setItem(COLOR_SCHEME_KEY, mode);
     } catch {
       // ignore storage errors
     }
@@ -135,14 +129,11 @@ export function useHorizonPrefs() {
 
   const cycleTheme = useCallback(() => {
     setThemeModeState((prev) => {
-      const next: ThemeMode =
-        prev === "dark" ? "light" : prev === "light" ? "system" : "dark";
+      const currentResolved =
+        prev === "system" ? (getSystemDark() ? "dark" : "light") : prev;
+      const next: ThemeMode = currentResolved === "light" ? "dark" : "light";
       try {
-        if (next === "system") {
-          localStorage.removeItem(COLOR_SCHEME_KEY);
-        } else {
-          localStorage.setItem(COLOR_SCHEME_KEY, next);
-        }
+        localStorage.setItem(COLOR_SCHEME_KEY, next);
       } catch {
         // ignore storage errors
       }

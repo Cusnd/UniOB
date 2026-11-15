@@ -1,5 +1,6 @@
 import { Component, type ErrorInfo, type ReactNode } from "react";
 import { RefreshCw, RotateCcw, ShieldAlert } from "lucide-react";
+import { Button } from "./ui/Primitives";
 
 interface ErrorBoundaryProps {
   children: ReactNode;
@@ -40,46 +41,71 @@ export class ErrorBoundary extends Component<
       return this.props.children;
     }
 
-    const message = this.state.error?.message || "未知前端渲染异常";
+    const message = this.state.error?.message || "页面渲染异常";
 
     return (
-      <div className="min-h-dvh flex items-center justify-center p-4 horizon-grid-bg bg-[var(--bg-canvas)] text-[var(--text-primary)]">
-        <div className="w-full max-w-md rounded-2xl surface-elevated p-6 space-y-5">
+      <div
+        style={{
+          backgroundColor: "var(--bg-shell)",
+          color: "var(--text-primary)",
+        }}
+        className="flex min-h-dvh items-center justify-center p-4"
+      >
+        <div className="atelier-sheet w-full max-w-[400px] space-y-5 p-6">
           <div className="flex items-center gap-3">
-            <div className="w-10 h-10 rounded-xl bg-rose-500/12 border border-rose-500/35 flex items-center justify-center shrink-0">
-              <ShieldAlert className="w-5 h-5 text-rose-500" aria-hidden="true" />
+            <div
+              style={{
+                backgroundColor: "var(--status-danger-bg)",
+                border: "1px solid var(--status-danger-border)",
+                color: "var(--status-danger-ink)",
+              }}
+              className="flex h-9 w-9 shrink-0 items-center justify-center rounded-[9px]"
+            >
+              <ShieldAlert className="h-4.5 w-4.5" aria-hidden="true" />
             </div>
             <div>
-              <h1 className="text-base font-bold tracking-tight text-[var(--text-primary)]">
-                页面显示遇到问题
+              <h1 className="text-[15px] font-semibold tracking-[-0.015em]">
+                页面加载出错
               </h1>
-              <p className="text-xs text-[var(--text-secondary)]">
-                界面暂时恢复中，可重试或刷新页面
+              <p
+                style={{ color: "var(--text-tertiary)" }}
+                className="text-[12px]"
+              >
+                请重试或刷新浏览器页面
               </p>
             </div>
           </div>
 
-          <div className="rounded-xl border border-rose-500/35 bg-rose-500/10 p-3.5 text-xs text-rose-700 dark:text-rose-200 font-mono-num break-words">
+          <div
+            style={{
+              backgroundColor: "var(--status-danger-bg)",
+              border: "1px solid var(--status-danger-border)",
+              color: "var(--status-danger-ink)",
+            }}
+            className="font-mono-num rounded-[8px] px-3.5 py-2.5 text-[12px] break-words"
+          >
             {message}
           </div>
 
-          <div className="flex items-center gap-2.5 text-xs">
-            <button
-              type="button"
+          <div className="flex items-center gap-2">
+            <Button
+              variant="primary"
+              size="md"
+              className="flex-1"
               onClick={this.handleRetry}
-              className="flex-1 inline-flex items-center justify-center gap-1.5 px-4 py-2.5 rounded-xl bg-[var(--accent-solid)] hover:bg-[var(--accent-hover)] text-white font-semibold transition-colors"
+              icon={<RotateCcw className="h-3.5 w-3.5" aria-hidden="true" />}
             >
-              <RotateCcw className="w-3.5 h-3.5" aria-hidden="true" />
               重试
-            </button>
-            <button
-              type="button"
+            </Button>
+            <Button
+              variant="secondary"
+              size="md"
+              className="flex-1"
               onClick={this.handleReload}
-              className="flex-1 inline-flex items-center justify-center gap-1.5 px-4 py-2.5 rounded-xl border border-[var(--border-subtle)] bg-[var(--bg-inset)] hover:bg-[var(--bg-card-hover)] text-[var(--text-primary)] font-semibold transition-colors"
+              icon={<RefreshCw className="h-3.5 w-3.5" aria-hidden="true" />}
             >
-              <RefreshCw className="w-3.5 h-3.5" aria-hidden="true" />
               刷新页面
-            </button>
+            </Button>
           </div>
         </div>
       </div>

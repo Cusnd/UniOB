@@ -4,6 +4,13 @@ All notable changes to **UniOB** will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.2.0] - 2026-11-15
+
+### Changed
+- **Atelier Light-First SaaS Dashboard (`web/`)**: Replaced the legacy dark-slate Horizon UI with a warm-paper (`#F6F6F3`) + inset crisp white sheet (`#FFFFFF`) SaaS workspace, 92/5/3 neutral-to-accent hierarchy (`cobalt` / `vermilion` / `jade`), Matte Carbon dark mode, mandatory `tabular-nums` alignment, and unclipped responsive topbar & `⌘K` command palette.
+- **Pixel-Exact Telemetry Charts & Live Throughput**: Replaced `uPlot` canvas charts and stretched sparklines with lightweight `ResizeObserver` 1:1 SVG `ObservabilityChart` and `Sparkline` primitives featuring cartesian reference grids, binary byte-rate Y-axis scaling, synchronized hover crosshairs, and real-time `↓ RX / ↑ TX` network throughput across fleet cards, matrix tiles, server tables, and the slide-over node inspector.
+- **Streamlined Operations, Alerts & Hub Migration**: Simplified server provisioning, single-row visual alert incidents/rules/channels, and the dual-mode Hub Service & Migration studio with accessible native `<dialog>` modals/drawers, keyboard-accessible sortable tables, and non-intrusive bottom-right auto-dismissing floating toasts.
+
 ## [0.1.0] - 2026-11-14
 
 Initial public open-source release of UniOB (internal protocol & worker engine v2.0.0).

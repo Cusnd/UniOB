@@ -378,8 +378,8 @@ export interface SmartMigrateResponse {
 export type AppRoute = "dashboard" | "nodes" | "migration" | "alerts";
 export type FleetViewMode = "bento" | "table" | "matrix";
 export type ViewMode = "grid" | "table";
-export type ThemeMode = "dark" | "light" | "system";
-export type AccentPreset = "emerald" | "indigo" | "cyan";
+export type ThemeMode = "light" | "dark" | "system";
+export type AccentPreset = "cobalt" | "vermilion" | "jade";
 export type DensityMode = "comfortable" | "compact";
 export type InspectorTab = "charts" | "procs" | "hardware";
 

@@ -2,7 +2,7 @@ import { useMemo, useRef } from "react";
 import type { LiveMetricSample } from "../hooks/useFleetSocket";
 import type { HorizonNode, NodeSummary } from "../types";
 
-const MAX_SPARKLINE_POINTS = 24;
+const MAX_SPARKLINE_POINTS = 36;
 
 interface RegionRule {
   region_code: string;
@@ -275,8 +275,15 @@ export function extractProviderAndIp(node: NodeSummary): {
   return { provider, ipv4_masked };
 }
 
+interface SparklineSample {
+  ts: number;
+  cpu: number;
+  rx: number;
+  tx: number;
+}
+
 interface SparklineBuffer {
-  lastTs: number | null;
+  samples: SparklineSample[];
   cpu: number[];
   rx: number[];
   tx: number[];
@@ -300,38 +307,47 @@ export function useHorizonNodes(
     return nodes.map((node) => {
       let entry = bufMap.get(node.id);
       if (!entry) {
-        entry = { lastTs: null, cpu: [], rx: [], tx: [] };
+        entry = { samples: [], cpu: [], rx: [], tx: [] };
         bufMap.set(node.id, entry);
       }
+
+      let mutated = false;
+      const pushSample = (ts: number, cpu: number, rx: number, tx: number) => {
+        if (!Number.isFinite(ts)) return;
+        const existingIdx = entry!.samples.findIndex((s) => s.ts === ts);
+        if (existingIdx !== -1) return;
+        entry!.samples.push({ ts, cpu, rx, tx });
+        mutated = true;
+      };
 
       const liveSeries = liveSeriesByNode[node.id];
       if (Array.isArray(liveSeries) && liveSeries.length > 0) {
         const recent = liveSeries.slice(-MAX_SPARKLINE_POINTS);
         for (const sample of recent) {
-          if (
-            sample?.metrics &&
-            (entry.lastTs === null || sample.ts > entry.lastTs)
-          ) {
-            entry.cpu = [...entry.cpu, sample.metrics.cpu.all].slice(
-              -MAX_SPARKLINE_POINTS,
+          if (sample?.metrics) {
+            pushSample(
+              sample.ts,
+              sample.metrics.cpu.all,
+              sample.metrics.net.rx_bps,
+              sample.metrics.net.tx_bps,
             );
-            entry.rx = [...entry.rx, sample.metrics.net.rx_bps].slice(
-              -MAX_SPARKLINE_POINTS,
-            );
-            entry.tx = [...entry.tx, sample.metrics.net.tx_bps].slice(
-              -MAX_SPARKLINE_POINTS,
-            );
-            entry.lastTs = sample.ts;
           }
         }
       }
 
       const m = node.metrics;
-      if (m && (entry.lastTs === null || m.ts > entry.lastTs)) {
-        entry.cpu = [...entry.cpu, m.cpu.all].slice(-MAX_SPARKLINE_POINTS);
-        entry.rx = [...entry.rx, m.net.rx_bps].slice(-MAX_SPARKLINE_POINTS);
-        entry.tx = [...entry.tx, m.net.tx_bps].slice(-MAX_SPARKLINE_POINTS);
-        entry.lastTs = m.ts;
+      if (m) {
+        pushSample(m.ts, m.cpu.all, m.net.rx_bps, m.net.tx_bps);
+      }
+
+      if (mutated) {
+        entry.samples.sort((a, b) => a.ts - b.ts);
+        if (entry.samples.length > MAX_SPARKLINE_POINTS) {
+          entry.samples = entry.samples.slice(-MAX_SPARKLINE_POINTS);
+        }
+        entry.cpu = entry.samples.map((s) => s.cpu);
+        entry.rx = entry.samples.map((s) => s.rx);
+        entry.tx = entry.samples.map((s) => s.tx);
       }
 
       const region = inferRegionMeta(node);

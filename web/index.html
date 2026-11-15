@@ -1,50 +1,56 @@
 <!doctype html>
-<html lang="zh-CN">
+<html lang="zh-CN" data-theme="light" data-accent="cobalt">
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <meta name="theme-color" content="#07090e" />
-    <meta name="color-scheme" content="light dark" />
+    <meta name="theme-color" content="#f6f6f3" />
+    <meta name="color-scheme" content="light" />
     <script>
       (function () {
         try {
           var root = document.documentElement;
-          var scheme = localStorage.getItem("uniob-color-scheme");
-          var meta = document.querySelector('meta[name="color-scheme"]');
-          var isDark;
-          if (scheme === "dark" || scheme === "light") {
-            if (meta) meta.setAttribute("content", scheme);
-            root.dataset.theme = scheme;
-            isDark = scheme === "dark";
+          var savedScheme = localStorage.getItem("uniob-color-scheme");
+          var metaScheme = document.querySelector('meta[name="color-scheme"]');
+          var metaTheme = document.querySelector('meta[name="theme-color"]');
+          var resolved = "light";
+          if (savedScheme === "dark") {
+            resolved = "dark";
+            if (metaScheme) metaScheme.setAttribute("content", "dark");
+          } else if (savedScheme === "system") {
+            resolved = window.matchMedia("(prefers-color-scheme: dark)").matches
+              ? "dark"
+              : "light";
+            if (metaScheme) metaScheme.setAttribute("content", "light dark");
           } else {
-            if (meta) meta.setAttribute("content", "light dark");
-            root.dataset.theme = "system";
-            isDark = window.matchMedia("(prefers-color-scheme: dark)").matches;
+            resolved = "light";
+            if (metaScheme) metaScheme.setAttribute("content", "light");
           }
-          root.classList.toggle("dark", isDark);
+          root.dataset.theme = resolved;
+          root.classList.toggle("dark", resolved === "dark");
+          if (metaTheme) {
+            metaTheme.setAttribute(
+              "content",
+              resolved === "dark" ? "#111110" : "#f6f6f3",
+            );
+          }
 
-          var accent = localStorage.getItem("uniob-accent");
+          var savedAccent = localStorage.getItem("uniob-accent");
           root.dataset.accent =
-            accent === "emerald" || accent === "indigo" || accent === "cyan"
-              ? accent
-              : "emerald";
-
-          var density = localStorage.getItem("uniob-density");
-          root.dataset.density =
-            density === "comfortable" || density === "compact"
-              ? density
-              : "comfortable";
-
-          var themeColor = document.querySelector('meta[name="theme-color"]');
-          if (themeColor) {
-            themeColor.setAttribute("content", isDark ? "#07090e" : "#f5f7fa");
-          }
+            savedAccent === "vermilion" || savedAccent === "jade"
+              ? savedAccent
+              : "cobalt";
         } catch (e) {}
       })();
     </script>
-    <title>UniOB — 服务器可观测性面板</title>
+    <title>UniOB · 服务器监控</title>
     <link rel="icon" type="image/svg+xml" href="/icon.svg" />
     <link rel="manifest" href="/manifest.webmanifest" />
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link
+      href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&family=JetBrains+Mono:wght@400;500;600&family=Plus+Jakarta+Sans:wght@500;600;700&display=swap"
+      rel="stylesheet"
+    />
   </head>
   <body class="antialiased">
     <div id="root"></div>

@@ -1,28 +1,18 @@
-import { useEffect, useId, useMemo, useRef, useState } from "react";
+import React, { useId, useMemo, useState } from "react";
 import {
-  Activity,
-  AlertCircle,
-  ArrowLeftRight,
+  ArrowDown,
+  ArrowRightLeft,
+  ArrowUp,
   ArrowUpDown,
-  BellOff,
-  Check,
-  Cloud,
-  Copy,
-  Edit3,
-  Eye,
   KeyRound,
   Loader2,
-  Lock,
   Plus,
-  Save,
+  RefreshCw,
   Search,
-  Server,
-  ShieldAlert,
-  ShieldCheck,
-  Terminal,
+  SlidersHorizontal,
   Trash2,
   Volume2,
-  X,
+  VolumeX,
 } from "lucide-react";
 import type {
   HorizonNode,
@@ -33,13 +23,26 @@ import type {
 } from "../types";
 import {
   formatBytes,
-  formatNodeMetaLine,
-  formatRelativeTime,
-  formatTrafficMode,
+  formatBytesCompact,
+  formatBytesPerSec,
+  getMemTotalBytes,
+  getMemUsagePct,
   getTrafficUsagePct,
   isNodeMuted,
   parseOsBadge,
 } from "../utils/format";
+import {
+  Badge,
+  Button,
+  Card,
+  CopyButton,
+  IconCloseButton,
+  MetricBar,
+  NativeDialog,
+  SectionHeader,
+  SegmentedControl,
+  StatusDot,
+} from "./ui/Primitives";
 
 export interface NodesOpsViewProps {
   nodes: HorizonNode[];
@@ -53,1201 +56,788 @@ export interface NodesOpsViewProps {
   onNavigateMigration: () => void;
 }
 
-type SortKey = "sort_order" | "name" | "group" | "status" | "traffic";
-type SortDir = "asc" | "desc";
-type QuickFilter = "all" | "online" | "offline" | "muted" | "traffic_warn";
+type SortColumn = "name" | "group" | "net" | "cpu" | "mem" | "traffic";
+type SortDirection = "ascending" | "descending";
+type QuickStatusFilter = "all" | "online" | "offline" | "muted";
 
-interface EditDraft {
-  id: string;
-  name: string;
-  group_name: string;
-  tagsText: string;
-  sort_order: string;
-  limitGb: string;
-  reset_day: string;
-  count_mode: TrafficCountMode;
-}
+const GB_BYTES = 1024 * 1024 * 1024;
+const zhCollator = new Intl.Collator("zh-CN", { numeric: true });
 
-const DIALOG_LIGHT_DISMISS_ATTRS: Record<string, string> = {
-  closedby: "any",
-};
+export function NodesOpsView(props: NodesOpsViewProps): React.JSX.Element {
+  const {
+    nodes,
+    groups,
+    onInspectNode,
+    onOpenAddServer,
+    onUpdateNode,
+    onMuteNode,
+    onRotateToken,
+    onDeleteNode,
+    onNavigateMigration,
+  } = props;
 
-const DIALOG_LOCKED_DISMISS_ATTRS: Record<string, string> = {
-  closedby: "none",
-};
+  const tableCaptionId = useId();
+  const editTitleId = useId();
+  const tokenTitleId = useId();
+  const deleteTitleId = useId();
+  const groupDatalistId = useId();
 
-const COLLATOR = new Intl.Collator(undefined, {
-  numeric: true,
-  sensitivity: "base",
-});
-
-function isOutsideDialogBounds(
-  e: React.PointerEvent<HTMLDialogElement>,
-  dialog: HTMLDialogElement,
-): boolean {
-  const rect = dialog.getBoundingClientRect();
-  return (
-    e.clientX < rect.left ||
-    e.clientX > rect.right ||
-    e.clientY < rect.top ||
-    e.clientY > rect.bottom
-  );
-}
-
-async function copyTextSafe(text: string): Promise<boolean> {
-  if (typeof navigator !== "undefined" && navigator.clipboard?.writeText) {
-    try {
-      await navigator.clipboard.writeText(text);
-      return true;
-    } catch {
-      // Fallback below
-    }
-  }
-  if (typeof document === "undefined") return false;
-  const textarea = document.createElement("textarea");
-  textarea.value = text;
-  textarea.setAttribute("readonly", "");
-  textarea.style.position = "fixed";
-  textarea.style.left = "-9999px";
-  textarea.style.top = "-9999px";
-  document.body.appendChild(textarea);
-  textarea.select();
-  let ok = false;
-  try {
-    ok = document.execCommand("copy");
-  } catch {
-    ok = false;
-  } finally {
-    document.body.removeChild(textarea);
-  }
-  return ok;
-}
-
-function OpsCopyButton({
-  text,
-  label,
-  ariaLabel,
-}: {
-  text: string;
-  label: string;
-  ariaLabel: string;
-}) {
-  const [copied, setCopied] = useState(false);
-  const [failed, setFailed] = useState(false);
-  const [statusMsg, setStatusMsg] = useState("");
-  const timerRef = useRef<number | null>(null);
-
-  useEffect(() => {
-    return () => {
-      if (timerRef.current !== null) window.clearTimeout(timerRef.current);
-    };
-  }, []);
-
-  const handleCopy = async () => {
-    if (timerRef.current !== null) {
-      window.clearTimeout(timerRef.current);
-      timerRef.current = null;
-    }
-    const ok = await copyTextSafe(text);
-    setCopied(ok);
-    setFailed(!ok);
-    setStatusMsg(ok ? `${label}已复制到剪贴板` : "复制失败，请手动选中文本复制");
-    timerRef.current = window.setTimeout(() => {
-      setCopied(false);
-      setFailed(false);
-      setStatusMsg("");
-      timerRef.current = null;
-    }, 2200);
-  };
-
-  return (
-    <span className="inline-flex items-center gap-1.5 shrink-0">
-      <button
-        type="button"
-        onClick={() => void handleCopy()}
-        aria-label={ariaLabel}
-        className={`inline-flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg text-xs font-medium border transition-colors ${
-          copied
-            ? "border-emerald-500/45 bg-emerald-500/15 text-emerald-700 dark:text-emerald-300"
-            : failed
-              ? "border-rose-500/45 bg-rose-500/15 text-rose-700 dark:text-rose-300"
-              : "border-[var(--border-strong)] bg-[var(--bg-surface)] text-[var(--text-primary)] hover:bg-[var(--bg-card-hover)]"
-        }`}
-      >
-        {copied ? (
-          <Check className="w-3.5 h-3.5 shrink-0" aria-hidden="true" />
-        ) : (
-          <Copy className="w-3.5 h-3.5 shrink-0" aria-hidden="true" />
-        )}
-        <span>{copied ? "已复制" : label}</span>
-      </button>
-      <span role="status" className="sr-only">
-        {statusMsg}
-      </span>
-    </span>
-  );
-}
-
-export function NodesOpsView({
-  nodes,
-  groups,
-  onInspectNode,
-  onOpenAddServer,
-  onUpdateNode,
-  onMuteNode,
-  onRotateToken,
-  onDeleteNode,
-  onNavigateMigration,
-}: NodesOpsViewProps) {
-  const baseId = useId();
-  const tableCaptionId = `${baseId}-table-caption`;
-  const groupListId = `${baseId}-group-datalist`;
-  const editTitleId = `${baseId}-edit-title`;
-  const tokenTitleId = `${baseId}-token-title`;
-  const deleteTitleId = `${baseId}-delete-title`;
-
-  const [selectedGroup, setSelectedGroup] = useState<string>("ALL");
-  const [quickFilter, setQuickFilter] = useState<QuickFilter>("all");
-  const [searchQuery, setSearchQuery] = useState("");
-  const [sortBy, setSortBy] = useState<SortKey>("sort_order");
-  const [sortDir, setSortDir] = useState<SortDir>("asc");
+  // Filter & Sort state
+  const [groupFilter, setGroupFilter] = useState<string>("ALL");
+  const [statusFilter, setStatusFilter] = useState<QuickStatusFilter>("all");
+  const [query, setQuery] = useState("");
+  const [sortCol, setSortCol] = useState<SortColumn>("name");
+  const [sortDir, setSortDir] = useState<SortDirection>("ascending");
   const [sortAnnouncement, setSortAnnouncement] = useState("");
+  const [busyMuteId, setBusyMuteId] = useState<string | null>(null);
 
-  // Async row operation states
-  const [mutingNodeId, setMutingNodeId] = useState<string | null>(null);
-  const [rotatingNodeId, setRotatingNodeId] = useState<string | null>(null);
-  const [rowActionError, setRowActionError] = useState<string | null>(null);
-
-  // Token rotation modal state
-  const [tokenModalNode, setTokenModalNode] = useState<HorizonNode | null>(null);
-  const [rotatedInfo, setRotatedInfo] = useState<{
-    nodeId: string;
-    nodeName: string;
-    data: RotateTokenResponse;
-  } | null>(null);
-  const [tokenError, setTokenError] = useState<string | null>(null);
-
-  // Edit dialog state
-  const [editing, setEditing] = useState<EditDraft | null>(null);
+  // Edit Server Modal state
+  const [editingNode, setEditingNode] = useState<HorizonNode | null>(null);
+  const [editName, setEditName] = useState("");
+  const [editGroup, setEditGroup] = useState("");
+  const [editTagsText, setEditTagsText] = useState("");
+  const [editSortOrder, setEditSortOrder] = useState(0);
+  const [editLimitGb, setEditLimitGb] = useState("");
+  const [editResetDay, setEditResetDay] = useState(1);
+  const [editCountMode, setEditCountMode] = useState<TrafficCountMode>("both");
   const [savingEdit, setSavingEdit] = useState(false);
   const [editError, setEditError] = useState<string | null>(null);
 
-  // Delete dialog state
-  const [pendingDeleteNode, setPendingDeleteNode] =
-    useState<HorizonNode | null>(null);
-  const [deleting, setDeleting] = useState(false);
+  // Rotate Token Modal state
+  const [tokenNode, setTokenNode] = useState<HorizonNode | null>(null);
+  const [rotatingToken, setRotatingToken] = useState(false);
+  const [rotatedResult, setRotatedResult] =
+    useState<RotateTokenResponse | null>(null);
+  const [tokenError, setTokenError] = useState<string | null>(null);
+
+  // Delete Server Confirmation Modal state
+  const [deletingNode, setDeletingNode] = useState<HorizonNode | null>(null);
+  const [deletingBusy, setDeletingBusy] = useState(false);
   const [deleteError, setDeleteError] = useState<string | null>(null);
 
-  const editDialogRef = useRef<HTMLDialogElement | null>(null);
-  const editPointerDownOutsideRef = useRef(false);
-  const editSyncingRef = useRef(false);
+  const onlineCount = useMemo(
+    () => nodes.filter((n) => n.online).length,
+    [nodes],
+  );
 
-  const tokenDialogRef = useRef<HTMLDialogElement | null>(null);
-  const tokenPointerDownOutsideRef = useRef(false);
-  const tokenSyncingRef = useRef(false);
-
-  const deleteDialogRef = useRef<HTMLDialogElement | null>(null);
-  const deletePointerDownOutsideRef = useRef(false);
-  const deleteSyncingRef = useRef(false);
-
-  useEffect(() => {
-    if (selectedGroup !== "ALL" && !groups.includes(selectedGroup)) {
-      setSelectedGroup("ALL");
-    }
-  }, [groups, selectedGroup]);
-
-  useEffect(() => {
-    const dialog = editDialogRef.current;
-    if (!dialog) return;
-    if (editing) {
-      if (!dialog.open) dialog.showModal();
-    } else if (dialog.open) {
-      editSyncingRef.current = true;
-      dialog.close();
-      editSyncingRef.current = false;
-    }
-  }, [editing]);
-
-  useEffect(() => {
-    const dialog = tokenDialogRef.current;
-    if (!dialog) return;
-    if (tokenModalNode) {
-      if (!dialog.open) dialog.showModal();
-    } else if (dialog.open) {
-      tokenSyncingRef.current = true;
-      dialog.close();
-      tokenSyncingRef.current = false;
-    }
-  }, [tokenModalNode]);
-
-  useEffect(() => {
-    const dialog = deleteDialogRef.current;
-    if (!dialog) return;
-    if (pendingDeleteNode) {
-      if (!dialog.open) dialog.showModal();
-    } else if (dialog.open) {
-      deleteSyncingRef.current = true;
-      dialog.close();
-      deleteSyncingRef.current = false;
-    }
-  }, [pendingDeleteNode]);
-
-  const stats = useMemo(() => {
-    const total = nodes.length;
-    const online = nodes.filter((n) => n.online).length;
-    const mutedCount = nodes.filter((n) => isNodeMuted(n)).length;
-    const privacyLocked = nodes.filter((n) => !n.proc_enabled).length;
-    const trafficWarn = nodes.filter(
-      (n) => getTrafficUsagePct(n.traffic) >= 85,
-    ).length;
-    return {
-      total,
-      online,
-      offline: total - online,
-      mutedCount,
-      privacyLocked,
-      trafficWarn,
-    };
-  }, [nodes]);
-
-  const groupCounts = useMemo(() => {
-    const map = new Map<string, number>();
-    for (const n of nodes) {
-      map.set(n.group_name, (map.get(n.group_name) ?? 0) + 1);
-    }
-    return map;
-  }, [nodes]);
-
-  const filteredAndSortedNodes = useMemo(() => {
-    const q = searchQuery.trim().toLowerCase();
-    const filtered = nodes.filter((n) => {
-      if (selectedGroup !== "ALL" && n.group_name !== selectedGroup) {
+  const filteredAndSorted = useMemo(() => {
+    const q = query.trim().toLowerCase();
+    const filtered = nodes.filter((node) => {
+      if (groupFilter !== "ALL" && node.group_name !== groupFilter) {
         return false;
       }
-      if (quickFilter === "online" && !n.online) return false;
-      if (quickFilter === "offline" && n.online) return false;
-      if (quickFilter === "muted" && !isNodeMuted(n)) return false;
-      if (
-        quickFilter === "traffic_warn" &&
-        getTrafficUsagePct(n.traffic) < 85
-      ) {
-        return false;
-      }
+      if (statusFilter === "online" && !node.online) return false;
+      if (statusFilter === "offline" && node.online) return false;
+      if (statusFilter === "muted" && !isNodeMuted(node)) return false;
+
       if (!q) return true;
-      return (
-        n.name.toLowerCase().includes(q) ||
-        (n.hostname ?? "").toLowerCase().includes(q) ||
-        n.provider.toLowerCase().includes(q) ||
-        n.region_code.toLowerCase().includes(q) ||
-        n.ipv4_masked.toLowerCase().includes(q) ||
-        n.group_name.toLowerCase().includes(q) ||
-        n.tags.some((t) => t.toLowerCase().includes(q))
-      );
+      const haystacks = [
+        node.name,
+        node.group_name,
+        node.hostname ?? "",
+        node.ipv4_masked,
+        node.region_code,
+        node.provider,
+        node.os ?? "",
+        ...node.tags,
+      ];
+      return haystacks.some((item) => item.toLowerCase().includes(q));
     });
 
-    const dir = sortDir === "asc" ? 1 : -1;
+    const mult = sortDir === "ascending" ? 1 : -1;
     return [...filtered].sort((a, b) => {
-      switch (sortBy) {
-        case "sort_order":
-          return (a.sort_order - b.sort_order) * dir;
+      switch (sortCol) {
         case "name":
-          return COLLATOR.compare(a.name, b.name) * dir;
+          return zhCollator.compare(a.name, b.name) * mult;
         case "group":
-          return COLLATOR.compare(a.group_name, b.group_name) * dir;
-        case "status": {
-          if (a.online !== b.online) {
-            return (a.online ? -1 : 1) * dir;
-          }
-          return ((a.last_seen_ts ?? 0) - (b.last_seen_ts ?? 0)) * dir;
+          return (
+            zhCollator.compare(a.group_name || "", b.group_name || "") * mult
+          );
+        case "net": {
+          const nA =
+            a.online && a.metrics
+              ? a.metrics.net.rx_bps + a.metrics.net.tx_bps
+              : -1;
+          const nB =
+            b.online && b.metrics
+              ? b.metrics.net.rx_bps + b.metrics.net.tx_bps
+              : -1;
+          return (nA - nB) * mult;
+        }
+        case "cpu": {
+          const cA = a.online && a.metrics ? a.metrics.cpu.all : -1;
+          const cB = b.online && b.metrics ? b.metrics.cpu.all : -1;
+          return (cA - cB) * mult;
+        }
+        case "mem": {
+          const mA = a.online ? getMemUsagePct(a) : -1;
+          const mB = b.online ? getMemUsagePct(b) : -1;
+          return (mA - mB) * mult;
         }
         case "traffic":
-          return (a.traffic.counted_bytes - b.traffic.counted_bytes) * dir;
-        default:
-          return 0;
+          return (a.traffic.counted_bytes - b.traffic.counted_bytes) * mult;
       }
     });
-  }, [nodes, selectedGroup, quickFilter, searchQuery, sortBy, sortDir]);
+  }, [nodes, groupFilter, statusFilter, query, sortCol, sortDir]);
 
-  const handleSort = (key: SortKey, label: string) => {
-    const nextDir: SortDir =
-      sortBy === key ? (sortDir === "asc" ? "desc" : "asc") : "asc";
-    setSortBy(key);
+  const handleSort = (col: SortColumn, label: string) => {
+    const nextDir: SortDirection =
+      sortCol === col && sortDir === "ascending" ? "descending" : "ascending";
+    setSortCol(col);
     setSortDir(nextDir);
     setSortAnnouncement(
-      `已按${label}${nextDir === "asc" ? "升序" : "降序"}排列，共 ${filteredAndSortedNodes.length} 台服务器`,
+      `已按${label}${nextDir === "ascending" ? "升序" : "降序"}排列`,
     );
   };
 
   const openEditModal = (node: HorizonNode) => {
+    setEditingNode(node);
+    setEditName(node.name);
+    setEditGroup(node.group_name);
+    setEditTagsText(node.tags.join(", "));
+    setEditSortOrder(node.sort_order);
+    setEditLimitGb(
+      node.traffic.limit_bytes && node.traffic.limit_bytes > 0
+        ? String(Math.round((node.traffic.limit_bytes / GB_BYTES) * 10) / 10)
+        : "",
+    );
+    setEditResetDay(node.traffic.reset_day || 1);
+    setEditCountMode(node.traffic.count_mode || "both");
     setEditError(null);
-    setEditing({
-      id: node.id,
-      name: node.name,
-      group_name: node.group_name,
-      tagsText: node.tags.join(", "),
-      sort_order: String(node.sort_order),
-      limitGb:
-        node.traffic.limit_bytes && node.traffic.limit_bytes > 0
-          ? String(
-              Math.round(
-                (node.traffic.limit_bytes / (1024 * 1024 * 1024)) * 100,
-              ) / 100,
-            )
-          : "",
-      reset_day: String(node.traffic.reset_day),
-      count_mode: node.traffic.count_mode,
-    });
   };
 
   const handleSaveEdit = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!editing || savingEdit) return;
-    if (!editing.name.trim()) {
-      setEditError("服务器名称不能为空");
+    if (!editingNode || savingEdit) return;
+    const trimmedName = editName.trim();
+    if (!trimmedName) {
+      setEditError("请填写服务器名称");
       return;
     }
 
-    const parsedLimitGb = editing.limitGb.trim()
-      ? Number(editing.limitGb)
-      : null;
-    if (
-      parsedLimitGb !== null &&
-      (!Number.isFinite(parsedLimitGb) || parsedLimitGb < 0)
-    ) {
-      setEditError("月流量上限请输入有效的非负数字");
-      return;
-    }
+    const parsedGb = Number(editLimitGb.trim());
     const limitBytes =
-      parsedLimitGb !== null && parsedLimitGb > 0
-        ? Math.round(parsedLimitGb * 1024 * 1024 * 1024)
-        : null;
+      editLimitGb.trim() === "" || !Number.isFinite(parsedGb) || parsedGb <= 0
+        ? null
+        : Math.round(parsedGb * GB_BYTES);
 
-    const resetDayNum = Number.parseInt(editing.reset_day, 10);
-    const clampedResetDay = Number.isFinite(resetDayNum)
-      ? Math.max(1, Math.min(31, resetDayNum))
-      : 1;
-
-    const sortNum = Number.parseInt(editing.sort_order, 10);
+    const parsedTags = editTagsText
+      .split(/[,，]/)
+      .map((s) => s.trim())
+      .filter(Boolean);
 
     setSavingEdit(true);
     setEditError(null);
     try {
-      await onUpdateNode(editing.id, {
-        name: editing.name.trim(),
-        group_name: editing.group_name.trim() || "Default",
-        tags: editing.tagsText
-          .split(/[,，]/)
-          .map((t) => t.trim())
-          .filter(Boolean),
-        sort_order: Number.isFinite(sortNum) ? sortNum : 0,
+      await onUpdateNode(editingNode.id, {
+        name: trimmedName,
+        group_name: editGroup.trim(),
+        tags: parsedTags,
+        sort_order: Number.isFinite(editSortOrder) ? editSortOrder : 0,
         traffic_limit_bytes: limitBytes,
-        traffic_reset_day: clampedResetDay,
-        traffic_count_mode: editing.count_mode,
+        traffic_reset_day: Math.min(28, Math.max(1, Math.round(editResetDay))),
+        traffic_count_mode: editCountMode,
       });
-      setEditing(null);
+      setEditingNode(null);
     } catch (err) {
-      setEditError(err instanceof Error ? err.message : "保存节点配置失败");
+      setEditError(err instanceof Error ? err.message : "保存失败，请稍后重试");
     } finally {
       setSavingEdit(false);
     }
   };
 
-  const handleMuteRow = async (node: HorizonNode, seconds: number | null) => {
-    setMutingNodeId(node.id);
-    setRowActionError(null);
+  const handleQuickMuteToggle = async (node: HorizonNode) => {
+    if (busyMuteId === node.id) return;
+    setBusyMuteId(node.id);
     try {
-      await onMuteNode(node.id, seconds);
+      const muted = isNodeMuted(node);
+      await onMuteNode(node.id, muted ? null : 3600);
+    } catch {
+      // Toast handled by App
+    } finally {
+      setBusyMuteId(null);
+    }
+  };
+
+  const handleConfirmRotateToken = async () => {
+    if (!tokenNode || rotatingToken) return;
+    setRotatingToken(true);
+    setTokenError(null);
+    try {
+      const res = await onRotateToken(tokenNode.id);
+      setRotatedResult(res);
     } catch (err) {
-      setRowActionError(
-        err instanceof Error
-          ? `「${node.name}」静默设置失败：${err.message}`
-          : `「${node.name}」静默设置失败`,
+      setTokenError(
+        err instanceof Error ? err.message : "重置连接密钥失败，请重试",
       );
     } finally {
-      setMutingNodeId(null);
+      setRotatingToken(false);
     }
-  };
-
-  const handleMuteInEdit = async (nodeId: string, seconds: number | null) => {
-    setMutingNodeId(nodeId);
-    setEditError(null);
-    try {
-      await onMuteNode(nodeId, seconds);
-    } catch (err) {
-      setEditError(err instanceof Error ? err.message : "维护静默设置失败");
-    } finally {
-      setMutingNodeId(null);
-    }
-  };
-
-  const openRotateModal = (node: HorizonNode) => {
-    setTokenError(null);
-    setTokenModalNode(node);
-  };
-
-  const handleConfirmRotate = async () => {
-    if (!tokenModalNode || rotatingNodeId) return;
-    const target = tokenModalNode;
-    setRotatingNodeId(target.id);
-    setTokenError(null);
-    setRowActionError(null);
-    try {
-      const res = await onRotateToken(target.id);
-      setRotatedInfo({
-        nodeId: target.id,
-        nodeName: target.name,
-        data: res,
-      });
-      setTokenModalNode(null);
-    } catch (err) {
-      setTokenError(err instanceof Error ? err.message : "轮换连接密钥失败");
-    } finally {
-      setRotatingNodeId(null);
-    }
-  };
-
-  const openDeleteModal = (node: HorizonNode) => {
-    setDeleteError(null);
-    setPendingDeleteNode(node);
   };
 
   const handleConfirmDelete = async () => {
-    if (!pendingDeleteNode || deleting) return;
-    const targetId = pendingDeleteNode.id;
-    setDeleting(true);
+    if (!deletingNode || deletingBusy) return;
+    setDeletingBusy(true);
     setDeleteError(null);
     try {
-      await onDeleteNode(targetId);
-      if (rotatedInfo?.nodeId === targetId) {
-        setRotatedInfo(null);
-      }
-      setPendingDeleteNode(null);
+      await onDeleteNode(deletingNode.id);
+      setDeletingNode(null);
     } catch (err) {
       setDeleteError(err instanceof Error ? err.message : "移除服务器失败");
     } finally {
-      setDeleting(false);
+      setDeletingBusy(false);
     }
   };
 
-  const editingNodeObj = useMemo(() => {
-    if (!editing) return null;
-    return nodes.find((n) => n.id === editing.id) ?? null;
-  }, [editing, nodes]);
-
   return (
-    <section className="space-y-5">
-      {/* Top Header & Primary Actions */}
-      <div className="flex flex-col gap-3 sm:flex-row sm:items-end sm:justify-between">
-        <div>
-          <div className="flex items-center gap-2">
-            <h1 className="text-lg sm:text-xl font-bold tracking-tight text-[var(--text-primary)]">
-              服务器资产台账与探针运维
-            </h1>
-            <span className="px-2 py-0.5 rounded-full text-[11px] font-mono-num font-medium bg-[var(--bg-elevated)] border border-[var(--border-subtle)] text-[var(--text-secondary)]">
-              {stats.total} 节点
-            </span>
-          </div>
-          <p className="mt-1 text-xs text-[var(--text-secondary)]">
-            统一管理节点分组、月度流量计费口径、维护告警静默窗、一次性密钥轮换与隐私边界策略。
-          </p>
-        </div>
-
-        <div className="flex flex-wrap items-center gap-2">
-          <button
-            type="button"
-            onClick={onNavigateMigration}
-            className="inline-flex items-center gap-1.5 px-3.5 py-2 rounded-xl text-xs font-medium border border-[var(--border-subtle)] bg-[var(--bg-surface)] text-[var(--text-primary)] hover:bg-[var(--bg-card-hover)] transition-colors"
-          >
-            <ArrowLeftRight
-              className="w-3.5 h-3.5 text-[var(--accent-primary)]"
-              aria-hidden="true"
-            />
-            <span>双模热迁移工作台</span>
-          </button>
-          <button
-            type="button"
-            onClick={onOpenAddServer}
-            className="inline-flex items-center gap-1.5 px-4 py-2 rounded-xl text-xs font-semibold text-white shadow-sm transition-opacity hover:opacity-95"
-            style={{ backgroundColor: "var(--accent-solid)" }}
-          >
-            <Plus className="w-3.5 h-3.5" aria-hidden="true" />
-            <span>部署新探针</span>
-          </button>
-        </div>
+    <div className="space-y-5">
+      <div role="status" aria-live="polite" className="sr-only">
+        {sortAnnouncement}
       </div>
 
-      {/* Dual-Mode Engine Status Banner */}
-      <div className="surface-card rounded-2xl p-4 sm:p-5 flex flex-col lg:flex-row lg:items-center lg:justify-between gap-4">
-        <div className="flex items-start gap-3.5 min-w-0">
-          <div
-            className="w-10 h-10 rounded-xl flex items-center justify-center shrink-0 border"
-            style={{
-              backgroundColor: "var(--accent-soft)",
-              borderColor: "var(--accent-ring)",
-            }}
-          >
-            <Cloud
-              className="w-5 h-5 text-[var(--accent-primary)]"
-              aria-hidden="true"
-            />
-          </div>
-          <div className="min-w-0 space-y-1">
-            <div className="flex flex-wrap items-center gap-2">
-              <span className="text-sm font-semibold text-[var(--text-primary)]">
-                双模对等控制面引擎 · Cloudflare SCCH ⇄ 自建 uniob-hub
-              </span>
-              <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[11px] font-mono-num font-medium bg-emerald-500/12 text-emerald-700 dark:text-emerald-300 border border-emerald-500/30">
-                <ShieldCheck className="w-3 h-3" aria-hidden="true" />
-                <span>Protocol v2 金丝雀热切流就绪</span>
-              </span>
-            </div>
-            <div className="flex flex-wrap items-center gap-x-4 gap-y-1 text-xs text-[var(--text-secondary)]">
-              <span className="font-mono-num">
-                在线率 {stats.online}/{stats.total} (
-                {stats.total > 0
-                  ? Math.round((stats.online / stats.total) * 100)
-                  : 0}
-                %)
-              </span>
-              <span className="font-mono-num">
-                隐私锁定（禁用 /proc）：{stats.privacyLocked} 台
-              </span>
-              <span className="font-mono-num">
-                维护静默中：{stats.mutedCount} 台
-              </span>
-              {stats.trafficWarn > 0 && (
-                <span className="font-mono-num text-amber-700 dark:text-amber-300 font-medium">
-                  流量高水位预警：{stats.trafficWarn} 台
-                </span>
-              )}
-            </div>
-          </div>
-        </div>
-
-        <button
-          type="button"
-          onClick={onNavigateMigration}
-          className="shrink-0 inline-flex items-center justify-center gap-2 px-4 py-2 rounded-xl text-xs font-semibold border transition-colors self-start lg:self-center"
-          style={{
-            backgroundColor: "var(--accent-soft)",
-            borderColor: "var(--accent-ring)",
-            color: "var(--accent-primary)",
-          }}
-        >
-          <ArrowLeftRight className="w-3.5 h-3.5" aria-hidden="true" />
-          <span>进入双模热迁移工作台</span>
-        </button>
-      </div>
-
-      {/* Inline Row Action Error Banner */}
-      {rowActionError && (
-        <div
-          role="alert"
-          className="rounded-2xl border border-rose-500/40 bg-rose-500/10 px-4 py-3 text-xs text-rose-700 dark:text-rose-300 flex items-center justify-between gap-3"
-        >
-          <div className="flex items-center gap-2 min-w-0">
-            <AlertCircle className="w-4 h-4 shrink-0" aria-hidden="true" />
-            <span className="break-words">{rowActionError}</span>
-          </div>
-          <button
-            type="button"
-            onClick={() => setRowActionError(null)}
-            aria-label="关闭错误提示"
-            className="p-1 rounded-lg hover:bg-rose-500/15 shrink-0"
-          >
-            <X className="w-3.5 h-3.5" aria-hidden="true" />
-          </button>
-        </div>
-      )}
-
-      {/* Rotated Token Echo Banner */}
-      {rotatedInfo && (
-        <div
-          role="region"
-          aria-label="密钥轮换结果"
-          className="rounded-2xl border border-sky-500/40 bg-sky-500/10 p-4 space-y-3 text-xs"
-        >
-          <div className="flex items-start justify-between gap-3">
-            <div className="flex items-start gap-2.5">
-              <KeyRound
-                className="w-4 h-4 text-sky-600 dark:text-sky-400 shrink-0 mt-0.5"
-                aria-hidden="true"
-              />
-              <div>
-                <div className="font-semibold text-sky-900 dark:text-sky-200">
-                  节点「{rotatedInfo.nodeName}」连接密钥已轮换（旧密钥 SHA-256 哈希已立即吊销）
-                </div>
-                <p className="text-[11px] text-sky-800/90 dark:text-sky-300/90 mt-0.5">
-                  一次性明文密钥仅在此处展示，请在目标服务器终端执行更新命令使探针重新接入。
-                </p>
-              </div>
-            </div>
-            <button
-              type="button"
-              onClick={() => setRotatedInfo(null)}
-              aria-label="关闭密钥轮换提示"
-              className="p-1 rounded-lg text-[var(--text-secondary)] hover:text-[var(--text-primary)] hover:bg-[var(--bg-elevated)]"
+      {/* Clean Header (Topbar already owns the global + 添加服务器 CTA) */}
+      <SectionHeader
+        title="服务器"
+        badge={
+          <Badge tone="neutral">
+            在线 {onlineCount} / {nodes.length}
+          </Badge>
+        }
+        actions={
+          nodes.length > 0 ? (
+            <Button
+              size="sm"
+              variant="ghost"
+              icon={<ArrowRightLeft className="h-3.5 w-3.5" aria-hidden="true" />}
+              onClick={onNavigateMigration}
             >
-              <X className="w-4 h-4" aria-hidden="true" />
-            </button>
-          </div>
-
-          <div className="grid grid-cols-1 lg:grid-cols-12 gap-2.5">
-            <div className="lg:col-span-4 rounded-xl bg-slate-950 border border-slate-800 p-3 flex items-center justify-between gap-2">
-              <div className="min-w-0">
-                <div className="text-[10px] text-slate-400 uppercase tracking-wider">
-                  New Agent Token
-                </div>
-                <code className="block truncate font-mono-num text-[11px] text-amber-300 mt-0.5">
-                  {rotatedInfo.data.agent_token}
-                </code>
-              </div>
-              <OpsCopyButton
-                text={rotatedInfo.data.agent_token}
-                label="复制密钥"
-                ariaLabel={`复制 ${rotatedInfo.nodeName} 的新连接密钥`}
-              />
-            </div>
-
-            <div className="lg:col-span-8 rounded-xl bg-slate-950 border border-slate-800 p-3 flex flex-wrap items-center justify-between gap-2">
-              <div className="min-w-0 flex-1">
-                <div className="text-[10px] text-slate-400 uppercase tracking-wider">
-                  Re-Provision Command
-                </div>
-                <code className="block break-all font-mono-num text-[11px] text-emerald-300 mt-0.5">
-                  {rotatedInfo.data.install_cmd}
-                </code>
-              </div>
-              <OpsCopyButton
-                text={rotatedInfo.data.install_cmd}
-                label="复制安装命令"
-                ariaLabel={`复制 ${rotatedInfo.nodeName} 的重连安装命令`}
-              />
-            </div>
-          </div>
-        </div>
-      )}
+              服务与迁移
+            </Button>
+          ) : undefined
+        }
+      />
 
       {/* Filter & Search Toolbar */}
-      <div className="surface-card rounded-2xl p-3.5 space-y-3">
-        <div className="flex flex-col md:flex-row md:items-center justify-between gap-3">
-          {/* Group Filter Pills */}
-          <div
-            role="group"
-            aria-label="按服务器分组筛选"
-            className="flex flex-wrap items-center gap-1.5"
-          >
-            <button
-              type="button"
-              onClick={() => setSelectedGroup("ALL")}
-              aria-pressed={selectedGroup === "ALL"}
-              className={`px-3 py-1.5 rounded-lg text-xs font-medium border transition-colors ${
-                selectedGroup === "ALL"
-                  ? "text-[var(--accent-primary)] font-semibold"
-                  : "border-[var(--border-subtle)] bg-[var(--bg-inset)] text-[var(--text-secondary)] hover:text-[var(--text-primary)]"
-              }`}
-              style={
-                selectedGroup === "ALL"
-                  ? {
-                      backgroundColor: "var(--accent-soft)",
-                      borderColor: "var(--accent-ring)",
-                    }
-                  : undefined
-              }
-            >
-              全部分组 ({nodes.length})
-            </button>
-            {groups.map((grp) => {
-              const active = selectedGroup === grp;
-              return (
-                <button
-                  key={grp}
-                  type="button"
-                  onClick={() => setSelectedGroup(grp)}
-                  aria-pressed={active}
-                  className={`px-3 py-1.5 rounded-lg text-xs font-medium border transition-colors ${
-                    active
-                      ? "text-[var(--accent-primary)] font-semibold"
-                      : "border-[var(--border-subtle)] bg-[var(--bg-inset)] text-[var(--text-secondary)] hover:text-[var(--text-primary)]"
-                  }`}
-                  style={
-                    active
-                      ? {
-                          backgroundColor: "var(--accent-soft)",
-                          borderColor: "var(--accent-ring)",
-                        }
-                      : undefined
+      <search className="flex flex-wrap items-center justify-between gap-3">
+        <div className="flex flex-wrap items-center gap-1.5">
+          <button
+            type="button"
+            aria-pressed={groupFilter === "ALL"}
+            onClick={() => setGroupFilter("ALL")}
+            style={
+              groupFilter === "ALL"
+                ? {
+                    backgroundColor: "var(--ink-primary)",
+                    color: "var(--ink-on-primary)",
                   }
-                >
-                  {grp} ({groupCounts.get(grp) ?? 0})
-                </button>
-              );
-            })}
-          </div>
+                : {
+                    backgroundColor: "var(--bg-card)",
+                    color: "var(--text-secondary)",
+                    border: "1px solid var(--border-hairline)",
+                  }
+            }
+            className="h-8 cursor-pointer rounded-[8px] px-3 text-[12.5px] font-medium transition-colors"
+          >
+            全部
+          </button>
 
-          {/* Search Input */}
-          <div className="relative w-full md:w-72 shrink-0">
+          {groups.map((grp) => {
+            const active = groupFilter === grp;
+            return (
+              <button
+                key={grp}
+                type="button"
+                aria-pressed={active}
+                onClick={() => setGroupFilter(grp)}
+                style={
+                  active
+                    ? {
+                        backgroundColor: "var(--ink-primary)",
+                        color: "var(--ink-on-primary)",
+                      }
+                    : {
+                        backgroundColor: "var(--bg-card)",
+                        color: "var(--text-secondary)",
+                        border: "1px solid var(--border-hairline)",
+                      }
+                }
+                className="h-8 cursor-pointer rounded-[8px] px-3 text-[12.5px] font-medium transition-colors"
+              >
+                {grp}
+              </button>
+            );
+          })}
+        </div>
+
+        <div className="flex flex-wrap items-center gap-2.5">
+          <SegmentedControl<QuickStatusFilter>
+            ariaLabel="服务器状态筛选"
+            value={statusFilter}
+            onChange={setStatusFilter}
+            options={[
+              { value: "all", label: "全部" },
+              { value: "online", label: "在线" },
+              { value: "offline", label: "离线" },
+              { value: "muted", label: "已静音" },
+            ]}
+          />
+
+          <div className="relative w-full sm:w-60">
             <Search
-              className="w-3.5 h-3.5 text-[var(--text-muted)] absolute left-3 top-1/2 -translate-y-1/2 pointer-events-none"
+              className="pointer-events-none absolute left-2.5 h-3.5 w-3.5"
+              style={{
+                color: "var(--text-tertiary)",
+                top: "50%",
+                transform: "translateY(-50%)",
+              }}
               aria-hidden="true"
             />
             <input
               type="search"
-              value={searchQuery}
-              onChange={(e) => setSearchQuery(e.target.value)}
-              placeholder="搜索名称、主机名、服务商、标签..."
-              aria-label="搜索台账中的服务器"
-              className="w-full pl-8 pr-3 py-1.5 rounded-xl text-xs border border-[var(--border-subtle)] bg-[var(--bg-inset)] text-[var(--text-primary)] placeholder:text-[var(--text-muted)]"
+              value={query}
+              onChange={(e) => setQuery(e.target.value)}
+              placeholder="搜索名称、分组或地址..."
+              aria-label="搜索服务器"
+              style={{
+                backgroundColor: "var(--bg-card)",
+                color: "var(--text-primary)",
+                border: "1px solid var(--border-subtle)",
+              }}
+              className="h-8 w-full rounded-[8px] pr-3 pl-8 text-[12.5px] outline-none"
             />
           </div>
         </div>
+      </search>
 
-        {/* Status Quick Filters */}
-        <div className="flex flex-wrap items-center justify-between gap-2 pt-2 border-t border-[var(--border-subtle)]">
-          <div className="flex flex-wrap items-center gap-1.5 text-[11px]">
-            {(
-              [
-                { key: "all", label: "全部状态", count: stats.total },
-                { key: "online", label: "在线中", count: stats.online },
-                { key: "offline", label: "已离线", count: stats.offline },
-                { key: "muted", label: "静默维护", count: stats.mutedCount },
-                {
-                  key: "traffic_warn",
-                  label: "流量 >= 85%",
-                  count: stats.trafficWarn,
-                },
-              ] as const
-            ).map((opt) => {
-              const active = quickFilter === opt.key;
-              return (
-                <button
-                  key={opt.key}
-                  type="button"
-                  onClick={() => setQuickFilter(opt.key)}
-                  aria-pressed={active}
-                  className={`px-2.5 py-1 rounded-md border font-medium transition-colors ${
-                    active
-                      ? "bg-[var(--bg-elevated)] border-[var(--border-strong)] text-[var(--text-primary)]"
-                      : "border-transparent text-[var(--text-secondary)] hover:bg-[var(--bg-inset)]"
-                  }`}
-                >
-                  {opt.label}{" "}
-                  <span className="font-mono-num opacity-75">({opt.count})</span>
-                </button>
-              );
-            })}
-          </div>
-
-          <span className="text-[11px] font-mono-num text-[var(--text-muted)]">
-            当前显示 {filteredAndSortedNodes.length} / {nodes.length} 台
-          </span>
-        </div>
-      </div>
-
-      {/* Accessible Sortable & Responsive Asset Ledger Table */}
-      <div className="surface-card rounded-2xl overflow-hidden">
+      {/* Clean Server Inventory Table */}
+      <Card padded={false} className="overflow-hidden">
         <div
           tabIndex={0}
           role="region"
           aria-labelledby={tableCaptionId}
-          className="overflow-x-auto"
+          className="table-scroll-region thin-scrollbar"
         >
-          <table className="w-full text-left border-collapse text-xs">
+          <table className="uniob-table">
             <caption id={tableCaptionId} className="sr-only">
-              UniOB 服务器资产运维台账，包含排序序号、节点身份、分组与系统、探针状态与隐私权限、月度流量计费进度及操作按钮
+              服务器列表
             </caption>
-            <thead className="bg-[var(--bg-elevated)] border-b border-[var(--border-subtle)] text-[11px] text-[var(--text-secondary)]">
+            <thead>
               <tr>
                 <th
                   scope="col"
-                  aria-sort={
-                    sortBy === "sort_order"
-                      ? sortDir === "asc"
-                        ? "ascending"
-                        : "descending"
-                      : undefined
-                  }
-                  className="py-2.5 px-3 whitespace-nowrap"
+                  aria-sort={sortCol === "name" ? sortDir : undefined}
                 >
                   <button
                     type="button"
-                    onClick={() => handleSort("sort_order", "排序序号")}
-                    className="inline-flex items-center gap-1 font-semibold hover:text-[var(--text-primary)]"
+                    onClick={() => handleSort("name", "名称")}
                   >
-                    <span>#</span>
-                    <ArrowUpDown className="w-3 h-3 opacity-60" aria-hidden="true" />
+                    <span>服务器</span>
+                    {sortCol === "name" ? (
+                      sortDir === "ascending" ? (
+                        <ArrowUp className="h-3 w-3" aria-hidden="true" />
+                      ) : (
+                        <ArrowDown className="h-3 w-3" aria-hidden="true" />
+                      )
+                    ) : (
+                      <ArrowUpDown
+                        className="h-3 w-3 opacity-40"
+                        aria-hidden="true"
+                      />
+                    )}
                   </button>
                 </th>
+
                 <th
                   scope="col"
-                  aria-sort={
-                    sortBy === "name"
-                      ? sortDir === "asc"
-                        ? "ascending"
-                        : "descending"
-                      : undefined
-                  }
-                  className="py-2.5 px-3 whitespace-nowrap"
+                  aria-sort={sortCol === "group" ? sortDir : undefined}
                 >
                   <button
                     type="button"
-                    onClick={() => handleSort("name", "服务器名称")}
-                    className="inline-flex items-center gap-1 font-semibold hover:text-[var(--text-primary)]"
+                    onClick={() => handleSort("group", "分组")}
                   >
-                    <span>服务器资产</span>
-                    <ArrowUpDown className="w-3 h-3 opacity-60" aria-hidden="true" />
+                    <span>分组</span>
+                    {sortCol === "group" ? (
+                      sortDir === "ascending" ? (
+                        <ArrowUp className="h-3 w-3" aria-hidden="true" />
+                      ) : (
+                        <ArrowDown className="h-3 w-3" aria-hidden="true" />
+                      )
+                    ) : (
+                      <ArrowUpDown
+                        className="h-3 w-3 opacity-40"
+                        aria-hidden="true"
+                      />
+                    )}
                   </button>
                 </th>
+
+                <th scope="col">地址 / 规格</th>
+
                 <th
                   scope="col"
-                  aria-sort={
-                    sortBy === "group"
-                      ? sortDir === "asc"
-                        ? "ascending"
-                        : "descending"
-                      : undefined
-                  }
-                  className="py-2.5 px-3 whitespace-nowrap"
+                  aria-sort={sortCol === "net" ? sortDir : undefined}
                 >
                   <button
                     type="button"
-                    onClick={() => handleSort("group", "所属分组")}
-                    className="inline-flex items-center gap-1 font-semibold hover:text-[var(--text-primary)]"
+                    onClick={() => handleSort("net", "实时网速")}
                   >
-                    <span>分组 / 发行版</span>
-                    <ArrowUpDown className="w-3 h-3 opacity-60" aria-hidden="true" />
+                    <span>实时网速</span>
+                    {sortCol === "net" ? (
+                      sortDir === "ascending" ? (
+                        <ArrowUp className="h-3 w-3" aria-hidden="true" />
+                      ) : (
+                        <ArrowDown className="h-3 w-3" aria-hidden="true" />
+                      )
+                    ) : (
+                      <ArrowUpDown
+                        className="h-3 w-3 opacity-40"
+                        aria-hidden="true"
+                      />
+                    )}
                   </button>
                 </th>
+
                 <th
                   scope="col"
-                  aria-sort={
-                    sortBy === "status"
-                      ? sortDir === "asc"
-                        ? "ascending"
-                        : "descending"
-                      : undefined
-                  }
-                  className="py-2.5 px-3 whitespace-nowrap"
+                  aria-sort={sortCol === "cpu" ? sortDir : undefined}
                 >
                   <button
                     type="button"
-                    onClick={() => handleSort("status", "探针连接状态")}
-                    className="inline-flex items-center gap-1 font-semibold hover:text-[var(--text-primary)]"
+                    onClick={() => handleSort("cpu", "CPU")}
                   >
-                    <span>探针状态与隐私边界</span>
-                    <ArrowUpDown className="w-3 h-3 opacity-60" aria-hidden="true" />
+                    <span>CPU</span>
+                    {sortCol === "cpu" ? (
+                      sortDir === "ascending" ? (
+                        <ArrowUp className="h-3 w-3" aria-hidden="true" />
+                      ) : (
+                        <ArrowDown className="h-3 w-3" aria-hidden="true" />
+                      )
+                    ) : (
+                      <ArrowUpDown
+                        className="h-3 w-3 opacity-40"
+                        aria-hidden="true"
+                      />
+                    )}
                   </button>
                 </th>
+
                 <th
                   scope="col"
-                  aria-sort={
-                    sortBy === "traffic"
-                      ? sortDir === "asc"
-                        ? "ascending"
-                        : "descending"
-                      : undefined
-                  }
-                  className="py-2.5 px-3 whitespace-nowrap"
+                  aria-sort={sortCol === "mem" ? sortDir : undefined}
                 >
                   <button
                     type="button"
-                    onClick={() => handleSort("traffic", "本月已计费流量")}
-                    className="inline-flex items-center gap-1 font-semibold hover:text-[var(--text-primary)]"
+                    onClick={() => handleSort("mem", "内存")}
                   >
-                    <span>月流量计费账本</span>
-                    <ArrowUpDown className="w-3 h-3 opacity-60" aria-hidden="true" />
+                    <span>内存</span>
+                    {sortCol === "mem" ? (
+                      sortDir === "ascending" ? (
+                        <ArrowUp className="h-3 w-3" aria-hidden="true" />
+                      ) : (
+                        <ArrowDown className="h-3 w-3" aria-hidden="true" />
+                      )
+                    ) : (
+                      <ArrowUpDown
+                        className="h-3 w-3 opacity-40"
+                        aria-hidden="true"
+                      />
+                    )}
                   </button>
                 </th>
-                <th scope="col" className="py-2.5 px-3 text-right whitespace-nowrap">
-                  运维操作
+
+                <th
+                  scope="col"
+                  aria-sort={sortCol === "traffic" ? sortDir : undefined}
+                >
+                  <button
+                    type="button"
+                    onClick={() => handleSort("traffic", "月流量")}
+                  >
+                    <span>月流量</span>
+                    {sortCol === "traffic" ? (
+                      sortDir === "ascending" ? (
+                        <ArrowUp className="h-3 w-3" aria-hidden="true" />
+                      ) : (
+                        <ArrowDown className="h-3 w-3" aria-hidden="true" />
+                      )
+                    ) : (
+                      <ArrowUpDown
+                        className="h-3 w-3 opacity-40"
+                        aria-hidden="true"
+                      />
+                    )}
+                  </button>
+                </th>
+
+                <th scope="col" className="text-right">
+                  操作
                 </th>
               </tr>
             </thead>
 
-            <tbody className="divide-y divide-[var(--border-subtle)]">
-              {filteredAndSortedNodes.length === 0 ? (
+            <tbody>
+              {filteredAndSorted.length === 0 ? (
                 <tr>
-                  <td
-                    colSpan={6}
-                    className="py-12 px-4 text-center text-[var(--text-muted)]"
-                  >
-                    当前筛选条件下暂无匹配服务器，可清空筛选词或点击「部署新探针」注册节点。
+                  <td colSpan={8} className="py-14 text-center">
+                    <div className="flex flex-col items-center justify-center gap-3">
+                      <span
+                        style={{ color: "var(--text-tertiary)" }}
+                        className="text-[13px]"
+                      >
+                        {nodes.length === 0
+                          ? "暂未接入服务器"
+                          : "没有匹配筛选条件的服务器"}
+                      </span>
+                      {nodes.length === 0 && (
+                        <Button
+                          size="sm"
+                          variant="primary"
+                          icon={
+                            <Plus className="h-3.5 w-3.5" aria-hidden="true" />
+                          }
+                          onClick={onOpenAddServer}
+                        >
+                          添加第一台服务器
+                        </Button>
+                      )}
+                    </div>
                   </td>
                 </tr>
               ) : (
-                filteredAndSortedNodes.map((node) => {
-                  const osBadge = parseOsBadge(node.os);
+                filteredAndSorted.map((node) => {
                   const muted = isNodeMuted(node);
-                  const trafficPct = getTrafficUsagePct(node.traffic);
+                  const cpuPct =
+                    node.online && node.metrics ? node.metrics.cpu.all : 0;
+                  const memPct = node.online ? getMemUsagePct(node) : 0;
+                  const memTotalBytes = getMemTotalBytes(node);
+                  const osInfo = parseOsBadge(node.os);
                   const hasLimit =
                     node.traffic.limit_bytes !== null &&
                     node.traffic.limit_bytes > 0;
-                  const barTone =
-                    trafficPct >= 90
-                      ? "bg-rose-500"
-                      : trafficPct >= 75
-                        ? "bg-amber-500"
-                        : "bg-emerald-500";
-                  const metaLine = formatNodeMetaLine(node, {
-                    includeHostnameFallback: true,
-                  });
-                  const isMutingRow = mutingNodeId === node.id;
-                  const isRotatingRow = rotatingNodeId === node.id;
-                  const rowBusy = isMutingRow || isRotatingRow;
+                  const trafficPct = hasLimit
+                    ? Math.min(100, getTrafficUsagePct(node.traffic))
+                    : 12;
+
+                  const specText =
+                    node.cpu_cores && memTotalBytes > 0
+                      ? `${node.cpu_cores}C · ${formatBytesCompact(memTotalBytes)}`
+                      : osInfo.short;
+
+                  const metaSubline = [node.region_code, node.provider]
+                    .map((s) => s.trim())
+                    .filter(Boolean)
+                    .join(" · ");
 
                   return (
-                    <tr
-                      key={node.id}
-                      className="hover:bg-[var(--bg-card-hover)] transition-colors"
-                    >
-                      <td className="py-3 px-3 font-mono-num text-[var(--text-muted)] align-top">
-                        {node.sort_order}
+                    <tr key={node.id}>
+                      <td>
+                        <div className="flex items-center gap-2.5">
+                          <StatusDot
+                            tone={
+                              !node.online
+                                ? "danger"
+                                : cpuPct >= 88 || memPct >= 88
+                                  ? "warn"
+                                  : "ok"
+                            }
+                          />
+                          <div className="min-w-0">
+                            <div className="flex items-center gap-1.5">
+                              <button
+                                type="button"
+                                onClick={() => onInspectNode(node, "charts")}
+                                style={{ color: "var(--text-primary)" }}
+                                className="cursor-pointer truncate text-left text-[13px] font-semibold hover:underline"
+                              >
+                                {node.name}
+                              </button>
+                              {muted && <Badge tone="subtle">已静音</Badge>}
+                            </div>
+                            {metaSubline && (
+                              <div
+                                style={{ color: "var(--text-tertiary)" }}
+                                className="truncate text-[11.5px]"
+                              >
+                                {metaSubline}
+                              </div>
+                            )}
+                          </div>
+                        </div>
                       </td>
 
-                      <td className="py-3 px-3 align-top">
-                        <div className="flex flex-wrap items-center gap-1.5">
-                          <span
-                            className={`inline-flex items-center gap-1 px-1.5 py-0.5 rounded-full text-[10px] font-medium border ${
-                              node.online
-                                ? "bg-emerald-500/12 text-emerald-700 dark:text-emerald-300 border-emerald-500/30"
-                                : "bg-rose-500/12 text-rose-700 dark:text-rose-300 border-rose-500/30"
-                            }`}
+                      <td>
+                        {groups.length > 0 ? (
+                          <select
+                            aria-label={`${node.name} 分组`}
+                            value={node.group_name}
+                            onChange={(e) => {
+                              void onUpdateNode(node.id, {
+                                group_name: e.target.value,
+                              });
+                            }}
+                            style={{
+                              backgroundColor: "var(--bg-subtle)",
+                              color: "var(--text-secondary)",
+                              border: "1px solid var(--border-hairline)",
+                            }}
+                            className="h-7 max-w-[132px] cursor-pointer truncate rounded-[6px] px-2 text-[12px]"
                           >
-                            <span
-                              className={`w-1.5 h-1.5 rounded-full ${
-                                node.online ? "bg-emerald-500" : "bg-rose-500"
-                              }`}
-                              aria-hidden="true"
-                            />
-                            {node.online ? "在线" : "离线"}
-                          </span>
-
-                          <button
-                            type="button"
-                            onClick={() => onInspectNode(node, "charts")}
-                            className="font-semibold text-[var(--text-primary)] hover:text-[var(--accent-primary)] transition-colors text-left"
-                          >
-                            {node.region_flag ? `${node.region_flag} ` : ""}
-                            {node.name}
-                          </button>
-
-                          {muted && (
-                            <span className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded text-[10px] font-medium bg-amber-500/15 text-amber-700 dark:text-amber-300 border border-amber-500/30">
-                              <BellOff className="w-2.5 h-2.5" aria-hidden="true" />
-                              静默中
-                            </span>
-                          )}
-                        </div>
-
-                        <div className="mt-1 font-mono-num text-[11px] text-[var(--text-muted)] break-all">
-                          {metaLine || "等待首帧握手"}
-                        </div>
-
-                        {node.tags.length > 0 && (
-                          <div className="mt-1.5 flex flex-wrap gap-1">
-                            {node.tags.map((tag) => (
-                              <span
-                                key={tag}
-                                className="px-1.5 py-0.2 rounded text-[10px] font-mono-num bg-[var(--bg-inset)] border border-[var(--border-subtle)] text-[var(--text-secondary)]"
-                              >
-                                #{tag}
-                              </span>
+                            <option value="">未分组</option>
+                            {groups.map((grp) => (
+                              <option key={grp} value={grp}>
+                                {grp}
+                              </option>
                             ))}
-                          </div>
+                          </select>
+                        ) : (
+                          <Badge tone="neutral">
+                            {node.group_name || "未分组"}
+                          </Badge>
                         )}
                       </td>
 
-                      <td className="py-3 px-3 whitespace-nowrap align-top">
-                        <div className="flex flex-col gap-1.5 items-start">
-                          <span className="px-2 py-0.5 rounded-md text-[11px] font-medium bg-[var(--bg-elevated)] border border-[var(--border-subtle)] text-[var(--text-primary)]">
-                            {node.group_name}
+                      <td>
+                        <div className="flex items-center gap-2 whitespace-nowrap">
+                          <span
+                            style={{ color: "var(--text-primary)" }}
+                            className="font-mono-num tabular-nums text-[12.5px]"
+                          >
+                            {node.ipv4_masked || node.hostname || "—"}
                           </span>
-                          <div className="flex items-center gap-1.5">
-                            <span
-                              className={`px-1.5 py-0.5 rounded text-[10px] font-medium border ${osBadge.colorClass}`}
-                            >
-                              {osBadge.short}
-                            </span>
-                            {node.arch && (
-                              <span className="font-mono-num text-[10px] text-[var(--text-muted)]">
-                                {node.arch}
-                              </span>
-                            )}
-                          </div>
+                          <Badge tone="neutral">{specText}</Badge>
                         </div>
                       </td>
 
-                      <td className="py-3 px-3 whitespace-nowrap align-top">
-                        <div className="space-y-1 font-mono-num text-[11px]">
-                          <div className="flex items-center gap-1.5 text-[var(--text-primary)]">
-                            <span>
-                              {node.agent_version
-                                ? `agent v${node.agent_version}`
-                                : "未注册心跳"}
+                      <td className="whitespace-nowrap">
+                        {node.online && node.metrics ? (
+                          <div className="font-mono-num tabular-nums flex flex-col gap-0.5 text-[12px] leading-tight">
+                            <span style={{ color: "var(--accent-ink)" }}>
+                              ↓ {formatBytesPerSec(node.metrics.net.rx_bps)}
                             </span>
-                            <span className="text-[var(--text-muted)]">·</span>
-                            {node.proc_enabled ? (
-                              <span className="inline-flex items-center gap-1 text-emerald-700 dark:text-emerald-300">
-                                <Terminal className="w-3 h-3" aria-hidden="true" />
-                                /proc 开启
-                              </span>
-                            ) : (
-                              <span className="inline-flex items-center gap-1 text-amber-700 dark:text-amber-300">
-                                <Lock className="w-3 h-3" aria-hidden="true" />
-                                隐私锁定
-                              </span>
-                            )}
+                            <span style={{ color: "var(--status-ok-ink)" }}>
+                              ↑ {formatBytesPerSec(node.metrics.net.tx_bps)}
+                            </span>
                           </div>
-                          <div className="text-[var(--text-muted)]">
-                            心跳：{formatRelativeTime(node.last_seen_ts)}
-                          </div>
-                        </div>
+                        ) : (
+                          <span
+                            style={{ color: "var(--text-tertiary)" }}
+                            className="font-mono-num tabular-nums text-[12px]"
+                          >
+                            —
+                          </span>
+                        )}
                       </td>
 
-                      <td className="py-3 px-3 min-w-[13rem] align-top">
-                        <div className="space-y-1.5 font-mono-num text-[11px]">
-                          <div className="flex items-center justify-between gap-2">
-                            <span className="text-[var(--text-primary)] font-medium">
-                              {formatBytes(node.traffic.counted_bytes)} /{" "}
-                              {hasLimit
-                                ? formatBytes(node.traffic.limit_bytes)
-                                : "不限配额"}
-                            </span>
-                            {hasLimit && (
-                              <span
-                                className={
-                                  trafficPct >= 90
-                                    ? "text-rose-600 dark:text-rose-400 font-semibold"
-                                    : trafficPct >= 75
-                                      ? "text-amber-600 dark:text-amber-400 font-semibold"
-                                      : "text-[var(--text-secondary)]"
-                                }
-                              >
-                                {trafficPct.toFixed(1)}%
-                              </span>
-                            )}
-                          </div>
-
-                          {hasLimit ? (
-                            <div className="h-1.5 w-full rounded-full bg-[var(--bg-inset)] overflow-hidden">
-                              <div
-                                className={`h-full rounded-full transition-all ${barTone}`}
-                                style={{
-                                  width: `${Math.min(100, Math.max(2, trafficPct))}%`,
-                                }}
-                              />
-                            </div>
-                          ) : (
-                            <div className="h-1.5 w-full rounded-full bg-[var(--bg-inset)] overflow-hidden">
-                              <div
-                                className="h-full rounded-full opacity-50"
-                                style={{
-                                  width: "24%",
-                                  backgroundColor: "var(--accent-primary)",
-                                }}
-                              />
-                            </div>
-                          )}
-
-                          <div className="text-[10px] text-[var(--text-muted)]">
-                            {formatTrafficMode(node.traffic.count_mode)} · 每月{" "}
-                            {node.traffic.reset_day} 日重置（剩{" "}
-                            {node.traffic.days_remaining} 天）
-                          </div>
-                        </div>
-                      </td>
-
-                      <td className="py-3 px-3 text-right whitespace-nowrap align-top">
-                        <div className="inline-flex items-center gap-1">
-                          <button
-                            type="button"
-                            onClick={() => onInspectNode(node, "charts")}
-                            title="透视节点曲线与详情"
-                            aria-label={`查看 ${node.name} 实时遥测`}
-                            className="p-1.5 rounded-lg border border-[var(--border-subtle)] bg-[var(--bg-surface)] text-[var(--text-secondary)] hover:text-[var(--accent-primary)] hover:border-[var(--accent-ring)] transition-colors"
-                          >
-                            <Eye className="w-3.5 h-3.5" aria-hidden="true" />
-                          </button>
-
-                          <button
-                            type="button"
-                            onClick={() => onInspectNode(node, "procs")}
-                            title="按需查看 /proc 进程"
-                            aria-label={`查看 ${node.name} 进程列表`}
-                            className="p-1.5 rounded-lg border border-[var(--border-subtle)] bg-[var(--bg-surface)] text-[var(--text-secondary)] hover:text-[var(--accent-primary)] hover:border-[var(--accent-ring)] transition-colors"
-                          >
-                            <Activity className="w-3.5 h-3.5" aria-hidden="true" />
-                          </button>
-
-                          <button
-                            type="button"
-                            disabled={rowBusy}
-                            onClick={() => openEditModal(node)}
-                            title="编辑节点配置与流量口径"
-                            aria-label={`编辑 ${node.name} 配置`}
-                            className="p-1.5 rounded-lg border border-[var(--border-subtle)] bg-[var(--bg-surface)] text-[var(--text-secondary)] hover:text-sky-600 dark:hover:text-sky-400 hover:border-sky-500/40 disabled:opacity-50 transition-colors"
-                          >
-                            <Edit3 className="w-3.5 h-3.5" aria-hidden="true" />
-                          </button>
-
-                          <button
-                            type="button"
-                            disabled={rowBusy}
-                            onClick={() =>
-                              void handleMuteRow(node, muted ? null : 1800)
+                      <td>
+                        <div className="w-28">
+                          <MetricBar
+                            valueLabel={
+                              node.online && node.metrics
+                                ? `${cpuPct.toFixed(0)}%`
+                                : "离线"
                             }
-                            title={muted ? "取消维护静默" : "快速静默 30 分钟"}
+                            valuePct={cpuPct}
+                            thickness={3}
+                          />
+                        </div>
+                      </td>
+
+                      <td>
+                        <div className="w-28">
+                          <MetricBar
+                            valueLabel={
+                              node.online && node.metrics
+                                ? `${Math.round(memPct)}%`
+                                : "—"
+                            }
+                            valuePct={memPct}
+                            thickness={3}
+                          />
+                        </div>
+                      </td>
+
+                      <td>
+                        <div className="w-32">
+                          <MetricBar
+                            valueLabel={
+                              hasLimit
+                                ? `${formatBytesCompact(node.traffic.counted_bytes)} / ${formatBytesCompact(node.traffic.limit_bytes)}`
+                                : formatBytes(node.traffic.counted_bytes)
+                            }
+                            valuePct={trafficPct}
+                            thickness={3}
+                          />
+                        </div>
+                      </td>
+
+                      <td className="text-right whitespace-nowrap">
+                        <div className="inline-flex items-center gap-1">
+                          <Button
+                            size="xs"
+                            variant="secondary"
+                            icon={
+                              <SlidersHorizontal
+                                className="h-3 w-3"
+                                aria-hidden="true"
+                              />
+                            }
+                            onClick={() => openEditModal(node)}
+                          >
+                            编辑
+                          </Button>
+                          <Button
+                            size="xs"
+                            variant="ghost"
+                            disabled={busyMuteId === node.id}
                             aria-label={
                               muted
-                                ? `取消 ${node.name} 告警静默`
-                                : `将 ${node.name} 静默 30 分钟`
+                                ? `取消静音 ${node.name}`
+                                : `静音 ${node.name}`
                             }
-                            className={`p-1.5 rounded-lg border transition-colors disabled:opacity-50 ${
-                              muted
-                                ? "border-amber-500/40 bg-amber-500/15 text-amber-700 dark:text-amber-300"
-                                : "border-[var(--border-subtle)] bg-[var(--bg-surface)] text-[var(--text-secondary)] hover:text-amber-600 dark:hover:text-amber-400 hover:border-amber-500/40"
-                            }`}
+                            icon={
+                              muted ? (
+                                <VolumeX
+                                  className="h-3.5 w-3.5"
+                                  aria-hidden="true"
+                                />
+                              ) : (
+                                <Volume2
+                                  className="h-3.5 w-3.5"
+                                  aria-hidden="true"
+                                />
+                              )
+                            }
+                            onClick={() => void handleQuickMuteToggle(node)}
+                          />
+                          <Button
+                            size="xs"
+                            variant="ghost"
+                            icon={
+                              <KeyRound className="h-3 w-3" aria-hidden="true" />
+                            }
+                            onClick={() => {
+                              setTokenNode(node);
+                              setRotatedResult(null);
+                              setTokenError(null);
+                            }}
                           >
-                            {isMutingRow ? (
-                              <Loader2
-                                className="w-3.5 h-3.5 animate-spin"
-                                aria-hidden="true"
-                              />
-                            ) : muted ? (
-                              <Volume2 className="w-3.5 h-3.5" aria-hidden="true" />
-                            ) : (
-                              <BellOff className="w-3.5 h-3.5" aria-hidden="true" />
-                            )}
-                          </button>
-
-                          <button
-                            type="button"
-                            disabled={rowBusy}
-                            onClick={() => openRotateModal(node)}
-                            title="轮换连接密钥"
-                            aria-label={`轮换 ${node.name} 的连接密钥`}
-                            className="p-1.5 rounded-lg border border-[var(--border-subtle)] bg-[var(--bg-surface)] text-[var(--text-secondary)] hover:text-amber-600 dark:hover:text-amber-400 hover:border-amber-500/40 disabled:opacity-50 transition-colors"
-                          >
-                            {isRotatingRow ? (
-                              <Loader2
-                                className="w-3.5 h-3.5 animate-spin"
-                                aria-hidden="true"
-                              />
-                            ) : (
-                              <KeyRound className="w-3.5 h-3.5" aria-hidden="true" />
-                            )}
-                          </button>
-
-                          <button
-                            type="button"
-                            disabled={rowBusy}
-                            onClick={() => openDeleteModal(node)}
-                            title="安全移除节点"
+                            密钥
+                          </Button>
+                          <Button
+                            size="xs"
+                            variant="ghost"
                             aria-label={`移除 ${node.name}`}
-                            className="p-1.5 rounded-lg border border-[var(--border-subtle)] bg-[var(--bg-surface)] text-[var(--text-secondary)] hover:text-rose-600 dark:hover:text-rose-400 hover:border-rose-500/40 hover:bg-rose-500/10 disabled:opacity-50 transition-colors"
-                          >
-                            <Trash2 className="w-3.5 h-3.5" aria-hidden="true" />
-                          </button>
+                            icon={
+                              <Trash2
+                                className="h-3.5 w-3.5"
+                                aria-hidden="true"
+                              />
+                            }
+                            onClick={() => {
+                              setDeletingNode(node);
+                              setDeleteError(null);
+                            }}
+                          />
                         </div>
                       </td>
                     </tr>
@@ -1257,576 +847,525 @@ export function NodesOpsView({
             </tbody>
           </table>
         </div>
+      </Card>
 
-        <div role="status" className="sr-only">
-          {sortAnnouncement}
-        </div>
-      </div>
-
-      {/* Native <dialog> Node Edit Modal */}
-      <dialog
-        ref={editDialogRef}
-        {...(savingEdit ? DIALOG_LOCKED_DISMISS_ATTRS : DIALOG_LIGHT_DISMISS_ATTRS)}
-        aria-labelledby={editing ? editTitleId : undefined}
-        aria-label={editing ? undefined : "编辑服务器配置"}
-        onPointerDown={(e) => {
-          if (!("closedBy" in HTMLDialogElement.prototype)) {
-            const d = editDialogRef.current;
-            if (!d) return;
-            editPointerDownOutsideRef.current =
-              e.target === d && isOutsideDialogBounds(e, d);
-          }
-        }}
-        onPointerUp={(e) => {
-          if (!("closedBy" in HTMLDialogElement.prototype)) {
-            const d = editDialogRef.current;
-            const startedOutside = editPointerDownOutsideRef.current;
-            editPointerDownOutsideRef.current = false;
-            if (!d || !startedOutside || savingEdit) return;
-            if (e.target === d && isOutsideDialogBounds(e, d)) {
-              setEditing(null);
-            }
-          }
-        }}
-        onCancel={(e) => {
-          e.preventDefault();
-          if (!savingEdit) setEditing(null);
-        }}
+      {/* 1. Edit Server Modal */}
+      <NativeDialog
+        open={editingNode !== null}
         onClose={() => {
-          if (!editSyncingRef.current && editing !== null) {
-            if (savingEdit) {
-              editDialogRef.current?.showModal();
-              return;
-            }
-            setEditing(null);
-          }
+          if (!savingEdit) setEditingNode(null);
         }}
-        className="m-auto w-[min(38rem,calc(100vw-2rem))] max-h-[90dvh] overflow-hidden overscroll-contain rounded-2xl border border-[var(--border-subtle)] bg-[var(--bg-surface)] text-[var(--text-primary)] shadow-2xl"
+        titleId={editTitleId}
+        maxWidthClass="max-w-[460px]"
       >
-        <div className="flex flex-col max-h-[90dvh] w-full min-h-0 bg-[var(--bg-surface)] text-[var(--text-primary)]">
-          {editing && (
-            <>
-              <div className="shrink-0 px-5 py-4 border-b border-[var(--border-subtle)] flex items-center justify-between gap-3">
-                <div className="flex items-center gap-2.5 min-w-0">
-                  <Server
-                    className="w-4 h-4 text-[var(--accent-primary)] shrink-0"
-                    aria-hidden="true"
-                  />
-                  <h2
-                    id={editTitleId}
-                    className="text-sm font-bold text-[var(--text-primary)] truncate"
-                  >
-                    编辑节点配置 · {editing.name}
-                  </h2>
-                </div>
-                <button
-                  type="button"
-                  disabled={savingEdit}
-                  onClick={() => setEditing(null)}
-                  aria-label="关闭编辑窗口"
-                  className="p-1.5 rounded-lg text-[var(--text-secondary)] hover:text-[var(--text-primary)] hover:bg-[var(--bg-elevated)] disabled:opacity-50"
+        {editingNode && (
+          <form onSubmit={(e) => void handleSaveEdit(e)} className="space-y-4 p-5">
+            <div className="flex items-center justify-between">
+              <h3
+                id={editTitleId}
+                style={{ color: "var(--text-primary)" }}
+                className="text-[15px] font-semibold"
+              >
+                编辑服务器
+              </h3>
+              <IconCloseButton
+                onClick={() => {
+                  if (!savingEdit) setEditingNode(null);
+                }}
+              />
+            </div>
+
+            {editError && (
+              <div
+                role="alert"
+                style={{
+                  backgroundColor: "var(--status-danger-bg)",
+                  border: "1px solid var(--status-danger-border)",
+                  color: "var(--status-danger-ink)",
+                }}
+                className="rounded-[8px] px-3 py-2 text-[12px]"
+              >
+                {editError}
+              </div>
+            )}
+
+            <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
+              <div className="space-y-1 sm:col-span-2">
+                <label
+                  htmlFor="edit-node-name"
+                  style={{ color: "var(--text-secondary)" }}
+                  className="block text-[12px] font-medium"
                 >
-                  <X className="w-4 h-4" aria-hidden="true" />
-                </button>
+                  服务器名称
+                </label>
+                <input
+                  id="edit-node-name"
+                  type="text"
+                  required
+                  value={editName}
+                  onChange={(e) => setEditName(e.target.value)}
+                  style={{
+                    backgroundColor: "var(--bg-subtle)",
+                    color: "var(--text-primary)",
+                    border: "1px solid var(--border-subtle)",
+                  }}
+                  className="h-9 w-full rounded-[8px] px-3 text-[13px] outline-none"
+                />
               </div>
 
-              <form
-                noValidate
-                onSubmit={(e) => void handleSaveEdit(e)}
-                className="flex-1 overflow-y-auto p-5 space-y-4 text-xs"
+              <div className="space-y-1">
+                <label
+                  htmlFor="edit-node-group"
+                  style={{ color: "var(--text-secondary)" }}
+                  className="block text-[12px] font-medium"
+                >
+                  分组
+                </label>
+                <input
+                  id="edit-node-group"
+                  type="text"
+                  list={groupDatalistId}
+                  value={editGroup}
+                  onChange={(e) => setEditGroup(e.target.value)}
+                  placeholder="例如：亚太生产"
+                  style={{
+                    backgroundColor: "var(--bg-subtle)",
+                    color: "var(--text-primary)",
+                    border: "1px solid var(--border-subtle)",
+                  }}
+                  className="h-9 w-full rounded-[8px] px-3 text-[13px] outline-none"
+                />
+                <datalist id={groupDatalistId}>
+                  {groups.map((grp) => (
+                    <option key={grp} value={grp} />
+                  ))}
+                </datalist>
+              </div>
+
+              <div className="space-y-1">
+                <label
+                  htmlFor="edit-node-sort"
+                  style={{ color: "var(--text-secondary)" }}
+                  className="block text-[12px] font-medium"
+                >
+                  排序权重
+                </label>
+                <input
+                  id="edit-node-sort"
+                  type="number"
+                  value={editSortOrder}
+                  onChange={(e) => setEditSortOrder(Number(e.target.value) || 0)}
+                  style={{
+                    backgroundColor: "var(--bg-subtle)",
+                    color: "var(--text-primary)",
+                    border: "1px solid var(--border-subtle)",
+                  }}
+                  className="font-mono-num h-9 w-full rounded-[8px] px-3 text-[13px] outline-none"
+                />
+              </div>
+
+              <div className="space-y-1 sm:col-span-2">
+                <label
+                  htmlFor="edit-node-tags"
+                  style={{ color: "var(--text-secondary)" }}
+                  className="block text-[12px] font-medium"
+                >
+                  标签（逗号分隔）
+                </label>
+                <input
+                  id="edit-node-tags"
+                  type="text"
+                  value={editTagsText}
+                  onChange={(e) => setEditTagsText(e.target.value)}
+                  placeholder="边缘, 东京, CN2"
+                  style={{
+                    backgroundColor: "var(--bg-subtle)",
+                    color: "var(--text-primary)",
+                    border: "1px solid var(--border-subtle)",
+                  }}
+                  className="h-9 w-full rounded-[8px] px-3 text-[13px] outline-none"
+                />
+              </div>
+
+              <div className="space-y-1">
+                <label
+                  htmlFor="edit-node-limit"
+                  style={{ color: "var(--text-secondary)" }}
+                  className="block text-[12px] font-medium"
+                >
+                  月流量配额（GB，留空不限）
+                </label>
+                <input
+                  id="edit-node-limit"
+                  type="number"
+                  min={0}
+                  step="any"
+                  value={editLimitGb}
+                  onChange={(e) => setEditLimitGb(e.target.value)}
+                  placeholder="不限流量"
+                  style={{
+                    backgroundColor: "var(--bg-subtle)",
+                    color: "var(--text-primary)",
+                    border: "1px solid var(--border-subtle)",
+                  }}
+                  className="font-mono-num h-9 w-full rounded-[8px] px-3 text-[13px] outline-none"
+                />
+              </div>
+
+              <div className="space-y-1">
+                <label
+                  htmlFor="edit-node-reset-day"
+                  style={{ color: "var(--text-secondary)" }}
+                  className="block text-[12px] font-medium"
+                >
+                  每月重置日（1-28）
+                </label>
+                <input
+                  id="edit-node-reset-day"
+                  type="number"
+                  min={1}
+                  max={28}
+                  value={editResetDay}
+                  onChange={(e) =>
+                    setEditResetDay(
+                      Math.min(28, Math.max(1, Number(e.target.value) || 1)),
+                    )
+                  }
+                  style={{
+                    backgroundColor: "var(--bg-subtle)",
+                    color: "var(--text-primary)",
+                    border: "1px solid var(--border-subtle)",
+                  }}
+                  className="font-mono-num h-9 w-full rounded-[8px] px-3 text-[13px] outline-none"
+                />
+              </div>
+
+              <div className="space-y-1 sm:col-span-2">
+                <label
+                  htmlFor="edit-node-mode"
+                  style={{ color: "var(--text-secondary)" }}
+                  className="block text-[12px] font-medium"
+                >
+                  流量计费方式
+                </label>
+                <select
+                  id="edit-node-mode"
+                  value={editCountMode}
+                  onChange={(e) =>
+                    setEditCountMode(e.target.value as TrafficCountMode)
+                  }
+                  style={{
+                    backgroundColor: "var(--bg-subtle)",
+                    color: "var(--text-primary)",
+                    border: "1px solid var(--border-subtle)",
+                  }}
+                  className="h-9 w-full rounded-[8px] px-3 text-[13px] outline-none"
+                >
+                  <option value="both">双向计费（上传 + 下载）</option>
+                  <option value="tx_only">仅计上传（出向流量）</option>
+                  <option value="max">双向取大（较高一侧）</option>
+                </select>
+              </div>
+            </div>
+
+            {/* Quick Mute Actions */}
+            <div
+              style={{
+                backgroundColor: "var(--bg-subtle)",
+                border: "1px solid var(--border-hairline)",
+              }}
+              className="flex flex-wrap items-center justify-between gap-2 rounded-[8px] px-3 py-2.5"
+            >
+              <span
+                style={{ color: "var(--text-secondary)" }}
+                className="text-[12px] font-medium"
               >
-                {editError && (
+                告警通知静音
+              </span>
+              <div className="flex items-center gap-1.5">
+                <Button
+                  size="xs"
+                  variant="secondary"
+                  onClick={() => void onMuteNode(editingNode.id, 3600)}
+                >
+                  静音 1 小时
+                </Button>
+                <Button
+                  size="xs"
+                  variant="secondary"
+                  onClick={() => void onMuteNode(editingNode.id, 86400)}
+                >
+                  静音 24 小时
+                </Button>
+                {isNodeMuted(editingNode) && (
+                  <Button
+                    size="xs"
+                    variant="ghost"
+                    onClick={() => void onMuteNode(editingNode.id, null)}
+                  >
+                    恢复通知
+                  </Button>
+                )}
+              </div>
+            </div>
+
+            <div className="flex justify-end gap-2 pt-1">
+              <Button
+                variant="ghost"
+                size="sm"
+                disabled={savingEdit}
+                onClick={() => setEditingNode(null)}
+              >
+                取消
+              </Button>
+              <Button
+                autoFocus
+                type="submit"
+                variant="primary"
+                size="sm"
+                disabled={savingEdit}
+                icon={
+                  savingEdit ? (
+                    <Loader2
+                      className="h-3.5 w-3.5 animate-spin"
+                      aria-hidden="true"
+                    />
+                  ) : undefined
+                }
+              >
+                {savingEdit ? "保存中..." : "保存"}
+              </Button>
+            </div>
+          </form>
+        )}
+      </NativeDialog>
+
+      {/* 2. Rotate Connection Key Modal */}
+      <NativeDialog
+        open={tokenNode !== null}
+        onClose={() => {
+          if (!rotatingToken) {
+            setTokenNode(null);
+            setRotatedResult(null);
+          }
+        }}
+        titleId={tokenTitleId}
+        maxWidthClass="max-w-[440px]"
+      >
+        {tokenNode && (
+          <div className="space-y-4 p-5">
+            <div className="flex items-center justify-between">
+              <h3
+                id={tokenTitleId}
+                style={{ color: "var(--text-primary)" }}
+                className="text-[15px] font-semibold"
+              >
+                重置连接密钥 · {tokenNode.name}
+              </h3>
+              <IconCloseButton
+                onClick={() => {
+                  if (!rotatingToken) {
+                    setTokenNode(null);
+                    setRotatedResult(null);
+                  }
+                }}
+              />
+            </div>
+
+            {tokenError && (
+              <div
+                role="alert"
+                style={{
+                  backgroundColor: "var(--status-danger-bg)",
+                  border: "1px solid var(--status-danger-border)",
+                  color: "var(--status-danger-ink)",
+                }}
+                className="rounded-[8px] px-3 py-2 text-[12px]"
+              >
+                {tokenError}
+              </div>
+            )}
+
+            {rotatedResult ? (
+              <div className="space-y-3">
+                <div className="space-y-1.5">
                   <div
-                    role="alert"
-                    className="rounded-xl border border-rose-500/40 bg-rose-500/10 px-3.5 py-2.5 text-rose-700 dark:text-rose-300"
+                    style={{ color: "var(--text-secondary)" }}
+                    className="text-[12px] font-medium"
                   >
-                    {editError}
+                    更新安装命令
                   </div>
-                )}
-
-                <div className="grid grid-cols-1 sm:grid-cols-2 gap-3.5">
-                  <div>
-                    <label
-                      htmlFor={`${baseId}-edit-name`}
-                      className="block font-medium text-[var(--text-secondary)] mb-1"
+                  <div
+                    style={{
+                      backgroundColor: "var(--bg-subtle)",
+                      border: "1px solid var(--border-subtle)",
+                    }}
+                    className="space-y-2.5 rounded-[8px] p-3"
+                  >
+                    <code
+                      style={{ color: "var(--text-primary)" }}
+                      className="block break-all font-mono text-[12px] leading-relaxed"
                     >
-                      服务器名称 *
-                    </label>
-                    <input
-                      id={`${baseId}-edit-name`}
-                      type="text"
-                      required
-                      value={editing.name}
-                      onChange={(e) => {
-                        setEditing({ ...editing, name: e.target.value });
-                        if (editError) setEditError(null);
-                      }}
-                      className="w-full px-3 py-2 rounded-xl border border-[var(--border-subtle)] bg-[var(--bg-inset)] text-[var(--text-primary)]"
-                    />
-                  </div>
-
-                  <div>
-                    <label
-                      htmlFor={`${baseId}-edit-group`}
-                      className="block font-medium text-[var(--text-secondary)] mb-1"
-                    >
-                      所属分组
-                    </label>
-                    <input
-                      id={`${baseId}-edit-group`}
-                      type="text"
-                      list={groupListId}
-                      value={editing.group_name}
-                      onChange={(e) =>
-                        setEditing({ ...editing, group_name: e.target.value })
-                      }
-                      className="w-full px-3 py-2 rounded-xl border border-[var(--border-subtle)] bg-[var(--bg-inset)] text-[var(--text-primary)]"
-                    />
-                    <datalist id={groupListId}>
-                      {groups.map((g) => (
-                        <option key={g} value={g} />
-                      ))}
-                    </datalist>
-                  </div>
-
-                  <div>
-                    <label
-                      htmlFor={`${baseId}-edit-tags`}
-                      className="block font-medium text-[var(--text-secondary)] mb-1"
-                    >
-                      资产标签（逗号分隔）
-                    </label>
-                    <input
-                      id={`${baseId}-edit-tags`}
-                      type="text"
-                      value={editing.tagsText}
-                      onChange={(e) =>
-                        setEditing({ ...editing, tagsText: e.target.value })
-                      }
-                      placeholder="BGP, Edge, Prod"
-                      className="w-full px-3 py-2 rounded-xl border border-[var(--border-subtle)] bg-[var(--bg-inset)] text-[var(--text-primary)]"
-                    />
-                  </div>
-
-                  <div>
-                    <label
-                      htmlFor={`${baseId}-edit-sort`}
-                      className="block font-medium text-[var(--text-secondary)] mb-1"
-                    >
-                      排序序号（越小越靠前）
-                    </label>
-                    <input
-                      id={`${baseId}-edit-sort`}
-                      type="number"
-                      value={editing.sort_order}
-                      onChange={(e) =>
-                        setEditing({ ...editing, sort_order: e.target.value })
-                      }
-                      className="w-full px-3 py-2 rounded-xl border border-[var(--border-subtle)] bg-[var(--bg-inset)] text-[var(--text-primary)] font-mono-num"
-                    />
-                  </div>
-                </div>
-
-                {/* Traffic Billing Settings */}
-                <div className="pt-3 border-t border-[var(--border-subtle)] space-y-3">
-                  <div className="flex flex-wrap items-center justify-between gap-2">
-                    <span className="font-semibold text-[var(--text-primary)]">
-                      月度流量配额与计费口径
-                    </span>
-                    <div className="flex flex-wrap gap-1">
-                      {[
-                        { label: "不限", val: "" },
-                        { label: "1 TB", val: "1024" },
-                        { label: "2 TB", val: "2048" },
-                        { label: "10 TB", val: "10240" },
-                      ].map((preset) => (
-                        <button
-                          key={preset.label}
-                          type="button"
-                          onClick={() =>
-                            setEditing({ ...editing, limitGb: preset.val })
-                          }
-                          className="px-2 py-0.5 rounded-md text-[11px] font-mono-num border border-[var(--border-subtle)] bg-[var(--bg-elevated)] text-[var(--text-secondary)] hover:text-[var(--text-primary)]"
-                        >
-                          {preset.label}
-                        </button>
-                      ))}
-                    </div>
-                  </div>
-
-                  <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
-                    <div>
-                      <label
-                        htmlFor={`${baseId}-edit-limit`}
-                        className="block text-[var(--text-secondary)] mb-1"
-                      >
-                        月流量上限 (GB，留空不限)
-                      </label>
-                      <input
-                        id={`${baseId}-edit-limit`}
-                        type="number"
-                        min="0"
-                        step="any"
-                        value={editing.limitGb}
-                        onChange={(e) =>
-                          setEditing({ ...editing, limitGb: e.target.value })
-                        }
-                        placeholder="留空为不限"
-                        className="w-full px-3 py-2 rounded-xl border border-[var(--border-subtle)] bg-[var(--bg-inset)] text-[var(--text-primary)] font-mono-num"
+                      {rotatedResult.install_cmd}
+                    </code>
+                    <div className="flex justify-end">
+                      <CopyButton
+                        value={rotatedResult.install_cmd}
+                        label="复制命令"
                       />
-                    </div>
-
-                    <div>
-                      <label
-                        htmlFor={`${baseId}-edit-reset`}
-                        className="block text-[var(--text-secondary)] mb-1"
-                      >
-                        每月重置日 (1–31 号)
-                      </label>
-                      <input
-                        id={`${baseId}-edit-reset`}
-                        type="number"
-                        min="1"
-                        max="31"
-                        value={editing.reset_day}
-                        onChange={(e) =>
-                          setEditing({ ...editing, reset_day: e.target.value })
-                        }
-                        className="w-full px-3 py-2 rounded-xl border border-[var(--border-subtle)] bg-[var(--bg-inset)] text-[var(--text-primary)] font-mono-num"
-                      />
-                    </div>
-
-                    <div>
-                      <label
-                        htmlFor={`${baseId}-edit-mode`}
-                        className="block text-[var(--text-secondary)] mb-1"
-                      >
-                        计费方式
-                      </label>
-                      <select
-                        id={`${baseId}-edit-mode`}
-                        value={editing.count_mode}
-                        onChange={(e) =>
-                          setEditing({
-                            ...editing,
-                            count_mode: e.target.value as TrafficCountMode,
-                          })
-                        }
-                        className="w-full px-3 py-2 rounded-xl border border-[var(--border-subtle)] bg-[var(--bg-inset)] text-[var(--text-primary)]"
-                      >
-                        <option value="both">{formatTrafficMode("both")}</option>
-                        <option value="tx_only">
-                          {formatTrafficMode("tx_only")}
-                        </option>
-                        <option value="max">{formatTrafficMode("max")}</option>
-                      </select>
                     </div>
                   </div>
                 </div>
 
-                {/* Quick Maintenance Mute Window Controls */}
-                {editingNodeObj && (
-                  <div className="pt-3 border-t border-[var(--border-subtle)] space-y-2">
-                    <div className="flex items-center justify-between">
-                      <span className="font-semibold text-[var(--text-primary)]">
-                        维护静默快捷设置
-                      </span>
-                      <span className="text-[11px] font-mono-num text-[var(--text-muted)]">
-                        {isNodeMuted(editingNodeObj)
-                          ? "当前处于静默状态"
-                          : "当前告警正常触发"}
-                      </span>
-                    </div>
-                    <div className="flex flex-wrap gap-2">
-                      {[
-                        { sec: 1800, label: "静默 30 分钟" },
-                        { sec: 7200, label: "静默 2 小时" },
-                        { sec: 86400, label: "静默 24 小时" },
-                      ].map((opt) => (
-                        <button
-                          key={opt.sec}
-                          type="button"
-                          disabled={
-                            savingEdit || mutingNodeId === editingNodeObj.id
-                          }
-                          onClick={() =>
-                            void handleMuteInEdit(editingNodeObj.id, opt.sec)
-                          }
-                          className="px-2.5 py-1 rounded-lg text-[11px] border border-[var(--border-subtle)] bg-[var(--bg-elevated)] text-[var(--text-secondary)] hover:text-[var(--text-primary)] disabled:opacity-50"
-                        >
-                          {opt.label}
-                        </button>
-                      ))}
-                      {isNodeMuted(editingNodeObj) && (
-                        <button
-                          type="button"
-                          disabled={
-                            savingEdit || mutingNodeId === editingNodeObj.id
-                          }
-                          onClick={() =>
-                            void handleMuteInEdit(editingNodeObj.id, null)
-                          }
-                          className="px-2.5 py-1 rounded-lg text-[11px] border border-emerald-500/35 bg-emerald-500/12 text-emerald-700 dark:text-emerald-300 font-medium disabled:opacity-50"
-                        >
-                          立即取消静默
-                        </button>
-                      )}
-                    </div>
-                  </div>
-                )}
+                <div
+                  style={{
+                    backgroundColor: "var(--bg-subtle)",
+                    border: "1px solid var(--border-hairline)",
+                  }}
+                  className="flex items-center justify-between gap-2 rounded-[8px] px-3 py-2"
+                >
+                  <code
+                    style={{ color: "var(--text-secondary)" }}
+                    className="truncate font-mono text-[12px]"
+                  >
+                    {rotatedResult.agent_token}
+                  </code>
+                  <CopyButton
+                    value={rotatedResult.agent_token}
+                    label="复制密钥"
+                  />
+                </div>
+              </div>
+            ) : (
+              <div
+                style={{ color: "var(--text-secondary)" }}
+                className="text-[13px] leading-relaxed"
+              >
+                生成新密钥后，原连接密钥将立即失效，需在目标服务器上重新执行安装命令以恢复连接。
+              </div>
+            )}
 
-                <div className="pt-3 border-t border-[var(--border-subtle)] flex items-center justify-end gap-2">
-                  <button
-                    type="button"
-                    disabled={savingEdit}
-                    onClick={() => setEditing(null)}
-                    className="px-4 py-2 rounded-xl border border-[var(--border-subtle)] bg-[var(--bg-elevated)] text-[var(--text-secondary)] hover:text-[var(--text-primary)] font-medium disabled:opacity-50"
-                  >
-                    取消
-                  </button>
-                  <button
-                    type="submit"
-                    disabled={savingEdit}
-                    className="inline-flex items-center gap-1.5 px-4 py-2 rounded-xl text-white font-semibold shadow-sm disabled:opacity-60"
-                    style={{ backgroundColor: "var(--accent-solid)" }}
-                  >
-                    {savingEdit ? (
+            <div className="flex justify-end gap-2 pt-1">
+              <Button
+                variant="ghost"
+                size="sm"
+                disabled={rotatingToken}
+                onClick={() => {
+                  setTokenNode(null);
+                  setRotatedResult(null);
+                }}
+              >
+                关闭
+              </Button>
+              {!rotatedResult && (
+                <Button
+                  autoFocus
+                  variant="primary"
+                  size="sm"
+                  disabled={rotatingToken}
+                  icon={
+                    rotatingToken ? (
                       <Loader2
-                        className="w-3.5 h-3.5 animate-spin"
+                        className="h-3.5 w-3.5 animate-spin"
                         aria-hidden="true"
                       />
                     ) : (
-                      <Save className="w-3.5 h-3.5" aria-hidden="true" />
-                    )}
-                    <span>{savingEdit ? "保存中..." : "保存配置变更"}</span>
-                  </button>
-                </div>
-              </form>
-            </>
-          )}
-        </div>
-      </dialog>
-
-      {/* Native <dialog> Token Rotation Confirmation Modal */}
-      <dialog
-        ref={tokenDialogRef}
-        {...(rotatingNodeId ? DIALOG_LOCKED_DISMISS_ATTRS : DIALOG_LIGHT_DISMISS_ATTRS)}
-        aria-labelledby={tokenModalNode ? tokenTitleId : undefined}
-        aria-label={tokenModalNode ? undefined : "轮换节点连接密钥"}
-        onPointerDown={(e) => {
-          if (!("closedBy" in HTMLDialogElement.prototype)) {
-            const d = tokenDialogRef.current;
-            if (!d) return;
-            tokenPointerDownOutsideRef.current =
-              e.target === d && isOutsideDialogBounds(e, d);
-          }
-        }}
-        onPointerUp={(e) => {
-          if (!("closedBy" in HTMLDialogElement.prototype)) {
-            const d = tokenDialogRef.current;
-            const startedOutside = tokenPointerDownOutsideRef.current;
-            tokenPointerDownOutsideRef.current = false;
-            if (!d || !startedOutside || rotatingNodeId) return;
-            if (e.target === d && isOutsideDialogBounds(e, d)) {
-              setTokenModalNode(null);
-            }
-          }
-        }}
-        onCancel={(e) => {
-          e.preventDefault();
-          if (!rotatingNodeId) setTokenModalNode(null);
-        }}
-        onClose={() => {
-          if (!tokenSyncingRef.current && tokenModalNode !== null) {
-            if (rotatingNodeId) {
-              tokenDialogRef.current?.showModal();
-              return;
-            }
-            setTokenModalNode(null);
-          }
-        }}
-        className="m-auto w-[min(28rem,calc(100vw-2rem))] overflow-hidden overscroll-contain rounded-2xl border border-amber-500/35 bg-[var(--bg-surface)] text-[var(--text-primary)] shadow-2xl"
-      >
-        <div className="flex flex-col w-full bg-[var(--bg-surface)] text-[var(--text-primary)] p-5 space-y-4">
-          {tokenModalNode && (
-            <>
-              <div className="flex items-start gap-3">
-                <div className="w-10 h-10 rounded-xl bg-amber-500/15 border border-amber-500/35 flex items-center justify-center shrink-0">
-                  <KeyRound
-                    className="w-5 h-5 text-amber-600 dark:text-amber-400"
-                    aria-hidden="true"
-                  />
-                </div>
-                <div className="min-w-0 space-y-1">
-                  <h2
-                    id={tokenTitleId}
-                    className="text-sm font-bold text-[var(--text-primary)]"
-                  >
-                    轮换探针连接密钥？
-                  </h2>
-                  <p className="text-xs text-[var(--text-secondary)] leading-relaxed">
-                    即将为{" "}
-                    <span className="font-semibold text-[var(--text-primary)]">
-                      {tokenModalNode.region_flag
-                        ? `${tokenModalNode.region_flag} `
-                        : ""}
-                      {tokenModalNode.name}
-                    </span>{" "}
-                    签发一次性新密钥。旧密钥哈希将立即吊销，需在服务器终端执行新命令重连。
-                  </p>
-                </div>
-              </div>
-
-              {tokenError && (
-                <div
-                  role="alert"
-                  className="rounded-xl border border-rose-500/40 bg-rose-500/10 px-3 py-2 text-xs text-rose-700 dark:text-rose-300"
+                      <RefreshCw className="h-3.5 w-3.5" aria-hidden="true" />
+                    )
+                  }
+                  onClick={() => void handleConfirmRotateToken()}
                 >
-                  {tokenError}
-                </div>
+                  {rotatingToken ? "生成中..." : "生成新密钥"}
+                </Button>
               )}
+            </div>
+          </div>
+        )}
+      </NativeDialog>
 
-              <div className="flex items-center justify-end gap-2 pt-2 border-t border-[var(--border-subtle)]">
-                <button
-                  type="button"
-                  disabled={Boolean(rotatingNodeId)}
-                  onClick={() => setTokenModalNode(null)}
-                  className="px-4 py-2 rounded-xl text-xs font-medium border border-[var(--border-subtle)] bg-[var(--bg-elevated)] text-[var(--text-secondary)] hover:text-[var(--text-primary)] disabled:opacity-50"
-                >
-                  取消
-                </button>
-                <button
-                  type="button"
-                  disabled={Boolean(rotatingNodeId)}
-                  onClick={() => void handleConfirmRotate()}
-                  className="inline-flex items-center gap-1.5 px-4 py-2 rounded-xl text-xs font-semibold bg-amber-600 hover:bg-amber-500 text-white shadow-sm disabled:opacity-60"
-                >
-                  {rotatingNodeId ? (
+      {/* 3. Delete Server Confirmation Modal */}
+      <NativeDialog
+        open={deletingNode !== null}
+        onClose={() => {
+          if (!deletingBusy) setDeletingNode(null);
+        }}
+        titleId={deleteTitleId}
+        maxWidthClass="max-w-[400px]"
+      >
+        {deletingNode && (
+          <div className="space-y-4 p-5">
+            <div className="flex items-center justify-between">
+              <h3
+                id={deleteTitleId}
+                style={{ color: "var(--text-primary)" }}
+                className="text-[15px] font-semibold"
+              >
+                移除服务器
+              </h3>
+              <IconCloseButton
+                onClick={() => {
+                  if (!deletingBusy) setDeletingNode(null);
+                }}
+              />
+            </div>
+
+            {deleteError && (
+              <div
+                role="alert"
+                style={{
+                  backgroundColor: "var(--status-danger-bg)",
+                  border: "1px solid var(--status-danger-border)",
+                  color: "var(--status-danger-ink)",
+                }}
+                className="rounded-[8px] px-3 py-2 text-[12px]"
+              >
+                {deleteError}
+              </div>
+            )}
+
+            <p
+              style={{ color: "var(--text-secondary)" }}
+              className="text-[13px] leading-relaxed"
+            >
+              确认移除{" "}
+              <strong style={{ color: "var(--text-primary)" }}>
+                {deletingNode.name}
+              </strong>{" "}
+              及其历史监控记录？此操作不可撤销。
+            </p>
+
+            <div className="flex justify-end gap-2 pt-1">
+              <Button
+                variant="ghost"
+                size="sm"
+                disabled={deletingBusy}
+                onClick={() => setDeletingNode(null)}
+              >
+                取消
+              </Button>
+              <Button
+                autoFocus
+                variant="danger"
+                size="sm"
+                disabled={deletingBusy}
+                icon={
+                  deletingBusy ? (
                     <Loader2
-                      className="w-3.5 h-3.5 animate-spin"
+                      className="h-3.5 w-3.5 animate-spin"
                       aria-hidden="true"
                     />
-                  ) : (
-                    <KeyRound className="w-3.5 h-3.5" aria-hidden="true" />
-                  )}
-                  <span>{rotatingNodeId ? "轮换中..." : "确认轮换密钥"}</span>
-                </button>
-              </div>
-            </>
-          )}
-        </div>
-      </dialog>
-
-      {/* Native <dialog> Safe Two-Step Delete Confirmation Modal */}
-      <dialog
-        ref={deleteDialogRef}
-        {...(deleting ? DIALOG_LOCKED_DISMISS_ATTRS : DIALOG_LIGHT_DISMISS_ATTRS)}
-        aria-labelledby={pendingDeleteNode ? deleteTitleId : undefined}
-        aria-label={pendingDeleteNode ? undefined : "确认移除服务器"}
-        onPointerDown={(e) => {
-          if (!("closedBy" in HTMLDialogElement.prototype)) {
-            const d = deleteDialogRef.current;
-            if (!d) return;
-            deletePointerDownOutsideRef.current =
-              e.target === d && isOutsideDialogBounds(e, d);
-          }
-        }}
-        onPointerUp={(e) => {
-          if (!("closedBy" in HTMLDialogElement.prototype)) {
-            const d = deleteDialogRef.current;
-            const startedOutside = deletePointerDownOutsideRef.current;
-            deletePointerDownOutsideRef.current = false;
-            if (!d || !startedOutside || deleting) return;
-            if (e.target === d && isOutsideDialogBounds(e, d)) {
-              setPendingDeleteNode(null);
-            }
-          }
-        }}
-        onCancel={(e) => {
-          e.preventDefault();
-          if (!deleting) setPendingDeleteNode(null);
-        }}
-        onClose={() => {
-          if (!deleteSyncingRef.current && pendingDeleteNode !== null) {
-            if (deleting) {
-              deleteDialogRef.current?.showModal();
-              return;
-            }
-            setPendingDeleteNode(null);
-          }
-        }}
-        className="m-auto w-[min(28rem,calc(100vw-2rem))] overflow-hidden overscroll-contain rounded-2xl border border-rose-500/35 bg-[var(--bg-surface)] text-[var(--text-primary)] shadow-2xl"
-      >
-        <div className="flex flex-col w-full bg-[var(--bg-surface)] text-[var(--text-primary)] p-5 space-y-4">
-          {pendingDeleteNode && (
-            <>
-              <div className="flex items-start gap-3">
-                <div className="w-10 h-10 rounded-xl bg-rose-500/15 border border-rose-500/35 flex items-center justify-center shrink-0">
-                  <ShieldAlert
-                    className="w-5 h-5 text-rose-600 dark:text-rose-400"
-                    aria-hidden="true"
-                  />
-                </div>
-                <div className="min-w-0 space-y-1">
-                  <h2
-                    id={deleteTitleId}
-                    className="text-sm font-bold text-[var(--text-primary)]"
-                  >
-                    确认从台账移除服务器？
-                  </h2>
-                  <p className="text-xs text-[var(--text-secondary)] leading-relaxed">
-                    即将移除{" "}
-                    <span className="font-semibold text-[var(--text-primary)]">
-                      {pendingDeleteNode.region_flag
-                        ? `${pendingDeleteNode.region_flag} `
-                        : ""}
-                      {pendingDeleteNode.name}
-                    </span>
-                    （<span className="font-mono-num">{pendingDeleteNode.id}</span>
-                    ）。节点配置、连接密钥哈希与关联事件将被清理，探针将立即失去接入权限。
-                  </p>
-                </div>
-              </div>
-
-              {deleteError && (
-                <div
-                  role="alert"
-                  className="rounded-xl border border-rose-500/40 bg-rose-500/10 px-3 py-2 text-xs text-rose-700 dark:text-rose-300"
-                >
-                  {deleteError}
-                </div>
-              )}
-
-              <div className="flex items-center justify-end gap-2 pt-2 border-t border-[var(--border-subtle)]">
-                <button
-                  type="button"
-                  disabled={deleting}
-                  onClick={() => setPendingDeleteNode(null)}
-                  className="px-4 py-2 rounded-xl text-xs font-medium border border-[var(--border-subtle)] bg-[var(--bg-elevated)] text-[var(--text-secondary)] hover:text-[var(--text-primary)] disabled:opacity-50"
-                >
-                  取消保留
-                </button>
-                <button
-                  type="button"
-                  disabled={deleting}
-                  onClick={() => void handleConfirmDelete()}
-                  className="inline-flex items-center gap-1.5 px-4 py-2 rounded-xl text-xs font-semibold bg-rose-600 hover:bg-rose-500 text-white shadow-sm disabled:opacity-60"
-                >
-                  {deleting ? (
-                    <Loader2
-                      className="w-3.5 h-3.5 animate-spin"
-                      aria-hidden="true"
-                    />
-                  ) : (
-                    <Trash2 className="w-3.5 h-3.5" aria-hidden="true" />
-                  )}
-                  <span>{deleting ? "移除中..." : "确认永久移除"}</span>
-                </button>
-              </div>
-            </>
-          )}
-        </div>
-      </dialog>
-    </section>
+                  ) : undefined
+                }
+                onClick={() => void handleConfirmDelete()}
+              >
+                {deletingBusy ? "移除中..." : "确认移除"}
+              </Button>
+            </div>
+          </div>
+        )}
+      </NativeDialog>
+    </div>
   );
 }
+
+export default NodesOpsView;

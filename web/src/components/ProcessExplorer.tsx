@@ -1,179 +1,178 @@
-import { useEffect, useId, useMemo, useState } from "react";
+import React, { useEffect, useId, useMemo, useState } from "react";
 import {
-  Activity,
-  AlertTriangle,
-  ArrowDown,
-  ArrowUp,
   ArrowUpDown,
-  Cpu,
+  ChevronDown,
+  ChevronUp,
   Loader2,
-  Moon,
-  Pause,
-  PauseCircle,
-  Play,
+  RotateCcw,
   Search,
-  ShieldAlert,
-  Terminal,
   X,
 } from "lucide-react";
+import { Button, Card, SegmentedControl } from "./ui/Primitives";
 import type { HorizonNode, ProcEntry } from "../types";
 import type { ProcsPacket, WsConnectionStatus } from "../hooks/useFleetSocket";
-import { formatBytes, getMemTotalBytes } from "../utils/format";
+import { formatBytes } from "../utils/format";
+
+export type ProcDisplayGear = "off" | "top15" | "all";
 
 export interface ProcessExplorerProps {
   node: HorizonNode;
   procsPacket: ProcsPacket | null;
   wsStatus: WsConnectionStatus;
+  displayGear?: ProcDisplayGear;
+  onDisplayGearChange?: (next: ProcDisplayGear) => void;
+  leaseSec?: number;
+  leaseTotalSec?: number;
+  onRenewLease?: () => void;
 }
 
-type SortKey = "pid" | "user" | "st" | "cpu" | "rss" | "thr" | "comm";
+type SortKey = "pid" | "comm" | "cpu" | "rss" | "cmd";
 
-const TEXT_COLLATOR = new Intl.Collator(undefined, {
+const TEXT_COLLATOR = new Intl.Collator("zh-CN", {
   numeric: true,
   sensitivity: "base",
 });
 
 const SORT_LABELS: Record<SortKey, string> = {
   pid: "PID",
-  user: "用户",
-  st: "状态",
-  cpu: "CPU 占用",
-  rss: "内存 RSS",
-  thr: "线程数",
   comm: "进程名",
+  cpu: "CPU",
+  rss: "内存",
+  cmd: "命令",
 };
 
-function renderStateBadge(state: string): React.JSX.Element {
-  const code = (state || "?").trim().charAt(0).toUpperCase();
-  if (code === "Z") {
-    return (
-      <span
-        title="僵尸进程 (Z)"
-        className="inline-flex items-center gap-1 px-2 py-0.5 rounded-md text-[11px] font-mono-num font-semibold border bg-purple-500/15 text-purple-700 dark:text-purple-300 border-purple-500/40"
-      >
-        <AlertTriangle className="w-3 h-3 shrink-0" aria-hidden="true" />
-        <span>僵尸 (Z)</span>
-      </span>
-    );
-  }
-  if (code === "D") {
-    return (
-      <span
-        title="磁盘 I/O 不可中断阻塞 (D)"
-        className="inline-flex items-center gap-1 px-2 py-0.5 rounded-md text-[11px] font-mono-num font-semibold border bg-rose-500/15 text-rose-700 dark:text-rose-300 border-rose-500/40"
-      >
-        <AlertTriangle className="w-3 h-3 shrink-0" aria-hidden="true" />
-        <span>阻塞 (D)</span>
-      </span>
-    );
-  }
-  if (code === "R") {
-    return (
-      <span
-        title="正在运行 (R)"
-        className="inline-flex items-center gap-1 px-2 py-0.5 rounded-md text-[11px] font-mono-num font-medium border bg-emerald-500/12 text-emerald-700 dark:text-emerald-300 border-emerald-500/35"
-      >
-        <Activity className="w-3 h-3 shrink-0" aria-hidden="true" />
-        <span>运行中</span>
-      </span>
-    );
-  }
-  if (code === "T" || code === "t") {
-    return (
-      <span
-        title="已暂停 / 调试跟踪 (T)"
-        className="inline-flex items-center gap-1 px-2 py-0.5 rounded-md text-[11px] font-mono-num font-medium border bg-amber-500/12 text-amber-700 dark:text-amber-300 border-amber-500/35"
-      >
-        <PauseCircle className="w-3 h-3 shrink-0" aria-hidden="true" />
-        <span>已暂停</span>
-      </span>
-    );
-  }
+function renderCleanCommand(cmd: string): React.ReactNode {
+  const pattern =
+    /(--[a-zA-Z0-9_-]+=\*\*\*|--requirepass\s+\*\*\*|[A-Z0-9_]+=\*\*\*|[a-zA-Z0-9+.-]+:\/\/[^\s:@]+:\*\*\*@[^\s]+|\*\*\*)/g;
+  const parts = cmd.split(pattern);
+  if (parts.length <= 1) return cmd;
+
+  return parts.map((segment, idx) => {
+    if (!segment) return null;
+    if (segment.includes("***")) {
+      return (
+        <span
+          key={idx}
+          style={{
+            backgroundColor: "var(--bg-muted)",
+            color: "var(--text-secondary)",
+          }}
+          className="mx-0.5 inline-flex items-center rounded-[4px] px-1 py-[0.5px] font-mono text-[10.5px] leading-tight"
+        >
+          {segment}
+        </span>
+      );
+    }
+    return <React.Fragment key={idx}>{segment}</React.Fragment>;
+  });
+}
+
+function LeaseCountdownRing({
+  remainingSec,
+  totalSec,
+}: {
+  remainingSec: number;
+  totalSec: number;
+}): React.JSX.Element {
+  const size = 18;
+  const stroke = 2;
+  const radius = (size - stroke) / 2;
+  const circumference = 2 * Math.PI * radius;
+  const pct = Math.max(0, Math.min(1, remainingSec / Math.max(1, totalSec)));
+  const dashOffset = circumference * (1 - pct);
+
+  const ringColor =
+    remainingSec <= 15
+      ? "var(--status-danger)"
+      : remainingSec <= 30
+        ? "var(--status-warn)"
+        : "var(--accent)";
+
   return (
-    <span
-      title={`休眠 (${code || "S"})`}
-      className="inline-flex items-center gap-1 px-2 py-0.5 rounded-md text-[11px] font-mono-num border bg-slate-500/10 text-slate-600 dark:text-slate-300 border-slate-300 dark:border-slate-700"
+    <svg
+      width={size}
+      height={size}
+      viewBox={`0 0 ${size} ${size}`}
+      aria-hidden="true"
+      className="-rotate-90 shrink-0"
     >
-      <Moon className="w-3 h-3 shrink-0" aria-hidden="true" />
-      <span>休眠</span>
-    </span>
+      <circle
+        cx={size / 2}
+        cy={size / 2}
+        r={radius}
+        fill="none"
+        stroke="var(--border-subtle)"
+        strokeWidth={stroke}
+      />
+      <circle
+        cx={size / 2}
+        cy={size / 2}
+        r={radius}
+        fill="none"
+        stroke={ringColor}
+        strokeWidth={stroke}
+        strokeDasharray={circumference}
+        strokeDashoffset={dashOffset}
+        strokeLinecap="round"
+      />
+    </svg>
   );
 }
 
 export function ProcessExplorer({
   node,
   procsPacket,
-  wsStatus,
+  displayGear,
+  onDisplayGearChange,
+  leaseSec = 90,
+  leaseTotalSec = 90,
+  onRenewLease,
 }: ProcessExplorerProps): React.JSX.Element {
   const baseId = useId();
   const captionId = `${baseId}-proc-caption`;
   const searchId = `${baseId}-proc-search`;
 
+  const [internalGear, setInternalGear] = useState<ProcDisplayGear>("top15");
   const [sortBy, setSortBy] = useState<SortKey>("cpu");
   const [sortDesc, setSortDesc] = useState<boolean>(true);
   const [search, setSearch] = useState("");
-  const [paused, setPaused] = useState(false);
-  const [frozenSnapshot, setFrozenSnapshot] = useState<{
-    capturedAt: number;
-    procs: ProcEntry[];
-  } | null>(null);
   const [sortAnnouncement, setSortAnnouncement] = useState("");
 
+  const gear = displayGear ?? internalGear;
+  const setGear = (next: ProcDisplayGear) => {
+    if (displayGear === undefined) setInternalGear(next);
+    onDisplayGearChange?.(next);
+  };
+
   useEffect(() => {
-    setPaused(false);
-    setFrozenSnapshot(null);
     setSearch("");
   }, [node.id]);
 
   const hasMatchedPacket = procsPacket?.nodeId === node.id;
-  const procs = useMemo(
+  const rawProcs = useMemo<ProcEntry[]>(
     () => (procsPacket?.nodeId === node.id ? procsPacket.procs : []),
     [procsPacket, node.id],
   );
-  const packetTs = procsPacket?.nodeId === node.id ? procsPacket.ts : null;
 
-  const activeProcs = paused && frozenSnapshot ? frozenSnapshot.procs : procs;
-  const memTotal = getMemTotalBytes(node);
+  const visibleProcs = useMemo(() => {
+    if (gear === "off") return [];
+    const base =
+      gear === "top15"
+        ? [...rawProcs]
+            .sort((a, b) => b.cpu - a.cpu || b.rss - a.rss)
+            .slice(0, 15)
+        : rawProcs;
 
-  const togglePause = () => {
-    if (!paused) {
-      setFrozenSnapshot({
-        capturedAt: packetTs ?? Math.floor(Date.now() / 1000),
-        procs: [...procs],
-      });
-      setPaused(true);
-    } else {
-      setPaused(false);
-      setFrozenSnapshot(null);
-    }
-  };
-
-  const handleSort = (key: SortKey) => {
-    let nextDesc: boolean;
-    if (sortBy === key) {
-      nextDesc = !sortDesc;
-    } else {
-      nextDesc = key === "cpu" || key === "rss" || key === "thr";
-    }
-    setSortBy(key);
-    setSortDesc(nextDesc);
-    setSortAnnouncement(
-      `已按${SORT_LABELS[key]}${nextDesc ? "降序" : "升序"}排列`,
-    );
-  };
-
-  const filteredProcs = useMemo(() => {
     const q = search.trim().toLowerCase();
     const filtered = q
-      ? activeProcs.filter(
+      ? base.filter(
           (p) =>
             String(p.pid).includes(q) ||
-            p.user.toLowerCase().includes(q) ||
             p.comm.toLowerCase().includes(q) ||
             p.cmd.toLowerCase().includes(q) ||
-            p.st.toLowerCase().includes(q),
+            p.user.toLowerCase().includes(q),
         )
-      : activeProcs;
+      : base;
 
     return [...filtered].sort((a, b) => {
       let cmp = 0;
@@ -181,331 +180,206 @@ export function ProcessExplorer({
         case "pid":
           cmp = a.pid - b.pid;
           break;
+        case "comm":
+          cmp = TEXT_COLLATOR.compare(a.comm, b.comm);
+          break;
         case "cpu":
           cmp = a.cpu - b.cpu;
           break;
         case "rss":
           cmp = a.rss - b.rss;
           break;
-        case "thr":
-          cmp = a.thr - b.thr;
-          break;
-        case "user":
-          cmp = TEXT_COLLATOR.compare(a.user, b.user);
-          break;
-        case "st":
-          cmp = TEXT_COLLATOR.compare(a.st, b.st);
-          break;
-        case "comm":
-          cmp = TEXT_COLLATOR.compare(a.comm, b.comm);
+        case "cmd":
+          cmp = TEXT_COLLATOR.compare(a.cmd || a.comm, b.cmd || b.comm);
           break;
       }
-      if (cmp === 0) {
-        cmp = a.pid - b.pid;
-      }
+      if (cmp === 0) cmp = a.pid - b.pid;
       return sortDesc ? -cmp : cmp;
     });
-  }, [activeProcs, search, sortBy, sortDesc]);
+  }, [rawProcs, gear, search, sortBy, sortDesc]);
 
-  const stats = useMemo(() => {
-    let zombie = 0;
-    let diskSleep = 0;
-    let running = 0;
-    let maxRss = 1;
-    let maxCpu = 100;
-    for (const p of activeProcs) {
-      const code = (p.st || "").trim().charAt(0).toUpperCase();
-      if (code === "Z") zombie++;
-      else if (code === "D") diskSleep++;
-      else if (code === "R") running++;
-      if (p.rss > maxRss) maxRss = p.rss;
-      if (p.cpu > maxCpu) maxCpu = p.cpu;
-    }
-    return { zombie, diskSleep, running, maxRss, maxCpu };
-  }, [activeProcs]);
-
-  if (node.proc_enabled === false) {
-    return (
-      <div className="surface-card rounded-xl p-6 border border-amber-500/35 bg-amber-500/[0.06] space-y-4">
-        <div className="flex flex-wrap items-start gap-4">
-          <div className="w-11 h-11 rounded-xl bg-amber-500/15 border border-amber-500/30 flex items-center justify-center shrink-0">
-            <ShieldAlert
-              className="w-5 h-5 text-amber-600 dark:text-amber-400"
-              aria-hidden="true"
-            />
-          </div>
-          <div className="flex-1 min-w-[240px] space-y-2">
-            <div className="flex flex-wrap items-center gap-2">
-              <h3 className="text-sm font-semibold text-slate-900 dark:text-slate-100">
-                隐私保护已锁定 · 未开放 /proc 进程上报
-              </h3>
-              <span className="px-2 py-0.5 rounded-full text-[11px] font-mono-num font-medium bg-amber-500/15 text-amber-700 dark:text-amber-300 border border-amber-500/30">
-                proc_enabled = false
-              </span>
-            </div>
-            <p className="text-xs leading-relaxed text-slate-600 dark:text-slate-300">
-              目标服务器上的{" "}
-              <code className="font-mono-num px-1.5 py-0.5 rounded bg-slate-900/10 dark:bg-white/10 text-slate-800 dark:text-slate-200">
-                /etc/uniob/agent.toml
-              </code>{" "}
-              已配置禁用进程列表与命令行透视。遵循「默认隐私最小化」安全基线，控制面不会拉取或缓存该服务器的{" "}
-              <code className="font-mono-num">/proc</code> 运行态快照。
-            </p>
-            <p className="text-[11px] font-mono-num text-slate-500 dark:text-slate-400">
-              如需开启：在探针移除 --disable-proc 并重启 uniob-agent 服务
-            </p>
-          </div>
-        </div>
-      </div>
+  const handleSort = (key: SortKey) => {
+    const nextDesc =
+      sortBy === key ? !sortDesc : key === "cpu" || key === "rss";
+    setSortBy(key);
+    setSortDesc(nextDesc);
+    setSortAnnouncement(
+      `已按${SORT_LABELS[key]}${nextDesc ? "降序" : "升序"}排列`,
     );
-  }
-
-  const snapTs = paused && frozenSnapshot ? frozenSnapshot.capturedAt : packetTs;
-  const snapTimeText = snapTs
-    ? new Date(snapTs * 1000).toLocaleTimeString([], { hour12: false })
-    : "等待快照...";
+  };
 
   const renderSortIcon = (key: SortKey) => {
     if (sortBy !== key) {
       return (
         <ArrowUpDown
-          className="w-3 h-3 opacity-40 shrink-0"
+          style={{ color: "var(--text-muted)" }}
+          className="h-3 w-3 shrink-0"
           aria-hidden="true"
         />
       );
     }
     return sortDesc ? (
-      <ArrowDown
-        className="w-3 h-3 text-[var(--accent-primary)] shrink-0"
+      <ChevronDown
+        style={{ color: "var(--accent)" }}
+        className="h-3.5 w-3.5 shrink-0"
         aria-hidden="true"
       />
     ) : (
-      <ArrowUp
-        className="w-3 h-3 text-[var(--accent-primary)] shrink-0"
+      <ChevronUp
+        style={{ color: "var(--accent)" }}
+        className="h-3.5 w-3.5 shrink-0"
         aria-hidden="true"
       />
     );
   };
 
-  const waitingForSnapshot = !paused && !hasMatchedPacket;
+  if (node.proc_enabled === false) {
+    return (
+      <Card className="py-12 text-center">
+        <p style={{ color: "var(--text-secondary)" }} className="text-[13px]">
+          未开启进程查看
+        </p>
+      </Card>
+    );
+  }
+
+  if (!node.online && !hasMatchedPacket) {
+    return (
+      <Card className="py-12 text-center">
+        <p style={{ color: "var(--text-secondary)" }} className="text-[13px]">
+          服务器当前离线
+        </p>
+      </Card>
+    );
+  }
 
   return (
-    <div className="space-y-3">
-      {/* Toolbar */}
-      <div className="surface-card rounded-xl p-3 flex flex-wrap items-center justify-between gap-2.5">
-        <div className="relative flex-1 min-w-[210px]">
-          <label htmlFor={searchId} className="sr-only">
-            搜索 PID、用户、进程名或命令行
-          </label>
-          <Search
-            className="w-4 h-4 text-slate-400 absolute left-3 top-1/2 -translate-y-1/2 pointer-events-none"
-            aria-hidden="true"
+    <div className="space-y-4">
+      {/* Single Clean Control Row: Segmented Gear + Search + Compact 90s Ring Timer */}
+      <div className="flex flex-wrap items-center justify-between gap-2.5">
+        <div className="flex flex-wrap items-center gap-2.5">
+          <SegmentedControl<ProcDisplayGear>
+            ariaLabel="进程显示数量"
+            value={gear}
+            onChange={setGear}
+            options={[
+              { value: "off", label: "关闭" },
+              { value: "top15", label: "前 15" },
+              {
+                value: "all",
+                label: "全部",
+                badge: rawProcs.length > 0 ? rawProcs.length : undefined,
+              },
+            ]}
           />
-          <input
-            id={searchId}
-            type="text"
-            value={search}
-            onChange={(e) => setSearch(e.target.value)}
-            placeholder="过滤 PID / 用户 / 进程名 / cmdline..."
-            className="w-full pl-9 pr-8 py-1.5 text-xs rounded-lg border border-slate-200 dark:border-slate-700/90 bg-white dark:bg-slate-900/70 text-slate-900 dark:text-slate-100 placeholder:text-slate-400 focus:outline-none focus:ring-2 focus:ring-[var(--accent-primary)]"
-          />
-          {search && (
+
+          {gear !== "off" && (
+            <div className="relative w-[176px]">
+              <label htmlFor={searchId} className="sr-only">
+                过滤进程
+              </label>
+              <Search
+                style={{ color: "var(--text-tertiary)" }}
+                className="pointer-events-none absolute top-1/2 left-2.5 h-3.5 w-3.5 -translate-y-1/2"
+                strokeWidth={1.65}
+                aria-hidden="true"
+              />
+              <input
+                id={searchId}
+                type="text"
+                value={search}
+                onChange={(e) => setSearch(e.target.value)}
+                placeholder="搜索进程…"
+                style={{
+                  backgroundColor: "var(--bg-card)",
+                  border: "1px solid var(--border-subtle)",
+                  color: "var(--text-primary)",
+                }}
+                className="h-8 w-full rounded-[8px] pr-7 pl-8 text-[12px] transition-colors outline-none placeholder:text-[var(--text-tertiary)] focus:border-[var(--accent)]"
+              />
+              {search && (
+                <button
+                  type="button"
+                  onClick={() => setSearch("")}
+                  aria-label="清空搜索"
+                  style={{ color: "var(--text-tertiary)" }}
+                  className="absolute top-1/2 right-2 -translate-y-1/2 cursor-pointer hover:text-[var(--text-primary)]"
+                >
+                  <X className="h-3.5 w-3.5" aria-hidden="true" />
+                </button>
+              )}
+            </div>
+          )}
+        </div>
+
+        {gear !== "off" && onRenewLease && (
+          <div
+            style={{
+              backgroundColor: "var(--bg-card)",
+              border: "1px solid var(--border-subtle)",
+            }}
+            className="inline-flex h-8 items-center gap-2 rounded-[8px] px-2.5"
+          >
+            <LeaseCountdownRing
+              remainingSec={leaseSec}
+              totalSec={leaseTotalSec}
+            />
+            <span className="font-mono-num text-[12px] font-medium">
+              {leaseSec}s
+            </span>
             <button
               type="button"
-              onClick={() => setSearch("")}
-              aria-label="清空搜索条件"
-              className="absolute right-2 top-1/2 -translate-y-1/2 p-0.5 rounded text-slate-400 hover:text-slate-700 dark:hover:text-slate-200"
+              onClick={onRenewLease}
+              style={{ color: "var(--accent-ink)" }}
+              className="inline-flex cursor-pointer items-center gap-1 pl-1 text-[12px] font-medium hover:opacity-80"
             >
-              <X className="w-3.5 h-3.5" aria-hidden="true" />
+              <RotateCcw className="h-3 w-3" aria-hidden="true" />
+              <span>续期</span>
             </button>
-          )}
-        </div>
-
-        <div className="flex flex-wrap items-center gap-2">
-          {/* Quick Sort Pills */}
-          <div
-            role="group"
-            aria-label="快捷排序字段"
-            className="inline-flex items-center rounded-lg border border-slate-200 dark:border-slate-700/80 bg-slate-100/80 dark:bg-slate-900/70 p-0.5 text-xs"
-          >
-            {(
-              [
-                { key: "cpu", label: "CPU" },
-                { key: "rss", label: "内存 RSS" },
-                { key: "pid", label: "PID" },
-              ] as const
-            ).map((opt) => {
-              const active = sortBy === opt.key;
-              return (
-                <button
-                  key={opt.key}
-                  type="button"
-                  aria-pressed={active}
-                  onClick={() => handleSort(opt.key)}
-                  className={`inline-flex items-center gap-1 px-2.5 py-1 rounded-md font-medium transition-colors ${
-                    active
-                      ? "bg-white dark:bg-slate-800 text-[var(--accent-primary)] shadow-xs"
-                      : "text-slate-600 dark:text-slate-400 hover:text-slate-900 dark:hover:text-slate-200"
-                  }`}
-                >
-                  <span>{opt.label}</span>
-                  {active &&
-                    (sortDesc ? (
-                      <ArrowDown className="w-3 h-3" aria-hidden="true" />
-                    ) : (
-                      <ArrowUp className="w-3 h-3" aria-hidden="true" />
-                    ))}
-                </button>
-              );
-            })}
           </div>
-
-          {/* Pause / Resume Freeze */}
-          <button
-            type="button"
-            disabled={!paused && !hasMatchedPacket}
-            aria-pressed={paused}
-            onClick={togglePause}
-            className={`inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-medium border transition-colors disabled:opacity-45 disabled:cursor-not-allowed ${
-              paused
-                ? "border-amber-500/40 bg-amber-500/15 text-amber-700 dark:text-amber-300 hover:bg-amber-500/20"
-                : "border-slate-200 dark:border-slate-700/80 bg-white dark:bg-slate-900/70 text-slate-700 dark:text-slate-200 hover:bg-slate-50 dark:hover:bg-slate-800"
-            }`}
-          >
-            {paused ? (
-              <>
-                <Play className="w-3.5 h-3.5" aria-hidden="true" />
-                <span>恢复实时快照</span>
-              </>
-            ) : (
-              <>
-                <Pause className="w-3.5 h-3.5" aria-hidden="true" />
-                <span>冻结快照</span>
-              </>
-            )}
-          </button>
-        </div>
+        )}
       </div>
 
-      {/* Status & Anomaly Capsule Strip */}
-      <div className="surface-card rounded-xl px-3.5 py-2.5 flex flex-wrap items-center justify-between gap-2 text-xs">
-        <div className="flex flex-wrap items-center gap-3 text-slate-500 dark:text-slate-400 font-mono-num">
-          <span className="inline-flex items-center gap-1.5">
-            <Cpu
-              className="w-3.5 h-3.5 text-[var(--accent-primary)]"
-              aria-hidden="true"
-            />
-            <span>模式：</span>
-            <strong className="text-slate-800 dark:text-slate-200">
-              只读 /proc 雷达（按需订阅）
-            </strong>
-          </span>
-          <span>
-            快照时间：
-            <strong className="text-slate-800 dark:text-slate-200">
-              {snapTimeText}
-            </strong>
-          </span>
-          <span>
-            命中：
-            <strong className="text-slate-800 dark:text-slate-200">
-              {filteredProcs.length}
-            </strong>{" "}
-            / {activeProcs.length}
-          </span>
-          {wsStatus !== "connected" && (
-            <span className="px-2 py-0.5 rounded-md bg-amber-500/12 text-amber-700 dark:text-amber-300 border border-amber-500/30 text-[11px]">
-              {wsStatus === "reconnecting"
-                ? "WS 重连中"
-                : wsStatus === "connecting"
-                  ? "WS 连接中"
-                  : "WS 已断开"}
-            </span>
-          )}
-        </div>
-
-        <div className="flex flex-wrap items-center gap-2 font-mono-num">
-          <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[11px] font-medium bg-emerald-500/10 text-emerald-700 dark:text-emerald-300 border border-emerald-500/25">
-            <Activity className="w-3 h-3" aria-hidden="true" />
-            <span>运行中 (R): {stats.running}</span>
-          </span>
-          <span
-            className={`inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[11px] font-medium border ${
-              stats.zombie > 0
-                ? "bg-purple-500/15 text-purple-700 dark:text-purple-300 border-purple-500/35 font-semibold"
-                : "bg-slate-500/10 text-slate-600 dark:text-slate-400 border-slate-300 dark:border-slate-700"
-            }`}
+      {gear === "off" ? (
+        <Card className="py-12 text-center">
+          <p
+            style={{ color: "var(--text-secondary)" }}
+            className="mb-3 text-[13px]"
           >
-            <AlertTriangle className="w-3 h-3" aria-hidden="true" />
-            <span>僵尸进程 (Z): {stats.zombie}</span>
-          </span>
-          <span
-            className={`inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[11px] font-medium border ${
-              stats.diskSleep > 0
-                ? "bg-rose-500/15 text-rose-700 dark:text-rose-300 border-rose-500/35 font-semibold"
-                : "bg-slate-500/10 text-slate-600 dark:text-slate-400 border-slate-300 dark:border-slate-700"
-            }`}
-          >
-            <AlertTriangle className="w-3 h-3" aria-hidden="true" />
-            <span>磁盘阻塞 (D): {stats.diskSleep}</span>
-          </span>
-          {paused && (
-            <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[11px] font-semibold bg-amber-500/15 text-amber-700 dark:text-amber-300 border border-amber-500/35">
-              <Pause className="w-3 h-3" aria-hidden="true" />
-              <span>已冻结</span>
-            </span>
-          )}
-        </div>
-      </div>
-
-      {/* Screen-reader live announcement placed OUTSIDE <table> per sortable-table spec */}
-      <div role="status" className="sr-only">
-        {sortAnnouncement}
-      </div>
-
-      {/* Offline / Waiting / Process Table */}
-      {!node.online && waitingForSnapshot ? (
-        <div className="surface-card rounded-xl p-8 text-center space-y-2">
-          <Terminal
-            className="w-7 h-7 mx-auto text-slate-400"
-            aria-hidden="true"
-          />
-          <p className="text-sm font-medium text-slate-700 dark:text-slate-200">
-            服务器当前离线，暂无实时 /proc 进程快照
+            进程查看已关闭
           </p>
-          <p className="text-xs text-slate-500 dark:text-slate-400">
-            探针恢复连接后将自动恢复每 2 秒按需进程推流。
-          </p>
-        </div>
-      ) : waitingForSnapshot ? (
-        <div className="surface-card rounded-xl p-10 text-center space-y-2.5">
+          <Button
+            variant="secondary"
+            size="sm"
+            onClick={() => setGear("top15")}
+          >
+            查看前 15
+          </Button>
+        </Card>
+      ) : !hasMatchedPacket ? (
+        <Card className="flex items-center justify-center gap-2 py-12 text-[13px]">
           <Loader2
-            className="w-6 h-6 mx-auto text-[var(--accent-primary)] animate-spin"
+            style={{ color: "var(--accent)" }}
+            className="h-4 w-4 animate-spin"
             aria-hidden="true"
           />
-          <p className="text-sm font-medium text-slate-700 dark:text-slate-200">
-            正在按需拉取 Top 进程快照…
-          </p>
-          <p className="text-xs text-slate-500 dark:text-slate-400">
-            {wsStatus === "connected"
-              ? "控制面已向探针下发按需采集指令，通常在 2 秒内返回首帧快照。"
-              : "WebSocket 通道连接中，就绪后将自动接收实时进程列表。"}
-          </p>
-        </div>
+          <span style={{ color: "var(--text-secondary)" }}>
+            正在获取实时进程列表…
+          </span>
+        </Card>
       ) : (
-        <div className="surface-card rounded-xl overflow-hidden">
+        <div className="atelier-card overflow-hidden">
           <div
             tabIndex={0}
             role="region"
             aria-labelledby={captionId}
-            className="overflow-x-auto max-h-[56vh] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-[var(--accent-primary)]"
+            className="table-scroll-region thin-scrollbar max-h-[56vh]"
           >
-            <table className="w-full text-left border-collapse text-xs">
+            <table className="uniob-table">
               <caption id={captionId} className="sr-only">
-                {node.name} 实时只读进程列表，按 {SORT_LABELS[sortBy]}{" "}
-                {sortDesc ? "降序" : "升序"} 排列
+                进程列表
               </caption>
-              <thead className="sticky top-0 z-10 bg-slate-50/95 dark:bg-slate-900/95 backdrop-blur-xs border-b border-slate-200 dark:border-slate-800 text-[11px] text-slate-600 dark:text-slate-300 font-mono-num">
+              <thead>
                 <tr>
                   <th
                     scope="col"
@@ -516,117 +390,13 @@ export function ProcessExplorer({
                           : "ascending"
                         : undefined
                     }
-                    className="py-2 px-3 whitespace-nowrap"
                   >
-                    <button
-                      type="button"
-                      onClick={() => handleSort("pid")}
-                      className="inline-flex items-center gap-1 font-semibold hover:text-slate-950 dark:hover:text-white focus-visible:outline-none focus-visible:underline"
-                    >
+                    <button type="button" onClick={() => handleSort("pid")}>
                       <span>PID</span>
                       {renderSortIcon("pid")}
                     </button>
                   </th>
-                  <th
-                    scope="col"
-                    aria-sort={
-                      sortBy === "user"
-                        ? sortDesc
-                          ? "descending"
-                          : "ascending"
-                        : undefined
-                    }
-                    className="py-2 px-3 whitespace-nowrap"
-                  >
-                    <button
-                      type="button"
-                      onClick={() => handleSort("user")}
-                      className="inline-flex items-center gap-1 font-semibold hover:text-slate-950 dark:hover:text-white focus-visible:outline-none focus-visible:underline"
-                    >
-                      <span>用户</span>
-                      {renderSortIcon("user")}
-                    </button>
-                  </th>
-                  <th
-                    scope="col"
-                    aria-sort={
-                      sortBy === "st"
-                        ? sortDesc
-                          ? "descending"
-                          : "ascending"
-                        : undefined
-                    }
-                    className="py-2 px-3 whitespace-nowrap"
-                  >
-                    <button
-                      type="button"
-                      onClick={() => handleSort("st")}
-                      className="inline-flex items-center gap-1 font-semibold hover:text-slate-950 dark:hover:text-white focus-visible:outline-none focus-visible:underline"
-                    >
-                      <span>状态</span>
-                      {renderSortIcon("st")}
-                    </button>
-                  </th>
-                  <th
-                    scope="col"
-                    aria-sort={
-                      sortBy === "cpu"
-                        ? sortDesc
-                          ? "descending"
-                          : "ascending"
-                        : undefined
-                    }
-                    className="py-2 px-3 text-right whitespace-nowrap min-w-[125px]"
-                  >
-                    <button
-                      type="button"
-                      onClick={() => handleSort("cpu")}
-                      className="inline-flex items-center justify-end gap-1 ml-auto font-semibold hover:text-slate-950 dark:hover:text-white focus-visible:outline-none focus-visible:underline"
-                    >
-                      <span>CPU %</span>
-                      {renderSortIcon("cpu")}
-                    </button>
-                  </th>
-                  <th
-                    scope="col"
-                    aria-sort={
-                      sortBy === "rss"
-                        ? sortDesc
-                          ? "descending"
-                          : "ascending"
-                        : undefined
-                    }
-                    className="py-2 px-3 text-right whitespace-nowrap min-w-[135px]"
-                  >
-                    <button
-                      type="button"
-                      onClick={() => handleSort("rss")}
-                      className="inline-flex items-center justify-end gap-1 ml-auto font-semibold hover:text-slate-950 dark:hover:text-white focus-visible:outline-none focus-visible:underline"
-                    >
-                      <span>内存 RSS</span>
-                      {renderSortIcon("rss")}
-                    </button>
-                  </th>
-                  <th
-                    scope="col"
-                    aria-sort={
-                      sortBy === "thr"
-                        ? sortDesc
-                          ? "descending"
-                          : "ascending"
-                        : undefined
-                    }
-                    className="py-2 px-3 text-right whitespace-nowrap"
-                  >
-                    <button
-                      type="button"
-                      onClick={() => handleSort("thr")}
-                      className="inline-flex items-center justify-end gap-1 ml-auto font-semibold hover:text-slate-950 dark:hover:text-white focus-visible:outline-none focus-visible:underline"
-                    >
-                      <span>线程</span>
-                      {renderSortIcon("thr")}
-                    </button>
-                  </th>
+
                   <th
                     scope="col"
                     aria-sort={
@@ -636,136 +406,108 @@ export function ProcessExplorer({
                           : "ascending"
                         : undefined
                     }
-                    className="py-2 px-3 whitespace-nowrap"
                   >
-                    <button
-                      type="button"
-                      onClick={() => handleSort("comm")}
-                      className="inline-flex items-center gap-1 font-semibold hover:text-slate-950 dark:hover:text-white focus-visible:outline-none focus-visible:underline"
-                    >
-                      <span>程序 / 启动命令行</span>
+                    <button type="button" onClick={() => handleSort("comm")}>
+                      <span>进程名</span>
                       {renderSortIcon("comm")}
+                    </button>
+                  </th>
+
+                  <th
+                    scope="col"
+                    aria-sort={
+                      sortBy === "cpu"
+                        ? sortDesc
+                          ? "descending"
+                          : "ascending"
+                        : undefined
+                    }
+                  >
+                    <button type="button" onClick={() => handleSort("cpu")}>
+                      <span>CPU</span>
+                      {renderSortIcon("cpu")}
+                    </button>
+                  </th>
+
+                  <th
+                    scope="col"
+                    aria-sort={
+                      sortBy === "rss"
+                        ? sortDesc
+                          ? "descending"
+                          : "ascending"
+                        : undefined
+                    }
+                  >
+                    <button type="button" onClick={() => handleSort("rss")}>
+                      <span>内存</span>
+                      {renderSortIcon("rss")}
+                    </button>
+                  </th>
+
+                  <th
+                    scope="col"
+                    aria-sort={
+                      sortBy === "cmd"
+                        ? sortDesc
+                          ? "descending"
+                          : "ascending"
+                        : undefined
+                    }
+                  >
+                    <button type="button" onClick={() => handleSort("cmd")}>
+                      <span>命令</span>
+                      {renderSortIcon("cmd")}
                     </button>
                   </th>
                 </tr>
               </thead>
 
-              <tbody className="divide-y divide-slate-200/70 dark:divide-slate-800/80">
-                {filteredProcs.length === 0 ? (
+              <tbody>
+                {visibleProcs.length === 0 ? (
                   <tr>
                     <td
-                      colSpan={7}
-                      className="py-10 text-center text-xs text-slate-500 dark:text-slate-400"
+                      colSpan={5}
+                      style={{ color: "var(--text-tertiary)" }}
+                      className="py-10 text-center text-[12.5px]"
                     >
-                      {activeProcs.length === 0
-                        ? "当前快照进程列表为空"
-                        : "没有匹配当前过滤条件的运行进程"}
+                      没有匹配的进程
                     </td>
                   </tr>
                 ) : (
-                  filteredProcs.map((proc) => {
-                    const code = (proc.st || "").trim().charAt(0).toUpperCase();
-                    const rowTint =
-                      code === "D"
-                        ? "bg-rose-500/[0.06] hover:bg-rose-500/[0.10]"
-                        : code === "Z"
-                          ? "bg-purple-500/[0.06] hover:bg-purple-500/[0.10]"
-                          : "hover:bg-slate-500/[0.05]";
-
-                    const cpuBarPct = Math.min(
-                      100,
-                      Math.max(
-                        0,
-                        (proc.cpu / Math.max(100, stats.maxCpu)) * 100,
-                      ),
-                    );
-                    const cpuBarColor =
-                      proc.cpu >= 50
-                        ? "bg-rose-500"
-                        : proc.cpu >= 15
-                          ? "bg-amber-500"
-                          : "bg-emerald-500";
-                    const cpuTextColor =
-                      proc.cpu >= 50
-                        ? "text-rose-600 dark:text-rose-400 font-semibold"
-                        : proc.cpu >= 15
-                          ? "text-amber-600 dark:text-amber-400 font-semibold"
-                          : "text-slate-800 dark:text-slate-200";
-
-                    const rssPct =
-                      memTotal > 0
-                        ? Math.min(100, (proc.rss / memTotal) * 100)
-                        : Math.min(100, (proc.rss / stats.maxRss) * 100);
-                    const rssBarColor =
-                      rssPct >= 60
-                        ? "bg-rose-500"
-                        : rssPct >= 25
-                          ? "bg-amber-500"
-                          : "bg-sky-500";
-
-                    return (
-                      <tr key={proc.pid} className={`${rowTint} transition-colors`}>
-                        <td className="py-2.5 px-3 font-mono-num text-slate-700 dark:text-slate-300 whitespace-nowrap">
-                          {proc.pid}
-                        </td>
-                        <td className="py-2.5 px-3 font-mono-num text-slate-600 dark:text-slate-300 whitespace-nowrap max-w-[100px] truncate">
-                          {proc.user}
-                        </td>
-                        <td className="py-2.5 px-3 whitespace-nowrap">
-                          {renderStateBadge(proc.st)}
-                        </td>
-                        <td className="py-2.5 px-3 font-mono-num whitespace-nowrap">
-                          <div className="flex flex-col items-end gap-1">
-                            <span className={cpuTextColor}>
-                              {proc.cpu.toFixed(1)}%
-                            </span>
-                            <div className="w-20 h-1 rounded-full bg-slate-200 dark:bg-slate-800 overflow-hidden">
-                              <div
-                                className={`h-full rounded-full ${cpuBarColor}`}
-                                style={{
-                                  width: `${proc.cpu > 0 ? Math.max(3, cpuBarPct) : 0}%`,
-                                }}
-                              />
-                            </div>
-                          </div>
-                        </td>
-                        <td className="py-2.5 px-3 font-mono-num whitespace-nowrap">
-                          <div className="flex flex-col items-end gap-1">
-                            <span className="text-slate-800 dark:text-slate-200">
-                              {formatBytes(proc.rss)}
-                            </span>
-                            <div className="w-20 h-1 rounded-full bg-slate-200 dark:bg-slate-800 overflow-hidden">
-                              <div
-                                className={`h-full rounded-full ${rssBarColor}`}
-                                style={{
-                                  width: `${proc.rss > 0 ? Math.max(3, rssPct) : 0}%`,
-                                }}
-                              />
-                            </div>
-                          </div>
-                        </td>
-                        <td className="py-2.5 px-3 font-mono-num text-right text-slate-600 dark:text-slate-300 whitespace-nowrap">
-                          {proc.thr}
-                        </td>
-                        <td className="py-2.5 px-3 font-mono-num min-w-[260px] max-w-[420px]">
-                          <div className="font-semibold text-slate-900 dark:text-slate-100 truncate">
-                            {proc.comm}
-                          </div>
-                          {proc.cmd && proc.cmd !== proc.comm && (
-                            <div
-                              className="text-[11px] text-slate-500 dark:text-slate-400 break-all whitespace-normal mt-0.5 leading-snug"
-                              title={proc.cmd}
-                            >
-                              {proc.cmd}
-                            </div>
-                          )}
-                        </td>
-                      </tr>
-                    );
-                  })
+                  visibleProcs.map((proc) => (
+                    <tr key={proc.pid}>
+                      <td
+                        style={{ color: "var(--text-secondary)" }}
+                        className="font-mono-num w-[72px] text-[12px]"
+                      >
+                        {proc.pid}
+                      </td>
+                      <td className="min-w-[110px] font-medium">{proc.comm}</td>
+                      <td className="font-mono-num w-[84px] text-[12.5px]">
+                        {proc.cpu.toFixed(1)}%
+                      </td>
+                      <td className="font-mono-num w-[96px] text-[12.5px]">
+                        {formatBytes(proc.rss)}
+                      </td>
+                      <td className="min-w-[240px]">
+                        <div
+                          style={{ color: "var(--text-secondary)" }}
+                          className="max-w-[340px] truncate font-mono text-[11.5px]"
+                          title={proc.cmd || proc.comm}
+                        >
+                          {renderCleanCommand(proc.cmd || proc.comm)}
+                        </div>
+                      </td>
+                    </tr>
+                  ))
                 )}
               </tbody>
             </table>
+          </div>
+
+          <div role="status" className="sr-only">
+            {sortAnnouncement}
           </div>
         </div>
       )}
