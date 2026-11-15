@@ -448,6 +448,9 @@ impl HubDb {
                agent_version TEXT,
                proc_enabled INTEGER NOT NULL DEFAULT 1,
                mute_until INTEGER,
+               auto_update_override INTEGER,
+               caps_json TEXT NOT NULL DEFAULT '[]',
+               update_status_json TEXT,
                created_at INTEGER NOT NULL,
                updated_at INTEGER NOT NULL
              );
@@ -566,6 +569,10 @@ impl HubDb {
         )
         .map_err(|e| format!("DB schema init failed: {e}"))?;
 
+        ensure_node_column(&conn, "auto_update_override", "INTEGER")?;
+        ensure_node_column(&conn, "caps_json", "TEXT NOT NULL DEFAULT '[]'")?;
+        ensure_node_column(&conn, "update_status_json", "TEXT")?;
+
         crate::network_quality_store::init_schema(&conn)?;
 
         Ok(Self {
@@ -650,7 +657,8 @@ impl HubDb {
                         traffic_limit_bytes, traffic_reset_day, traffic_count_mode,
                         hostname, os, kernel, arch, cpu_model, cpu_cores,
                         mem_total, swap_total, agent_version, proc_enabled,
-                        mute_until, created_at, updated_at
+                        mute_until, auto_update_override, caps_json, update_status_json,
+                        created_at, updated_at
                  FROM nodes WHERE id = ?1",
                 params![node_id],
                 map_node_row,
@@ -668,7 +676,8 @@ impl HubDb {
                             n.traffic_limit_bytes, n.traffic_reset_day, n.traffic_count_mode,
                             n.hostname, n.os, n.kernel, n.arch, n.cpu_model, n.cpu_cores,
                             n.mem_total, n.swap_total, n.agent_version, n.proc_enabled,
-                            n.mute_until, n.created_at, n.updated_at,
+                            n.mute_until, n.auto_update_override, n.caps_json, n.update_status_json,
+                            n.created_at, n.updated_at,
                             s.last_seen_ts, s.online, s.last_metrics_json,
                             t.cycle_key, t.cycle_rx_bytes, t.cycle_tx_bytes, nq.payload
                      FROM nodes n
@@ -682,12 +691,12 @@ impl HubDb {
             let rows = stmt
                 .query_map([], |row| {
                     let node = map_node_row(row)?;
-                    let last_seen_ts: Option<i64> = row.get(22)?;
-                    let online_int: i64 = row.get::<_, Option<i64>>(23)?.unwrap_or(0);
-                    let last_metrics_json: Option<String> = row.get(24)?;
-                    let cycle_key_db: Option<String> = row.get(25)?;
-                    let rx_bytes: i64 = row.get::<_, Option<i64>>(26)?.unwrap_or(0);
-                    let tx_bytes: i64 = row.get::<_, Option<i64>>(27)?.unwrap_or(0);
+                    let last_seen_ts: Option<i64> = row.get(25)?;
+                    let online_int: i64 = row.get::<_, Option<i64>>(26)?.unwrap_or(0);
+                    let last_metrics_json: Option<String> = row.get(27)?;
+                    let cycle_key_db: Option<String> = row.get(28)?;
+                    let rx_bytes: i64 = row.get::<_, Option<i64>>(29)?.unwrap_or(0);
+                    let tx_bytes: i64 = row.get::<_, Option<i64>>(30)?.unwrap_or(0);
 
                     let (default_cycle, days_remaining) =
                         compute_traffic_cycle(current_sec, node.traffic_reset_day);
@@ -696,12 +705,19 @@ impl HubDb {
                         compute_counted_bytes(rx_bytes, tx_bytes, &node.traffic_count_mode);
                     let tags: Vec<String> =
                         serde_json::from_str(&node.tags_json).unwrap_or_default();
+                    let caps: Vec<String> =
+                        serde_json::from_str(&node.caps_json).unwrap_or_default();
+                    let auto_update_override = node.auto_update_override.map(|v| v != 0);
+                    let update_status = node
+                        .update_status_json
+                        .as_deref()
+                        .and_then(|s| serde_json::from_str(s).ok());
                     let mut metrics: Option<NodeMetricsPayload> = last_metrics_json
                         .as_deref()
                         .and_then(|s| serde_json::from_str(s).ok());
                     if let Some(metrics) = metrics.as_mut() {
                         metrics.network_quality = row
-                            .get::<_, Option<String>>(28)?
+                            .get::<_, Option<String>>(31)?
                             .and_then(|s| serde_json::from_str(&s).ok());
                     }
 
@@ -722,6 +738,9 @@ impl HubDb {
                         swap_total: node.swap_total,
                         agent_version: node.agent_version,
                         proc_enabled: node.proc_enabled != 0,
+                        caps,
+                        auto_update_override,
+                        update_status,
                         online: online_int != 0,
                         last_seen_ts,
                         created_at: node.created_at,
@@ -766,8 +785,9 @@ impl HubDb {
                     traffic_limit_bytes, traffic_reset_day, traffic_count_mode,
                     hostname, os, kernel, arch, cpu_model, cpu_cores,
                     mem_total, swap_total, agent_version, proc_enabled,
-                    mute_until, created_at, updated_at
-                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22)",
+                    mute_until, auto_update_override, caps_json, update_status_json,
+                    created_at, updated_at
+                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?23, ?24, ?25)",
                 params![
                     node.id,
                     node.name,
@@ -789,6 +809,9 @@ impl HubDb {
                     node.agent_version,
                     node.proc_enabled,
                     node.mute_until,
+                    node.auto_update_override,
+                    node.caps_json,
+                    node.update_status_json,
                     node.created_at,
                     node.updated_at,
                 ],
@@ -813,9 +836,10 @@ impl HubDb {
                     traffic_limit_bytes, traffic_reset_day, traffic_count_mode,
                     hostname, os, kernel, arch, cpu_model, cpu_cores,
                     mem_total, swap_total, agent_version, proc_enabled,
-                    mute_until, created_at, updated_at
+                    mute_until, auto_update_override, caps_json, update_status_json,
+                    created_at, updated_at
                  ) VALUES (?1, ?2, 'Hub', '[\"hub\"]', -100, ?3, NULL, 1, 'both',
-                           ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, NULL, ?14, ?14)",
+                           ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, NULL, NULL, '[]', NULL, ?14, ?14)",
                 params![
                     node_id,
                     node_name,
@@ -844,6 +868,17 @@ impl HubDb {
         hw: &NodeHardwareInfo,
         wall_sec: i64,
     ) -> Result<(), String> {
+        self.update_node_hello_with_caps(node_id, hw, &[], wall_sec)
+    }
+
+    pub fn update_node_hello_with_caps(
+        &self,
+        node_id: &str,
+        hw: &NodeHardwareInfo,
+        caps: &[String],
+        wall_sec: i64,
+    ) -> Result<(), String> {
+        let caps_json = serde_json::to_string(caps).unwrap_or_else(|_| "[]".to_string());
         self.with_conn(|c| {
             let tx = c
                 .transaction()
@@ -852,8 +887,8 @@ impl HubDb {
                 "UPDATE nodes SET
                     hostname = ?1, os = ?2, kernel = ?3, arch = ?4, cpu_model = ?5,
                     cpu_cores = ?6, mem_total = ?7, swap_total = ?8, agent_version = ?9,
-                    proc_enabled = ?10, updated_at = ?11
-                 WHERE id = ?12",
+                    proc_enabled = ?10, caps_json = ?11, updated_at = ?12
+                 WHERE id = ?13",
                 params![
                     hw.hostname,
                     hw.os,
@@ -865,6 +900,7 @@ impl HubDb {
                     hw.swap_total,
                     hw.agent_version,
                     if hw.proc_enabled { 1 } else { 0 },
+                    caps_json,
                     wall_sec,
                     node_id,
                 ],
@@ -885,6 +921,44 @@ impl HubDb {
                 .map_err(|e| format!("update_node_hello commit: {e}"))?;
             Ok(())
         })
+    }
+
+    pub fn set_node_update_status(
+        &self,
+        node_id: &str,
+        status: Option<&crate::protocol::NodeUpdateStatus>,
+    ) -> Result<(), String> {
+        let json_opt = status.and_then(|s| serde_json::to_string(s).ok());
+        self.with_conn(|c| {
+            c.execute(
+                "UPDATE nodes SET update_status_json = ?1 WHERE id = ?2",
+                params![json_opt, node_id],
+            )
+            .map_err(|e| format!("set_node_update_status error: {e}"))?;
+            Ok(())
+        })
+    }
+
+    pub fn agent_update_config(&self) -> Result<crate::agent_update::AgentUpdateConfig, String> {
+        match self.get_setting(crate::agent_update::AGENT_UPDATE_CONFIG_SETTING)? {
+            Some(raw) => serde_json::from_str(&raw).map_err(|e| {
+                format!(
+                    "Invalid persisted {} JSON: {e}",
+                    crate::agent_update::AGENT_UPDATE_CONFIG_SETTING
+                )
+            }),
+            None => Ok(crate::agent_update::AgentUpdateConfig::default()),
+        }
+    }
+
+    pub fn set_agent_update_config(
+        &self,
+        cfg: &crate::agent_update::AgentUpdateConfig,
+        ts: i64,
+    ) -> Result<(), String> {
+        let raw = serde_json::to_string(cfg)
+            .map_err(|e| format!("serialize agent_update_config error: {e}"))?;
+        self.set_setting(crate::agent_update::AGENT_UPDATE_CONFIG_SETTING, &raw, ts)
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -1484,7 +1558,8 @@ impl HubDb {
                             traffic_limit_bytes, traffic_reset_day, traffic_count_mode,
                             hostname, os, kernel, arch, cpu_model, cpu_cores,
                             mem_total, swap_total, agent_version, proc_enabled,
-                            mute_until, created_at, updated_at
+                            mute_until, auto_update_override, caps_json, update_status_json,
+                            created_at, updated_at
                      FROM nodes ORDER BY sort_order ASC, created_at ASC",
                 )
                 .map_err(|e| format!("export nodes prepare: {e}"))?;
@@ -1629,8 +1704,9 @@ impl HubDb {
                         traffic_limit_bytes, traffic_reset_day, traffic_count_mode,
                         hostname, os, kernel, arch, cpu_model, cpu_cores,
                         mem_total, swap_total, agent_version, proc_enabled,
-                        mute_until, created_at, updated_at
-                     ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22)
+                        mute_until, auto_update_override, caps_json, update_status_json,
+                        created_at, updated_at
+                     ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?23, ?24, ?25)
                      ON CONFLICT(id) DO UPDATE SET
                        name = excluded.name,
                        group_name = excluded.group_name,
@@ -1651,6 +1727,9 @@ impl HubDb {
                        agent_version = excluded.agent_version,
                        proc_enabled = excluded.proc_enabled,
                        mute_until = excluded.mute_until,
+                       auto_update_override = excluded.auto_update_override,
+                       caps_json = excluded.caps_json,
+                       update_status_json = excluded.update_status_json,
                        updated_at = excluded.updated_at",
                     params![
                         n.id,
@@ -1673,6 +1752,9 @@ impl HubDb {
                         n.agent_version,
                         n.proc_enabled,
                         n.mute_until,
+                        n.auto_update_override,
+                        n.caps_json,
+                        n.update_status_json,
                         n.created_at,
                         n.updated_at,
                     ],
@@ -1767,6 +1849,9 @@ impl HubDb {
                             .map_err(|e| e.to_string())?;
                         if !exists { return Err("Network configuration refers to an unknown node".into()); }
                     }
+                    s.value = value;
+                }
+                if let Some(value) = crate::agent_update::normalize_setting(&s.key, &s.value)? {
                     s.value = value;
                 }
                 if matches!(
@@ -2013,6 +2098,27 @@ fn append_1h_rollup_to_slab(
     Ok(())
 }
 
+fn ensure_node_column(conn: &Connection, col: &str, def: &str) -> Result<(), String> {
+    let mut stmt = conn
+        .prepare("PRAGMA table_info(nodes)")
+        .map_err(|e| format!("PRAGMA table_info(nodes) error: {e}"))?;
+    let mut rows = stmt
+        .query([])
+        .map_err(|e| format!("PRAGMA table_info(nodes) query error: {e}"))?;
+    while let Some(row) = rows
+        .next()
+        .map_err(|e| format!("PRAGMA table_info(nodes) row error: {e}"))?
+    {
+        let name: String = row.get(1).unwrap_or_default();
+        if name == col {
+            return Ok(());
+        }
+    }
+    conn.execute(&format!("ALTER TABLE nodes ADD COLUMN {col} {def}"), [])
+        .map_err(|e| format!("ALTER TABLE nodes ADD COLUMN {col} error: {e}"))?;
+    Ok(())
+}
+
 fn map_node_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<NodeRow> {
     Ok(NodeRow {
         id: r.get(0)?,
@@ -2035,8 +2141,11 @@ fn map_node_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<NodeRow> {
         agent_version: r.get(17)?,
         proc_enabled: r.get(18)?,
         mute_until: r.get(19)?,
-        created_at: r.get(20)?,
-        updated_at: r.get(21)?,
+        auto_update_override: r.get(20)?,
+        caps_json: r.get(21)?,
+        update_status_json: r.get(22)?,
+        created_at: r.get(23)?,
+        updated_at: r.get(24)?,
     })
 }
 
@@ -2095,6 +2204,9 @@ mod tests {
             agent_version: None,
             proc_enabled: 1,
             mute_until: None,
+            auto_update_override: None,
+            caps_json: "[]".into(),
+            update_status_json: None,
             created_at: base_ts,
             updated_at: base_ts,
         })
@@ -2210,6 +2322,9 @@ mod tests {
             agent_version: None,
             proc_enabled: 1,
             mute_until: None,
+            auto_update_override: None,
+            caps_json: "[]".into(),
+            update_status_json: None,
             created_at: ts,
             updated_at: ts,
         })

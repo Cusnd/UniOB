@@ -13,7 +13,8 @@ const RAW_TABLE: &str = "network_quality_chunk_10m";
 const ROLLUP_TABLE: &str = "network_quality_5m_chunk_1h";
 const PAGE_SIZE: usize = 3000;
 const PAGE_POINT_BYTES: usize = 1_000_000;
-const MAX_RAW_BLOCK_POINTS: usize = 180;
+// Supports up to 8 targets probing at 10s interval (480 pts / 10m block) with headroom.
+const MAX_RAW_BLOCK_POINTS: usize = 512;
 
 #[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -279,29 +280,32 @@ impl HubDb {
                 let mut rollups: Vec<RollupPoint> =
                     read_blocks(&tx, ROLLUP_TABLE, node, hour, hour)?;
                 rollups.retain(|p| !changed_buckets.contains(&p.point.ts));
-                for id in ["ct", "cu", "cm"] {
-                    let source: Vec<Point> = recent
-                        .iter()
-                        .filter(|p| {
-                            p.target_id == id
-                                && p.ts / 3600 * 3600 == hour
-                                && changed_buckets.contains(&(p.ts / 300 * 300))
-                        })
-                        .cloned()
-                        .collect();
-                    rollups.extend(nq::rollup_points(&source).into_iter().map(|point| {
-                        RollupPoint {
-                            target_id: id.to_owned(),
+                let source: Vec<Point> = recent
+                    .iter()
+                    .filter(|p| {
+                        p.ts / 3600 * 3600 == hour && changed_buckets.contains(&(p.ts / 300 * 300))
+                    })
+                    .cloned()
+                    .collect();
+                rollups.extend(
+                    nq::rollup_points(&source)
+                        .into_iter()
+                        .map(|point| RollupPoint {
+                            target_id: point.target.id.clone(),
                             point,
-                        }
-                    }));
-                }
+                        }),
+                );
                 rollups.sort_by(|a, b| {
-                    (a.point.ts, &a.target_id, &a.point.segment_id).cmp(&(
-                        b.point.ts,
-                        &b.target_id,
-                        &b.point.segment_id,
-                    ))
+                    (
+                        a.point.ts,
+                        nq::target_sort_key(&a.target_id),
+                        &a.point.segment_id,
+                    )
+                        .cmp(&(
+                            b.point.ts,
+                            nq::target_sort_key(&b.target_id),
+                            &b.point.segment_id,
+                        ))
                 });
                 write_block(&tx, ROLLUP_TABLE, node, hour, 3600, 721, rollups)?;
             }
@@ -414,11 +418,13 @@ impl HubDb {
         {
             return Err("Invalid cursor bucket".into());
         }
+        let control = self.network_control(node)?;
         self.with_conn(|c| {
-            let mut grouped: Vec<QuerySeries> = ["ct", "cu", "cm"]
-                .into_iter()
-                .map(|s| QuerySeries {
-                    target_id: s.to_owned(),
+            let mut grouped: Vec<QuerySeries> = control
+                .targets
+                .iter()
+                .map(|t| QuerySeries {
+                    target_id: t.target.id.clone(),
                     points: vec![],
                 })
                 .collect();
@@ -459,14 +465,20 @@ impl HubDb {
                     bytes += size;
                     if let Some(series) = grouped.iter_mut().find(|series|series.target_id==p.target_id) {
                         series.points.push(p.point);
+                    } else {
+                        grouped.push(QuerySeries {
+                            target_id: p.target_id,
+                            points: vec![p.point],
+                        });
                     }
                 }
             }
             if !found_cursor_bucket {return Err("Invalid cursor offset".into());}
+            grouped.sort_by(|a, b| nq::target_sort_key(&a.target_id).cmp(&nq::target_sort_key(&b.target_id)));
             Ok(QualityQuery {
                 node_id: node.into(),
                 range: range.into(),
-                resolution_sec: if raw { 20 } else { 300 },
+                resolution_sec: if raw { control.interval_sec } else { 300 },
                 server_time: now,
                 state: read_state(c, node)?,
                 series: grouped,
@@ -860,7 +872,7 @@ mod tests {
         assert_eq!(query.state.latest[0].measured_at, now - 20);
 
         let mut config = db.network_config().unwrap();
-        config.targets[0].region = "北京".into();
+        config.targets[0].region = Some("北京".into());
         db.set_setting(
             GLOBAL_KEY,
             &serde_json::to_string(&config).unwrap(),
@@ -989,7 +1001,7 @@ mod tests {
         db.ingest_network_quality("test", &payload(&db, samples), now)
             .unwrap();
         let mut config = db.network_config().unwrap();
-        config.targets[0].region = "北京".into();
+        config.targets[0].region = Some("北京".into());
         db.set_setting(
             GLOBAL_KEY,
             &serde_json::to_string(&config).unwrap(),
@@ -1084,5 +1096,79 @@ mod tests {
         );
         drop(reopened);
         std::fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn custom_targets_and_interval_sec_are_stored_and_queried_dynamically() {
+        let db = setup();
+        let cfg = serde_json::json!({
+            "enabled": true,
+            "interval_sec": 15,
+            "targets": [
+                {"id": "us-east", "enabled": true, "label": "US East", "host": "1.1.1.1", "port": 443, "address_family": "ipv4"},
+                {"id": "ap-hk", "enabled": true, "label": "Hong Kong", "region": "HK", "host": "8.8.8.8", "address_family": "ipv4"},
+                {"id": "ct", "enabled": true, "label": "CT", "host": "9.9.9.9", "address_family": "ipv4"}
+            ]
+        });
+        db.set_setting(GLOBAL_KEY, &cfg.to_string(), 0).unwrap();
+        let ctrl = db.network_control("test").unwrap();
+        assert_eq!(ctrl.interval_sec, 15);
+        assert_eq!(
+            ctrl.targets
+                .iter()
+                .map(|t| t.target.id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["ct", "ap-hk", "us-east"]
+        );
+
+        let now = 1_800_000_000;
+        let pts: Vec<Value> = ctrl
+            .targets
+            .iter()
+            .enumerate()
+            .map(|(i, t)| {
+                serde_json::to_value(Point {
+                    sample_id: format!("s-{i}"),
+                    round_seq: 1,
+                    config_id: ctrl.config_id.clone(),
+                    target_id: t.target.id.clone(),
+                    target_revision: t.target_revision.clone(),
+                    segment_id: format!("seg-{}", t.target.id),
+                    ts: now,
+                    result: nq::ProbeResult::Ok,
+                    connect_ms: Some(10.0 + i as f64),
+                    remote_ip: Some("1.1.1.1".into()),
+                    target: t.target.clone(),
+                })
+                .unwrap()
+            })
+            .collect();
+        let state = db
+            .ingest_network_quality("test", &payload(&db, pts), now)
+            .unwrap();
+        assert_eq!(state.latest.len(), 3);
+        let q_raw = db.query_network_quality("test", "1h", None, now).unwrap();
+        assert_eq!(q_raw.resolution_sec, 15);
+        assert_eq!(
+            q_raw
+                .series
+                .iter()
+                .map(|s| s.target_id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["ct", "ap-hk", "us-east"]
+        );
+        assert_eq!(q_raw.series[1].points.len(), 1);
+        assert_eq!(q_raw.series[1].points[0].target.port, 80);
+        assert_eq!(
+            q_raw.series[1].points[0].target.region.as_deref(),
+            Some("HK")
+        );
+        assert_eq!(q_raw.series[2].points.len(), 1);
+        assert_eq!(q_raw.series[2].points[0].target.port, 443);
+        assert_eq!(q_raw.series[2].points[0].target.region, None);
+
+        let q_rollup = db.query_network_quality("test", "7d", None, now).unwrap();
+        assert_eq!(q_rollup.resolution_sec, 300);
+        assert_eq!(q_rollup.series[2].points.len(), 1);
     }
 }

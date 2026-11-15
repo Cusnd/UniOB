@@ -93,6 +93,17 @@ pub struct HelloFrame {
     pub migrated_epoch: Option<u64>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct UpdateStatusReport {
+    pub st: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ver: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub err: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ts: Option<u64>,
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct MetricsFrame {
     pub t: String,
@@ -104,6 +115,8 @@ pub struct MetricsFrame {
     pub net: NetMetrics,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub procs: Option<Vec<ProcEntry>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub upd: Option<UpdateStatusReport>,
 }
 
 impl MetricsFrame {
@@ -358,6 +371,17 @@ pub struct MigrateDirective {
     pub sig: String,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct UpdateDirective {
+    pub version: String,
+    pub sha256: String,
+    pub url: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fallback_url: Option<String>,
+    pub issued_at: u64,
+    pub hmac: String,
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct CtrlFrame {
     #[serde(deserialize_with = "deserialize_ctrl_tag")]
@@ -383,6 +407,8 @@ pub struct CtrlFrame {
     pub watermarks: Option<Watermarks>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub migrate: Option<MigrateDirective>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub update: Option<UpdateDirective>,
     // Keep this as raw JSON so a malformed optional extension never rejects a
     // valid resource scheduler, lease, flush or migration control.
     #[serde(
@@ -405,6 +431,7 @@ impl Default for CtrlFrame {
             flush_now: None,
             watermarks: None,
             migrate: None,
+            update: None,
             network_quality: None,
         }
     }
@@ -577,6 +604,7 @@ mod tests {
                 udp: 4,
             },
             procs: None,
+            upd: None,
         }
     }
 
@@ -810,5 +838,18 @@ mod tests {
             serde_json::json!(["mb_v2", "migrate_v1"])
         );
         assert_eq!(val_v2["migrated_epoch"], 1763128000);
+    }
+
+    #[test]
+    fn ctrl_frame_parses_optional_update_directive() {
+        let raw = r#"{"t":"ctrl","mode":0,"update":{"version":"0.2.1","sha256":"abcd","url":"https://example.com/agent","issued_at":1763128000,"hmac":"deadbeef"}}"#;
+        let ctrl = CtrlFrame::parse(raw).unwrap();
+        let upd = ctrl.update.expect("update directive should parse");
+        assert_eq!(upd.version, "0.2.1");
+        assert_eq!(upd.sha256, "abcd");
+        assert_eq!(upd.url, "https://example.com/agent");
+        assert_eq!(upd.fallback_url, None);
+        assert_eq!(upd.issued_at, 1763128000);
+        assert_eq!(upd.hmac, "deadbeef");
     }
 }

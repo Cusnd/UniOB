@@ -114,6 +114,8 @@ pub struct AgentMetricsFrame {
     // Decode the optional extension independently so malformed data cannot drop resource metrics.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub network_quality: Option<serde_json::Value>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub upd: Option<serde_json::Value>,
 }
 
 impl From<&AgentMetricsFrame> for NodeMetricsPayload {
@@ -141,6 +143,8 @@ pub struct AgentMetricsBatchFrame {
     pub last: AgentMetricsFrame,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub network_quality: Option<serde_json::Value>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub upd: Option<serde_json::Value>,
 }
 
 fn default_v2() -> u8 {
@@ -191,6 +195,60 @@ pub struct CtrlMigrateDirective {
     pub sig: String,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CtrlUpdateDirective {
+    pub version: String,
+    pub sha256: String,
+    pub url: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fallback_url: Option<String>,
+    pub issued_at: u64,
+    pub hmac: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct NodeUpdateStatus {
+    pub state: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub target_version: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub updated_at: Option<i64>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ReleaseAssetInfo {
+    pub arch: String,
+    pub asset_name: String,
+    pub url: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fallback_url: Option<String>,
+    pub sha256: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ReleaseAssetsMap {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub amd64: Option<ReleaseAssetInfo>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub arm64: Option<ReleaseAssetInfo>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LatestRelease {
+    pub version: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tag: Option<String>,
+    pub checked_at: i64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub published_at: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub notes_url: Option<String>,
+    pub source: String,
+    pub assets: ReleaseAssetsMap,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct AgentCtrlFrame {
     pub t: &'static str,
@@ -206,6 +264,8 @@ pub struct AgentCtrlFrame {
     pub watermarks: Option<CtrlWatermarks>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub migrate: Option<CtrlMigrateDirective>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub update: Option<CtrlUpdateDirective>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub network_quality: Option<crate::network_quality::Control>,
 }
@@ -249,6 +309,12 @@ pub struct NodeRow {
     pub proc_enabled: i64,
     #[serde(default)]
     pub mute_until: Option<i64>,
+    #[serde(default)]
+    pub auto_update_override: Option<i64>,
+    #[serde(default = "default_empty_array_json")]
+    pub caps_json: String,
+    #[serde(default)]
+    pub update_status_json: Option<String>,
     #[serde(default)]
     pub created_at: i64,
     #[serde(default)]
@@ -319,6 +385,9 @@ pub struct NodeSummary {
     pub swap_total: Option<i64>,
     pub agent_version: Option<String>,
     pub proc_enabled: bool,
+    pub caps: Vec<String>,
+    pub auto_update_override: Option<bool>,
+    pub update_status: Option<NodeUpdateStatus>,
     pub online: bool,
     pub last_seen_ts: Option<i64>,
     pub created_at: i64,
@@ -478,6 +547,12 @@ pub struct FleetTickMessage {
     pub metrics: Option<NodeMetricsPayload>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub hardware: Option<NodeHardwareInfo>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub caps: Option<Vec<String>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub auto_update_override: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub update_status: Option<NodeUpdateStatus>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

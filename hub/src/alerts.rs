@@ -1078,6 +1078,9 @@ mod tests {
             agent_version: None,
             proc_enabled: 1,
             mute_until: None,
+            auto_update_override: None,
+            caps_json: "[]".into(),
+            update_status_json: None,
             created_at: 0,
             updated_at: 0,
         };

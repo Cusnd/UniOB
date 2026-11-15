@@ -1,3 +1,4 @@
+use crate::agent_update::parse_agent_update_config_patch;
 use crate::alerts::{send_channel_notification, AlertNotificationPayload};
 use crate::auth::{
     build_clear_session_cookie, create_admin_session_cookie, extract_client_ip,
@@ -92,6 +93,18 @@ pub fn build_router(hub: HubState) -> Router {
             axum::routing::patch(update_rule_handler).delete(delete_rule_handler),
         )
         .route("/api/alerts/incidents", get(list_incidents_handler))
+        .route(
+            "/api/agent-update/config",
+            get(get_agent_update_config_handler).put(put_agent_update_config_handler),
+        )
+        .route(
+            "/api/agent-update/check",
+            post(post_agent_update_check_handler),
+        )
+        .route(
+            "/api/agent-update/trigger",
+            post(post_agent_update_trigger_handler),
+        )
         .route_layer(middleware::from_fn_with_state(
             hub.clone(),
             require_admin_auth,
@@ -1348,6 +1361,9 @@ async fn create_node_handler(
         agent_version: None,
         proc_enabled: 1,
         mute_until: None,
+        auto_update_override: None,
+        caps_json: "[]".into(),
+        update_status_json: None,
         created_at: now,
         updated_at: now,
     };
@@ -1505,14 +1521,33 @@ async fn update_node_handler(
         }
     }
 
+    let mut auto_update_override = existing.auto_update_override;
+    let mut should_clear_cooldown = false;
+    if let Some(v) = obj.get("auto_update_override") {
+        auto_update_override = if v.is_null() {
+            should_clear_cooldown = true;
+            None
+        } else if let Some(b) = v.as_bool() {
+            if b {
+                should_clear_cooldown = true;
+            }
+            Some(if b { 1 } else { 0 })
+        } else {
+            return json_error(
+                StatusCode::BAD_REQUEST,
+                "auto_update_override must be a boolean or null",
+            );
+        };
+    }
+
     let now = now_sec();
     let res = hub.db.with_conn(|c| {
         c.execute(
             "UPDATE nodes SET
                name = ?1, group_name = ?2, tags_json = ?3, sort_order = ?4,
                traffic_limit_bytes = ?5, traffic_reset_day = ?6, traffic_count_mode = ?7,
-               mute_until = ?8, updated_at = ?9
-             WHERE id = ?10",
+               mute_until = ?8, auto_update_override = ?9, updated_at = ?10
+             WHERE id = ?11",
             params![
                 name,
                 group_name,
@@ -1522,6 +1557,7 @@ async fn update_node_handler(
                 traffic_reset_day,
                 traffic_count_mode,
                 mute_until,
+                auto_update_override,
                 now,
                 id,
             ],
@@ -1533,10 +1569,162 @@ async fn update_node_handler(
         return json_error(StatusCode::INTERNAL_SERVER_ERROR, &e);
     }
 
+    if should_clear_cooldown {
+        hub.clear_node_dispatch_cooldown(&id).await;
+    }
+
     match hub.db.get_node_summary(&id, now) {
         Ok(Some(node)) => Json(json!({ "node": node })).into_response(),
         Ok(None) => json_error(StatusCode::NOT_FOUND, "Node not found"),
         Err(e) => json_error(StatusCode::INTERNAL_SERVER_ERROR, &e),
+    }
+}
+
+fn resolve_request_origin(headers: &HeaderMap, hub: &HubState) -> String {
+    let pub_url = hub.cfg.public_url.trim().trim_end_matches('/');
+    if !pub_url.is_empty() {
+        return pub_url.to_string();
+    }
+    if let Some(host) = headers
+        .get("x-forwarded-host")
+        .or_else(|| headers.get(axum::http::header::HOST))
+        .and_then(|v| v.to_str().ok())
+        .map(str::trim)
+        .filter(|s| !s.is_empty() && !s.contains('/') && !s.contains(' '))
+    {
+        let proto = headers
+            .get("x-forwarded-proto")
+            .and_then(|v| v.to_str().ok())
+            .and_then(|s| s.split(',').next())
+            .map(|s| s.trim().to_ascii_lowercase())
+            .filter(|p| p == "http" || p == "https")
+            .unwrap_or_else(|| {
+                if is_https_request(headers, &hub.cfg) {
+                    "https".to_string()
+                } else {
+                    "http".to_string()
+                }
+            });
+        return format!("{proto}://{host}");
+    }
+    hub.default_hub_origin()
+}
+
+async fn get_agent_update_config_handler(State(hub): State<HubState>) -> Response {
+    let cfg = match hub.db.agent_update_config() {
+        Ok(c) => c,
+        Err(e) => return json_error(StatusCode::INTERNAL_SERVER_ERROR, &e),
+    };
+    let (latest_release, _, _) = hub.cached_agent_update_snapshot().await;
+    Json(json!({
+        "ok": true,
+        "config": cfg,
+        "latest_release": latest_release,
+        "bundled_version": env!("CARGO_PKG_VERSION"),
+    }))
+    .into_response()
+}
+
+async fn put_agent_update_config_handler(
+    State(hub): State<HubState>,
+    headers: HeaderMap,
+    Json(body): Json<Value>,
+) -> Response {
+    let current = match hub.db.agent_update_config() {
+        Ok(c) => c,
+        Err(e) => return json_error(StatusCode::INTERNAL_SERVER_ERROR, &e),
+    };
+    let next = match parse_agent_update_config_patch(&body, &current) {
+        Ok(c) => c,
+        Err(e) => return json_error(StatusCode::BAD_REQUEST, &e),
+    };
+    if let Err(e) = hub.db.set_agent_update_config(&next, now_sec()) {
+        return json_error(StatusCode::INTERNAL_SERVER_ERROR, &e);
+    }
+
+    let source_changed =
+        next.channel != current.channel || next.custom_base_url != current.custom_base_url;
+    if source_changed {
+        hub.invalidate_agent_update_cache().await;
+    }
+    if next.auto_update_enabled && (!current.auto_update_enabled || source_changed) {
+        let origin = resolve_request_origin(&headers, &hub);
+        hub.maybe_dispatch_auto_updates(&origin).await;
+    }
+
+    let (latest_release, _, _) = hub.cached_agent_update_snapshot().await;
+    Json(json!({
+        "ok": true,
+        "config": next,
+        "latest_release": latest_release,
+        "bundled_version": env!("CARGO_PKG_VERSION"),
+    }))
+    .into_response()
+}
+
+async fn post_agent_update_check_handler(
+    State(hub): State<HubState>,
+    headers: HeaderMap,
+) -> Response {
+    let origin = resolve_request_origin(&headers, &hub);
+    match hub.check_latest_release(&origin).await {
+        Ok(rel) => Json(json!({
+            "ok": true,
+            "checked_at": rel.checked_at,
+            "latest_release": rel,
+            "bundled_version": env!("CARGO_PKG_VERSION"),
+            "error": Value::Null,
+        }))
+        .into_response(),
+        Err(err) => {
+            let (latest_release, checked_at, _) = hub.cached_agent_update_snapshot().await;
+            Json(json!({
+                "ok": true,
+                "latest_release": latest_release,
+                "checked_at": checked_at.unwrap_or_else(now_sec),
+                "bundled_version": env!("CARGO_PKG_VERSION"),
+                "error": err,
+            }))
+            .into_response()
+        }
+    }
+}
+
+#[derive(Deserialize, Default)]
+struct TriggerAgentUpdateBody {
+    #[serde(default)]
+    node_ids: Option<Vec<String>>,
+    #[serde(default)]
+    force: bool,
+}
+
+async fn post_agent_update_trigger_handler(
+    State(hub): State<HubState>,
+    headers: HeaderMap,
+    req: Request,
+) -> Response {
+    let body_bytes = match axum::body::to_bytes(req.into_body(), 64 * 1024).await {
+        Ok(b) => b,
+        Err(_) => return json_error(StatusCode::BAD_REQUEST, "Invalid request body"),
+    };
+    let parsed: TriggerAgentUpdateBody = if body_bytes.trim_ascii().is_empty() {
+        TriggerAgentUpdateBody::default()
+    } else {
+        match serde_json::from_slice(&body_bytes) {
+            Ok(p) => p,
+            Err(_) => return json_error(StatusCode::BAD_REQUEST, "Invalid JSON body"),
+        }
+    };
+    let origin = resolve_request_origin(&headers, &hub);
+    match hub
+        .trigger_agent_update(parsed.node_ids, parsed.force, &origin)
+        .await
+    {
+        Ok(val) => Json(val).into_response(),
+        Err((code, msg)) => json_error(
+            StatusCode::from_u16(code).unwrap_or(StatusCode::BAD_GATEWAY),
+            &msg,
+        ),
     }
 }
 
@@ -1681,12 +1869,14 @@ fn network_config_response(hub: &HubState, node: Option<&str>) -> Response {
                 "applied_config_id":state.applied_config_id,"supported":state.supported}),
             )
         } else {
-            let inherit = crate::network_quality::parse_override(&json!({"mode":"inherit"}))?;
-            let effective = crate::network_quality::effective_control(&global, &inherit)?;
-            Ok(
-                json!({"config":global,"config_id":effective.config_id,"effective_config":effective,
-                "applied_config_id":null,"supported":true}),
-            )
+            let effective = crate::network_quality::make_control(&global);
+            Ok(json!({
+                "config": global,
+                "config_id": effective.config_id,
+                "effective_config": effective,
+                "applied_config_id": null,
+                "supported": true
+            }))
         }
     })();
     match result {

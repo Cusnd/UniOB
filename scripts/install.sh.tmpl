@@ -10,11 +10,16 @@ set -euo pipefail
 #     curl -fsSL https://monitor.example.com/install.sh | sudo bash -s -- --uninstall
 
 BINARY_PATH="/usr/local/bin/uniob-agent"
+APPLY_HELPER_PATH="/usr/local/sbin/uniob-agent-apply-update"
 CONFIG_DIR="/etc/uniob"
 CONFIG_PATH="${CONFIG_DIR}/agent.toml"
 STATE_DIR="/var/lib/uniob"
 SERVICE_NAME="uniob-agent"
 SERVICE_PATH="/etc/systemd/system/${SERVICE_NAME}.service"
+UPDATE_PATH_UNIT="uniob-agent-update.path"
+UPDATE_SERVICE_UNIT="uniob-agent-update.service"
+UPDATE_PATH_UNIT_PATH="/etc/systemd/system/${UPDATE_PATH_UNIT}"
+UPDATE_SERVICE_UNIT_PATH="/etc/systemd/system/${UPDATE_SERVICE_UNIT}"
 
 TEMPLATE_REPO='{{GITHUB_REPO}}'
 if [[ -z "${TEMPLATE_REPO}" || "${TEMPLATE_REPO}" == '{{'*'}}' ]]; then
@@ -264,22 +269,24 @@ detect_service_group() {
 uninstall_agent() {
   log "Uninstalling ${SERVICE_NAME}..."
   if command -v systemctl >/dev/null 2>&1; then
-    if systemctl is-active --quiet "${SERVICE_NAME}" 2>/dev/null; then
-      systemctl stop "${SERVICE_NAME}"
-    fi
-    if systemctl is-enabled --quiet "${SERVICE_NAME}" 2>/dev/null; then
-      systemctl disable "${SERVICE_NAME}"
-    fi
+    for unit in "${UPDATE_PATH_UNIT}" "${UPDATE_SERVICE_UNIT}" "${SERVICE_NAME}"; do
+      if systemctl is-active --quiet "${unit}" 2>/dev/null; then
+        systemctl stop "${unit}"
+      fi
+      if systemctl is-enabled --quiet "${unit}" 2>/dev/null; then
+        systemctl disable "${unit}"
+      fi
+    done
   fi
 
-  rm -f "${SERVICE_PATH}"
-  rm -f "${BINARY_PATH}"
+  rm -f "${SERVICE_PATH}" "${UPDATE_PATH_UNIT_PATH}" "${UPDATE_SERVICE_UNIT_PATH}"
+  rm -f "${BINARY_PATH}" "${BINARY_PATH}.prev" "${APPLY_HELPER_PATH}"
   rm -rf "${CONFIG_DIR}"
   rm -rf "${STATE_DIR}"
 
   if command -v systemctl >/dev/null 2>&1; then
     systemctl daemon-reload
-    systemctl reset-failed "${SERVICE_NAME}" 2>/dev/null || true
+    systemctl reset-failed "${SERVICE_NAME}" "${UPDATE_SERVICE_UNIT}" 2>/dev/null || true
   fi
 
   log "Uninstallation complete."
@@ -497,6 +504,93 @@ EOF
   log "Wrote systemd unit to ${SERVICE_PATH}"
 }
 
+write_update_units() {
+  local service_group="$1"
+  local tmp_helper tmp_path tmp_svc
+
+  mkdir -p "$(dirname "${APPLY_HELPER_PATH}")"
+  mkdir -p "${STATE_DIR}/update"
+  chown "nobody:${service_group}" "${STATE_DIR}" "${STATE_DIR}/update"
+  chmod 0750 "${STATE_DIR}" "${STATE_DIR}/update"
+
+  tmp_helper="$(mktemp "${TMP_DIR}/uniob-agent-apply-update.XXXXXX")"
+  cat > "${tmp_helper}" <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+
+BINARY_PATH="/usr/local/bin/uniob-agent"
+BACKUP_PATH="${BINARY_PATH}.prev"
+NEW_TMP_PATH="${BINARY_PATH}.new.$$"
+CONFIG_PATH="/etc/uniob/agent.toml"
+UPDATE_DIR="/var/lib/uniob/update"
+STAGED_BIN="${UPDATE_DIR}/uniob-agent.bin"
+READY_JSON="${UPDATE_DIR}/ready.json"
+SERVICE_NAME="uniob-agent"
+
+if [[ ! -f "${READY_JSON}" || ! -f "${STAGED_BIN}" ]]; then
+  exit 0
+fi
+
+if ! "${BINARY_PATH}" --config "${CONFIG_PATH}" --verify-staged-update; then
+  rm -f "${READY_JSON}" "${STAGED_BIN}"
+  exit 1
+fi
+
+rm -f "${BACKUP_PATH}"
+if [[ -f "${BINARY_PATH}" ]]; then
+  cp -p "${BINARY_PATH}" "${BACKUP_PATH}"
+fi
+
+cp "${STAGED_BIN}" "${NEW_TMP_PATH}"
+chmod 0755 "${NEW_TMP_PATH}"
+mv -f "${NEW_TMP_PATH}" "${BINARY_PATH}"
+rm -f "${READY_JSON}" "${STAGED_BIN}"
+
+systemctl restart "${SERVICE_NAME}" || true
+sleep 2
+
+if ! systemctl is-active --quiet "${SERVICE_NAME}"; then
+  if [[ -f "${BACKUP_PATH}" ]]; then
+    mv -f "${BACKUP_PATH}" "${BINARY_PATH}"
+    systemctl restart "${SERVICE_NAME}" || true
+  fi
+  exit 1
+fi
+EOF
+  chmod 0755 "${tmp_helper}"
+  mv -f "${tmp_helper}" "${APPLY_HELPER_PATH}"
+  log "Wrote update apply helper to ${APPLY_HELPER_PATH}"
+
+  tmp_path="$(mktemp "${TMP_DIR}/uniob-agent-update.path.XXXXXX")"
+  cat > "${tmp_path}" <<EOF
+[Unit]
+Description=Watch UniOB Agent staged updates
+
+[Path]
+PathChanged=${STATE_DIR}/update/ready.json
+
+[Install]
+WantedBy=multi-user.target
+EOF
+  chmod 0644 "${tmp_path}"
+  mv -f "${tmp_path}" "${UPDATE_PATH_UNIT_PATH}"
+  log "Wrote systemd path unit to ${UPDATE_PATH_UNIT_PATH}"
+
+  tmp_svc="$(mktemp "${TMP_DIR}/uniob-agent-update.service.XXXXXX")"
+  cat > "${tmp_svc}" <<EOF
+[Unit]
+Description=Apply staged UniOB Agent update
+After=local-fs.target
+
+[Service]
+Type=oneshot
+ExecStart=${APPLY_HELPER_PATH}
+EOF
+  chmod 0644 "${tmp_svc}"
+  mv -f "${tmp_svc}" "${UPDATE_SERVICE_UNIT_PATH}"
+  log "Wrote systemd update service unit to ${UPDATE_SERVICE_UNIT_PATH}"
+}
+
 main() {
   parse_args "$@"
   require_root
@@ -524,6 +618,7 @@ main() {
   fi
 
   write_service "${service_group}"
+  write_update_units "${service_group}"
 
   systemctl daemon-reload
   if systemctl is-active --quiet "${SERVICE_NAME}" 2>/dev/null; then
@@ -532,6 +627,7 @@ main() {
   else
     systemctl enable --now "${SERVICE_NAME}"
   fi
+  systemctl enable --now "${UPDATE_PATH_UNIT}"
 
   log "${SERVICE_NAME} is installed and running (group=${service_group}, arch=${target_triple})."
 }
