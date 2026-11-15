@@ -505,7 +505,7 @@ stateDiagram-v2
   - 仅当当前视图处于大盘（`view === "overview"` 或聚焦节点详情）、`document.visibilityState === "visible"` 且未超时（`IDLE_TIMEOUT_MS = 10 * 60 * 1000`）时维持实时订阅；一旦切换标签页隐藏或闲置超过 10 分钟立即发 `unsub_fleet` / `unsub_node` 并暂停心跳，重回前台后无缝续订与 `fleet_batch` 全量刷新。
   - 心跳固定每 `25s` 发送 `{"op":"ping"}`（命中 CF AutoResponse 零成本保活），且仅在存在活跃订阅时每 `50s`（`LEASE_RENEW_INTERVAL_MS = 50000`）发送 `{"op":"renew"}` 维持 90s 订阅租约，标签页隐藏或无活跃订阅时立即停发。
 - **Bento 卡片主指标自定义与离线态（`FleetBentoGrid.tsx` + `cardMetrics.ts` + `useHorizonPrefs.ts`）**：
-  - 大盘顶栏支持切换 **Bento 卡片（2 列大卡）** / 矩阵 / 表格三视图，并支持全局持久化设置 `cardPrimaryMetric`：`net`（实时网络，默认）、`cpu`（CPU）、`latency`（TCP 延迟）或 `mem`（内存）；切换 CPU / 内存作主图时，底部四格小指标自动把“实时网络”补位到对应空位，避免信息重复或丢失。
+  - 大盘顶栏支持切换 **Bento 卡片（2~3 列自适应大卡）** / 矩阵 / 表格三视图，并支持全局持久化设置 `cardPrimaryMetric`：`net`（实时网络，默认）、`cpu`（CPU）、`latency`（TCP 延迟）或 `mem`（内存）；切换 CPU / 内存作主图时，底部四格小指标自动把“实时网络”补位到对应空位，避免信息重复或丢失。
   - 离线节点卡片显示中性灰色虚线占位基线与“离线”状态徽章（实时主数值显示 `—`），不再渲染误导性的绿色 `0` 值活曲线或亮色占位条。
 - **运维与节点自动更新面板（`NodesOpsView.tsx` + `AgentUpdateModal.tsx` + `HardwareSecurityPanel.tsx`）**：
   - `节点运维` 页提供全局 **「网络检测」**（`1..=8` 路公网 IPv4 TCP 探测与 `10..=300`s 间隔）与 **「自动更新」**（`AgentUpdateModal.tsx`：切换 `stable` / `github` / `custom_base_url`、检查最新版本、全量或勾选节点强制下发）入口，编辑弹窗支持基本信息、节点独立探测覆盖与单节点 `auto_update_override`（继承 / 启用 / 禁用）；
