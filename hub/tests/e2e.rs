@@ -1957,7 +1957,138 @@ async fn auto_update_config_check_trigger_status_and_override_flow() {
     assert_eq!(n0_after["agent_version"], "0.2.5");
     assert_eq!(n0_after["update_status"]["state"], "idle");
 
-    // Mock custom mirror URL and verify PUT /api/agent-update/config + auto-dispatch of 0.3.0
+    // Verify SSRF and URL validation guards reject invalid custom_base_url by default
+    for bad_url in [
+        "http://127.0.0.1:8080/mirror",
+        "https://user:pass@mirror.example.com",
+        "https://mirror.example.com?q=1",
+        "https://mirror.example.com#frag",
+    ] {
+        assert_eq!(
+            client
+                .put(format!("{base}/api/agent-update/config"))
+                .header("Cookie", &cookie)
+                .json(&json!({ "custom_base_url": bad_url }))
+                .send()
+                .await
+                .unwrap()
+                .status(),
+            400,
+            "expected HTTP 400 for invalid custom_base_url={bad_url}"
+        );
+    }
+
+    // Export bundle, enable auto_update_enabled in bundle, connect agent on v0.2.0 to Hub B
+    // (local 0.2.5 releases_dir + allow_insecure_ws_for_test=true) and verify import triggers
+    // immediate update dispatch + custom_base_url loopback mirror test.
+    let mut bundle: Value = client
+        .get(format!("{base}/api/export/bundle"))
+        .header("Cookie", &cookie)
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    if let Some(nodes) = bundle["nodes"].as_array_mut() {
+        for n in nodes {
+            n["agent_version"] = json!("0.2.0");
+            n["update_status_json"] = Value::Null;
+        }
+    }
+    if let Some(settings) = bundle["system_settings"].as_array_mut() {
+        settings.retain(|s| s["key"] != "agent_update_config");
+        settings.push(json!({
+            "key": "agent_update_config",
+            "value": json!({
+                "auto_update_enabled": true,
+                "channel": "stable",
+                "check_interval_sec": 300,
+                "custom_base_url": ""
+            })
+            .to_string()
+        }));
+    }
+
+    let hub_b_cfg = HubConfig {
+        releases_dir: releases_dir.clone(),
+        allow_insecure_ws_for_test: true,
+        ..Default::default()
+    };
+    let (addr_b, _hub_b) = spawn_test_hub(hub_b_cfg, None).await;
+    let base_b = format!("http://{addr_b}");
+    let ws_base_b = format!("ws://{addr_b}");
+    let cookie_b = login_cookie(&client, &base_b, "MirrorHubPass123!").await;
+
+    // Seed matching node on Hub B and connect agent with 0.2.0 BEFORE importing bundle
+    let imported_b_first: Value = client
+        .post(format!("{base_b}/api/import/bundle"))
+        .header("Cookie", &cookie_b)
+        .json(&json!({
+            "schema_version": bundle["schema_version"],
+            "exported_at": bundle["exported_at"],
+            "system_settings": [],
+            "nodes": bundle["nodes"],
+            "channels": [],
+            "rules": []
+        }))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(imported_b_first["ok"], true);
+
+    let mut agent_req_b = format!("{ws_base_b}/api/agent/ws")
+        .into_client_request()
+        .unwrap();
+    agent_req_b
+        .headers_mut()
+        .insert("X-UniOB-Node-Id", HeaderValue::from_str(&node_id).unwrap());
+    agent_req_b.headers_mut().insert(
+        "Authorization",
+        HeaderValue::from_str(&format!("Bearer {token}")).unwrap(),
+    );
+    let (mut agent_ws_b, _) = tokio_tungstenite::connect_async(agent_req_b).await.unwrap();
+    let mut hello_b = hello_new.clone();
+    hello_b["agent_ver"] = json!("0.2.0");
+    agent_ws_b
+        .send(WsMsg::Text(hello_b.to_string().into()))
+        .await
+        .unwrap();
+    let _ = timeout(Duration::from_secs(3), agent_ws_b.next())
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap();
+
+    // Importing bundle with auto_update_enabled=true must immediately dispatch 0.2.5 to connected agent
+    let imported_b_enabled: Value = client
+        .post(format!("{base_b}/api/import/bundle"))
+        .header("Cookie", &cookie_b)
+        .json(&bundle)
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(imported_b_enabled["ok"], true);
+    let import_ctrl_txt = match timeout(Duration::from_secs(3), agent_ws_b.next())
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap()
+    {
+        WsMsg::Text(t) => t,
+        other => panic!("expected auto-update ctrl frame on bundle import, got: {other:?}"),
+    };
+    let import_ctrl: Value = serde_json::from_str(&import_ctrl_txt).unwrap();
+    assert_eq!(import_ctrl["update"]["version"], "0.2.5");
+    assert_eq!(import_ctrl["update"]["sha256"], fake_sha);
+
+    // Mock custom mirror URL on Hub B (allow_insecure_ws_for_test=true) -> auto-dispatch of 0.3.0
     let mirror_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let mirror_addr = mirror_listener.local_addr().unwrap();
     let v3_sha = "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc";
@@ -1974,8 +2105,8 @@ async fn auto_update_config_check_trigger_status_and_override_flow() {
     });
 
     let put_res: Value = client
-        .put(format!("{base}/api/agent-update/config"))
-        .header("Cookie", &cookie)
+        .put(format!("{base_b}/api/agent-update/config"))
+        .header("Cookie", &cookie_b)
         .json(&json!({
             "auto_update_enabled": true,
             "channel": "stable",
@@ -1993,8 +2124,8 @@ async fn auto_update_config_check_trigger_status_and_override_flow() {
     assert_eq!(put_res["latest_release"]["version"], "0.3.0");
     assert_eq!(put_res["latest_release"]["source"], "custom");
 
-    // Connected node on 0.2.5 should receive automatic update directive for 0.3.0
-    let auto_ctrl_txt = match timeout(Duration::from_secs(3), agent_ws2.next())
+    // Connected node on Hub B should receive automatic update directive for 0.3.0
+    let auto_ctrl_txt = match timeout(Duration::from_secs(3), agent_ws_b.next())
         .await
         .unwrap()
         .unwrap()
@@ -2007,5 +2138,6 @@ async fn auto_update_config_check_trigger_status_and_override_flow() {
     assert_eq!(auto_ctrl["update"]["version"], "0.3.0");
     assert_eq!(auto_ctrl["update"]["sha256"], v3_sha);
 
+    let _ = (agent_ws2, agent_ws_b);
     let _ = std::fs::remove_dir_all(&releases_dir);
 }
