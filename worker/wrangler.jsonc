@@ -1,0 +1,62 @@
+{
+  "$schema": "./node_modules/wrangler/config-schema.json",
+  // Optional: specify your Cloudflare Account ID if your login belongs to multiple accounts
+  // "account_id": "<your-cloudflare-account-id>",
+  "name": "uniob",
+  "main": "src/index.ts",
+  "compatibility_date": "2026-11-01",
+  "workers_dev": true,
+  "preview_urls": false,
+  // Uncomment `routes` and set `"workers_dev": false` when binding a custom domain (required for Zero Trust Access):
+  // "routes": [
+  //   {
+  //     "pattern": "monitor.example.com",
+  //     "custom_domain": true
+  //   }
+  // ],
+  "assets": {
+    "directory": "../web/dist",
+    "binding": "ASSETS",
+    "not_found_handling": "single-page-application",
+    "run_worker_first": ["/api/*", "/install.sh", "/install-hub.sh", "/releases/migration/*"]
+  },
+  "vars": {
+    "AUTH_MODE": "builtin",
+    "GITHUB_REPO": "Cusnd/UniOB",
+    "CF_ACCESS_TEAM_DOMAIN": "",
+    "CF_ACCESS_AUD": "",
+    "CF_ACCESS_ALLOWED_EMAILS": "admin@example.com"
+  },
+  "d1_databases": [
+    {
+      "binding": "DB",
+      "database_name": "uniob-meta",
+      "database_id": "00000000-0000-0000-0000-000000000000"
+    }
+  ],
+  "durable_objects": {
+    "bindings": [
+      { "name": "NODE_DO", "class_name": "NodeDO" },
+      { "name": "FLEET_HUB_DO", "class_name": "FleetHubDO" }
+    ]
+  },
+  "migrations": [
+    {
+      "tag": "v1",
+      "new_sqlite_classes": ["NodeDO", "FleetHubDO"]
+    }
+  ],
+  "triggers": {
+    "crons": ["*/5 * * * *"]
+  },
+  "observability": {
+    "enabled": true,
+    "logs": {
+      "enabled": true,
+      "head_sampling_rate": 0.05
+    },
+    "traces": {
+      "enabled": false
+    }
+  }
+}

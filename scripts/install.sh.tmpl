@@ -1,0 +1,539 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# UniOB Agent Linux (systemd) Installer / Upgrader / Uninstaller
+# Usage:
+#   Install/Upgrade:
+#     curl -fsSL https://monitor.example.com/install.sh | sudo bash -s -- \
+#       --url wss://monitor.example.com --id nd_xxx --token uob_live_xxx
+#   Uninstall:
+#     curl -fsSL https://monitor.example.com/install.sh | sudo bash -s -- --uninstall
+
+BINARY_PATH="/usr/local/bin/uniob-agent"
+CONFIG_DIR="/etc/uniob"
+CONFIG_PATH="${CONFIG_DIR}/agent.toml"
+STATE_DIR="/var/lib/uniob"
+SERVICE_NAME="uniob-agent"
+SERVICE_PATH="/etc/systemd/system/${SERVICE_NAME}.service"
+
+TEMPLATE_REPO='{{GITHUB_REPO}}'
+if [[ -z "${TEMPLATE_REPO}" || "${TEMPLATE_REPO}" == '{{'*'}}' ]]; then
+  DEFAULT_REPO="Cusnd/UniOB"
+else
+  DEFAULT_REPO="${TEMPLATE_REPO}"
+fi
+
+TEMPLATE_ORIGIN='{{DEFAULT_ORIGIN}}'
+if [[ -z "${TEMPLATE_ORIGIN}" || "${TEMPLATE_ORIGIN}" == '{{'*'}}' ]]; then
+  DEFAULT_ORIGIN=""
+else
+  DEFAULT_ORIGIN="${TEMPLATE_ORIGIN}"
+fi
+
+URL=""
+NODE_ID=""
+TOKEN=""
+CMDLINE_MODE="sanitized"
+CMDLINE_EXPLICIT="false"
+PROC_ENABLED="true"
+DISABLE_PROC_EXPLICIT="false"
+REPO="${DEFAULT_REPO}"
+REPO_EXPLICIT="false"
+VERSION="latest"
+BIN_URL=""
+UNINSTALL="false"
+
+TMP_DIR=""
+TMP_BIN_STAGE=""
+TMP_CFG_STAGE=""
+
+cleanup() {
+  if [[ -n "${TMP_BIN_STAGE}" && -e "${TMP_BIN_STAGE}" ]]; then
+    rm -f "${TMP_BIN_STAGE}"
+  fi
+  if [[ -n "${TMP_CFG_STAGE}" && -e "${TMP_CFG_STAGE}" ]]; then
+    rm -f "${TMP_CFG_STAGE}"
+  fi
+  if [[ -n "${TMP_DIR}" && -d "${TMP_DIR}" ]]; then
+    rm -rf "${TMP_DIR}"
+  fi
+}
+trap cleanup EXIT
+
+log() {
+  printf '[uniob-install] %s\n' "$*"
+}
+
+die() {
+  printf '[uniob-install] ERROR: %s\n' "$*" >&2
+  exit 1
+}
+
+usage() {
+  cat <<EOF
+UniOB Agent Installer (Linux systemd)
+
+Options:
+  --url <url>           Server URL (wss://, ws://, https://, or http://)
+  --id <node_id>        Node ID assigned by UniOB panel
+  --token <token>       Agent Bearer token assigned by UniOB panel
+  --cmdline <mode>      Process cmdline mode: sanitized | comm_only | full (default: sanitized)
+  --disable-proc        Disable process collection ([process] enabled = false)
+  --repo <owner/repo>   GitHub repository for release downloads (default: ${DEFAULT_REPO})
+  --version <tag>       Release tag or 'latest' (default: latest)
+  --bin-url <url>       Explicit download URL for the uniob-agent binary
+  --uninstall           Stop, disable, and remove uniob-agent and its configuration
+  -h, --help            Show this help message
+EOF
+}
+
+require_arg() {
+  local flag="$1"
+  local remaining="$2"
+  if [[ "${remaining}" -lt 2 ]]; then
+    die "Missing value for ${flag}"
+  fi
+}
+
+parse_args() {
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --url)
+        require_arg "$1" "$#"
+        URL="$2"
+        shift 2
+        ;;
+      --url=*)
+        URL="${1#*=}"
+        shift
+        ;;
+      --id)
+        require_arg "$1" "$#"
+        NODE_ID="$2"
+        shift 2
+        ;;
+      --id=*)
+        NODE_ID="${1#*=}"
+        shift
+        ;;
+      --token)
+        require_arg "$1" "$#"
+        TOKEN="$2"
+        shift 2
+        ;;
+      --token=*)
+        TOKEN="${1#*=}"
+        shift
+        ;;
+      --cmdline)
+        require_arg "$1" "$#"
+        CMDLINE_MODE="$2"
+        CMDLINE_EXPLICIT="true"
+        shift 2
+        ;;
+      --cmdline=*)
+        CMDLINE_MODE="${1#*=}"
+        CMDLINE_EXPLICIT="true"
+        shift
+        ;;
+      --disable-proc)
+        PROC_ENABLED="false"
+        DISABLE_PROC_EXPLICIT="true"
+        shift
+        ;;
+      --repo)
+        require_arg "$1" "$#"
+        REPO="$2"
+        REPO_EXPLICIT="true"
+        shift 2
+        ;;
+      --repo=*)
+        REPO="${1#*=}"
+        REPO_EXPLICIT="true"
+        shift
+        ;;
+      --version)
+        require_arg "$1" "$#"
+        VERSION="$2"
+        shift 2
+        ;;
+      --version=*)
+        VERSION="${1#*=}"
+        shift
+        ;;
+      --bin-url)
+        require_arg "$1" "$#"
+        BIN_URL="$2"
+        shift 2
+        ;;
+      --bin-url=*)
+        BIN_URL="${1#*=}"
+        shift
+        ;;
+      --uninstall)
+        UNINSTALL="true"
+        shift
+        ;;
+      -h|--help)
+        usage
+        exit 0
+        ;;
+      *)
+        die "Unknown option: $1 (use --help for usage)"
+        ;;
+    esac
+  done
+}
+
+require_root() {
+  local uid
+  uid="$(id -u)"
+  if [[ "${uid}" -ne 0 ]]; then
+    die "This script must be run as root (try: sudo bash ...)"
+  fi
+}
+
+normalize_url() {
+  local raw="$1"
+  case "${raw}" in
+    https://*)
+      raw="wss://${raw#https://}"
+      ;;
+    http://*)
+      raw="ws://${raw#http://}"
+      ;;
+    wss://*|ws://*)
+      ;;
+    *)
+      die "Invalid --url '${raw}': must start with wss://, ws://, https://, or http://"
+      ;;
+  esac
+
+  while [[ "${raw}" == */ ]]; do
+    raw="${raw%/}"
+  done
+
+  case "${raw}" in
+    */api/agent/ws)
+      ;;
+    *)
+      raw="${raw}/api/agent/ws"
+      ;;
+  esac
+
+  printf '%s\n' "${raw}"
+}
+
+toml_escape() {
+  local val="$1"
+  if [[ "${val}" == *$'\n'* || "${val}" == *$'\r'* ]]; then
+    die "Configuration values must not contain newline characters"
+  fi
+  val="${val//\\/\\\\}"
+  val="${val//\"/\\\"}"
+  printf '%s' "${val}"
+}
+
+detect_target_triple() {
+  local os arch
+  os="$(uname -s)"
+  if [[ "${os}" != "Linux" ]]; then
+    die "Unsupported OS '${os}': uniob-agent installer supports Linux only"
+  fi
+
+  arch="$(uname -m)"
+  case "${arch}" in
+    x86_64|amd64)
+      printf 'x86_64-unknown-linux-musl\n'
+      ;;
+    aarch64|arm64)
+      printf 'aarch64-unknown-linux-musl\n'
+      ;;
+    *)
+      die "Unsupported CPU architecture '${arch}' (supported: x86_64/amd64, aarch64/arm64)"
+      ;;
+  esac
+}
+
+detect_service_group() {
+  local grp
+  grp="$(id -gn nobody 2>/dev/null || printf 'nogroup')"
+  printf '%s\n' "${grp}"
+}
+
+uninstall_agent() {
+  log "Uninstalling ${SERVICE_NAME}..."
+  if command -v systemctl >/dev/null 2>&1; then
+    if systemctl is-active --quiet "${SERVICE_NAME}" 2>/dev/null; then
+      systemctl stop "${SERVICE_NAME}"
+    fi
+    if systemctl is-enabled --quiet "${SERVICE_NAME}" 2>/dev/null; then
+      systemctl disable "${SERVICE_NAME}"
+    fi
+  fi
+
+  rm -f "${SERVICE_PATH}"
+  rm -f "${BINARY_PATH}"
+  rm -rf "${CONFIG_DIR}"
+  rm -rf "${STATE_DIR}"
+
+  if command -v systemctl >/dev/null 2>&1; then
+    systemctl daemon-reload
+    systemctl reset-failed "${SERVICE_NAME}" 2>/dev/null || true
+  fi
+
+  log "Uninstallation complete."
+}
+
+validate_install_inputs() {
+  case "${CMDLINE_MODE}" in
+    sanitized|comm_only|full)
+      ;;
+    *)
+      die "Invalid --cmdline '${CMDLINE_MODE}': expected sanitized, comm_only, or full"
+      ;;
+  esac
+
+  if [[ -z "${BIN_URL}" && ! "${REPO}" =~ ^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$ ]]; then
+    die "Invalid --repo '${REPO}': expected <owner>/<repo>"
+  fi
+
+  if [[ -n "${URL}" || -n "${NODE_ID}" || -n "${TOKEN}" ]]; then
+    if [[ -z "${URL}" ]]; then
+      die "Missing --url"
+    fi
+    if [[ -z "${NODE_ID}" ]]; then
+      die "Missing --id"
+    fi
+    if [[ -z "${TOKEN}" ]]; then
+      die "Missing --token"
+    fi
+  else
+    if [[ ! -f "${CONFIG_PATH}" || "${CMDLINE_EXPLICIT}" == "true" || "${DISABLE_PROC_EXPLICIT}" == "true" ]]; then
+      die "Missing required options: --url, --id, and --token are required for installation"
+    fi
+  fi
+}
+
+derive_http_origin() {
+  local raw="$1"
+  local proto=""
+  local rest=""
+  if [[ "${raw}" == wss://* ]]; then
+    proto="https://"
+    rest="${raw#wss://}"
+  elif [[ "${raw}" == ws://* ]]; then
+    proto="http://"
+    rest="${raw#ws://}"
+  elif [[ "${raw}" == https://* ]]; then
+    proto="https://"
+    rest="${raw#https://}"
+  elif [[ "${raw}" == http://* ]]; then
+    proto="http://"
+    rest="${raw#http://}"
+  else
+    printf '%s' "${DEFAULT_ORIGIN}"
+    return
+  fi
+  rest="${rest%%/*}"
+  if [[ -n "${rest}" ]]; then
+    printf '%s%s' "${proto}" "${rest}"
+  else
+    printf '%s' "${DEFAULT_ORIGIN}"
+  fi
+}
+
+is_valid_elf() {
+  local magic
+  magic="$(LC_ALL=C head -c 4 "$1" 2>/dev/null | tr -d '\000')"
+  [[ "${magic}" == $'\x7fELF' ]]
+}
+
+verify_sha256_if_available() {
+  local file_path="$1"
+  local asset_name="$2"
+  local base_url="$3"
+  if [[ -z "${base_url}" ]] || ! command -v sha256sum >/dev/null 2>&1; then
+    return 0
+  fi
+  local sums_file="${TMP_DIR}/SHA256SUMS"
+  if curl -fsSL --retry 2 --connect-timeout 10 -o "${sums_file}" "${base_url}/SHA256SUMS" 2>/dev/null; then
+    local expected_hash actual_hash
+    expected_hash="$(awk -v name="${asset_name}" '$2 == name || $2 == ("*" name) { print $1; exit }' "${sums_file}")"
+    if [[ -n "${expected_hash}" ]]; then
+      actual_hash="$(sha256sum "${file_path}" | awk '{ print $1 }')"
+      if [[ "${expected_hash}" != "${actual_hash}" ]]; then
+        die "SHA256 verification failed for ${asset_name} (expected ${expected_hash}, got ${actual_hash})"
+      fi
+      log "SHA256 checksum verified."
+    fi
+  fi
+}
+
+download_binary() {
+  local target_triple="$1"
+  local asset_name="uniob-agent-${target_triple}"
+  local release_base_url=""
+  local gh_bin_url=""
+
+  TMP_DIR="$(mktemp -d)"
+  local staged_download="${TMP_DIR}/${asset_name}"
+
+  if [[ -n "${BIN_URL}" ]]; then
+    log "Downloading ${asset_name} from ${BIN_URL}..."
+    curl -fsSL --retry 3 --connect-timeout 15 -o "${staged_download}" "${BIN_URL}"
+    if [[ ! -s "${staged_download}" ]]; then
+      die "Downloaded binary is empty: ${BIN_URL}"
+    fi
+  else
+    if [[ "${VERSION}" == "latest" ]]; then
+      release_base_url="https://github.com/${REPO}/releases/latest/download"
+    else
+      release_base_url="https://github.com/${REPO}/releases/download/${VERSION}"
+    fi
+    gh_bin_url="${release_base_url}/${asset_name}"
+
+    local http_origin downloaded="false"
+    http_origin="$(derive_http_origin "${URL}")"
+    if [[ "${REPO_EXPLICIT}" == "false" && "${VERSION}" == "latest" && -n "${http_origin}" ]]; then
+      local self_bin_url="${http_origin}/releases/${asset_name}"
+      log "Downloading ${asset_name} from ${self_bin_url}..."
+      if curl -fsSL --retry 2 --connect-timeout 10 -o "${staged_download}" "${self_bin_url}" 2>/dev/null && [[ -s "${staged_download}" ]] && is_valid_elf "${staged_download}"; then
+        verify_sha256_if_available "${staged_download}" "${asset_name}" "${http_origin}/releases"
+        downloaded="true"
+      else
+        log "Self-hosted binary unavailable, falling back to GitHub Releases..."
+      fi
+    fi
+
+    if [[ "${downloaded}" != "true" ]]; then
+      log "Downloading ${asset_name} from ${gh_bin_url}..."
+      curl -fsSL --retry 3 --connect-timeout 15 -o "${staged_download}" "${gh_bin_url}"
+      if [[ ! -s "${staged_download}" ]]; then
+        die "Downloaded binary is empty: ${gh_bin_url}"
+      fi
+      verify_sha256_if_available "${staged_download}" "${asset_name}" "${release_base_url}"
+    fi
+  fi
+
+  local bin_dir
+  bin_dir="$(dirname "${BINARY_PATH}")"
+  mkdir -p "${bin_dir}"
+  TMP_BIN_STAGE="$(mktemp "${bin_dir}/.uniob-agent.new.XXXXXX")"
+  cp "${staged_download}" "${TMP_BIN_STAGE}"
+  chmod 0755 "${TMP_BIN_STAGE}"
+  mv -f "${TMP_BIN_STAGE}" "${BINARY_PATH}"
+  TMP_BIN_STAGE=""
+  log "Installed binary to ${BINARY_PATH}"
+}
+
+write_config() {
+  local service_group="$1"
+  local ws_url esc_url esc_id esc_token
+  ws_url="$(normalize_url "${URL}")"
+  esc_url="$(toml_escape "${ws_url}")"
+  esc_id="$(toml_escape "${NODE_ID}")"
+  esc_token="$(toml_escape "${TOKEN}")"
+
+  mkdir -p "${CONFIG_DIR}"
+  chown "root:${service_group}" "${CONFIG_DIR}"
+  chmod 0750 "${CONFIG_DIR}"
+
+  TMP_CFG_STAGE="$(umask 077 && mktemp "${CONFIG_DIR}/.agent.toml.XXXXXX")"
+  cat > "${TMP_CFG_STAGE}" <<EOF
+[server]
+url = "${esc_url}"
+node_id = "${esc_id}"
+token = "${esc_token}"
+
+[collector]
+nic_allowlist = []
+mount_ignore_prefixes = ["/snap", "/boot/efi", "/run"]
+
+[process]
+enabled = ${PROC_ENABLED}
+cmdline_mode = "${CMDLINE_MODE}"
+EOF
+
+  chown "root:${service_group}" "${TMP_CFG_STAGE}"
+  chmod 0640 "${TMP_CFG_STAGE}"
+  mv -f "${TMP_CFG_STAGE}" "${CONFIG_PATH}"
+  TMP_CFG_STAGE=""
+  log "Wrote configuration to ${CONFIG_PATH}"
+}
+
+write_service() {
+  local service_group="$1"
+  local tmp_unit
+  tmp_unit="$(mktemp "${TMP_DIR}/uniob-agent.service.XXXXXX")"
+
+  cat > "${tmp_unit}" <<EOF
+[Unit]
+Description=UniOB Lightweight Monitoring Agent
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=nobody
+Group=${service_group}
+StateDirectory=uniob
+StateDirectoryMode=0750
+ExecStart=${BINARY_PATH} --config ${CONFIG_PATH}
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=read-only
+PrivateTmp=true
+MemoryMax=24M
+Restart=always
+RestartSec=3
+
+[Install]
+WantedBy=multi-user.target
+EOF
+
+  chmod 0644 "${tmp_unit}"
+  mv -f "${tmp_unit}" "${SERVICE_PATH}"
+  log "Wrote systemd unit to ${SERVICE_PATH}"
+}
+
+main() {
+  parse_args "$@"
+  require_root
+
+  if [[ "${UNINSTALL}" == "true" ]]; then
+    uninstall_agent
+    exit 0
+  fi
+
+  command -v curl >/dev/null 2>&1 || die "'curl' is required but not installed"
+  command -v systemctl >/dev/null 2>&1 || die "'systemctl' is required (Linux systemd)"
+
+  validate_install_inputs
+
+  local target_triple service_group
+  target_triple="$(detect_target_triple)"
+  service_group="$(detect_service_group)"
+
+  download_binary "${target_triple}"
+
+  if [[ -n "${URL}" ]]; then
+    write_config "${service_group}"
+  else
+    log "Existing ${CONFIG_PATH} preserved; upgrading binary and unit only."
+  fi
+
+  write_service "${service_group}"
+
+  systemctl daemon-reload
+  if systemctl is-active --quiet "${SERVICE_NAME}" 2>/dev/null; then
+    systemctl enable "${SERVICE_NAME}"
+    systemctl restart "${SERVICE_NAME}"
+  else
+    systemctl enable --now "${SERVICE_NAME}"
+  fi
+
+  log "${SERVICE_NAME} is installed and running (group=${service_group}, arch=${target_triple})."
+}
+
+main "$@"

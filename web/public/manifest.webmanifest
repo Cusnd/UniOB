@@ -1,0 +1,17 @@
+{
+  "name": "UniOB — Unified Observability",
+  "short_name": "UniOB",
+  "description": "Lightweight Linux Fleet Observability & Process Inspector",
+  "start_url": "/",
+  "display": "standalone",
+  "background_color": "#090d14",
+  "theme_color": "#090d14",
+  "icons": [
+    {
+      "src": "/icon.svg",
+      "sizes": "any",
+      "type": "image/svg+xml",
+      "purpose": "any maskable"
+    }
+  ]
+}

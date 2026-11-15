@@ -1,0 +1,91 @@
+name: CI
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+    branches:
+      - main
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  web-worker:
+    name: Web Build, Worker Tests & Installer Syntax
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Check installer template shell syntax
+        shell: bash
+        run: |
+          set -euo pipefail
+          bash -n scripts/install.sh.tmpl
+          bash -n scripts/install-hub.sh.tmpl
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: "npm"
+          cache-dependency-path: |
+            web/package-lock.json
+            worker/package-lock.json
+
+      - name: Install web and worker dependencies
+        run: |
+          npm --prefix web ci
+          npm --prefix worker ci
+
+      - name: Typecheck web and worker
+        run: npm run typecheck
+
+      - name: Build web dist
+        run: npm run build:web
+
+      - name: Run worker tests
+        run: npm run test:worker
+
+  rust:
+    name: Rust Fmt, Clippy & Tests
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+
+      - name: Cache Cargo dependencies
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: |
+            agent -> target
+            hub -> target
+
+      - name: Check Rust formatting (agent & hub)
+        run: |
+          cargo fmt --manifest-path agent/Cargo.toml --all -- --check
+          cargo fmt --manifest-path hub/Cargo.toml --all -- --check
+
+      - name: Run Clippy (agent & hub)
+        run: |
+          cargo clippy --manifest-path agent/Cargo.toml --all-targets -- -D warnings
+          cargo clippy --manifest-path hub/Cargo.toml --all-targets -- -D warnings
+
+      - name: Run Rust unit and E2E tests (agent & hub)
+        run: |
+          cargo test --manifest-path agent/Cargo.toml
+          cargo test --manifest-path hub/Cargo.toml

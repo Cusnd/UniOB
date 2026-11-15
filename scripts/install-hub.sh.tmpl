@@ -1,0 +1,666 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# UniOB Self-Hosted Hub Linux (systemd) Installer / Upgrader / Uninstaller
+# Usage:
+#   Fresh Install / Configure:
+#     curl -fsSL https://monitor.example.com/install-hub.sh | sudo bash -s -- \
+#       --listen 127.0.0.1:8787 --domain hub.example.com
+#   Fresh Install with State Migration + CF Dead-Man's Switch Watchdog:
+#     curl -fsSL https://monitor.example.com/install-hub.sh | sudo bash -s -- \
+#       --listen 127.0.0.1:8787 --domain hub.example.com \
+#       --import-bundle ./uniob-bundle.json \
+#       --watchdog-url https://monitor.example.com/api/watchdog/ping \
+#       --watchdog-secret <secret>
+#   Upgrade existing installation (preserving /etc/uniob-hub/hub.toml):
+#     curl -fsSL https://monitor.example.com/install-hub.sh | sudo bash
+#   Uninstall:
+#     curl -fsSL https://monitor.example.com/install-hub.sh | sudo bash -s -- --uninstall
+
+BINARY_PATH="/usr/local/bin/uniob-hub"
+CONFIG_DIR="/etc/uniob-hub"
+CONFIG_PATH="${CONFIG_DIR}/hub.toml"
+STATE_DIR="/var/lib/uniob-hub"
+DB_PATH="${STATE_DIR}/uniob.db"
+SHARE_DIR="/usr/local/share/uniob-hub"
+WEB_DIR="${SHARE_DIR}/web"
+RELEASES_DIR="${SHARE_DIR}/releases"
+SERVICE_NAME="uniob-hub"
+SERVICE_PATH="/etc/systemd/system/${SERVICE_NAME}.service"
+
+TEMPLATE_REPO='{{GITHUB_REPO}}'
+if [[ -z "${TEMPLATE_REPO}" || "${TEMPLATE_REPO}" == '{{'*'}}' ]]; then
+  DEFAULT_REPO="Cusnd/UniOB"
+else
+  DEFAULT_REPO="${TEMPLATE_REPO}"
+fi
+
+TEMPLATE_ORIGIN='{{DEFAULT_ORIGIN}}'
+if [[ -z "${TEMPLATE_ORIGIN}" || "${TEMPLATE_ORIGIN}" == '{{'*'}}' ]]; then
+  DEFAULT_ORIGIN=""
+else
+  DEFAULT_ORIGIN="${TEMPLATE_ORIGIN}"
+fi
+
+LISTEN="127.0.0.1:8787"
+LISTEN_EXPLICIT="false"
+DOMAIN=""
+DOMAIN_EXPLICIT="false"
+WATCHDOG_URL=""
+WATCHDOG_URL_EXPLICIT="false"
+WATCHDOG_SECRET=""
+WATCHDOG_SECRET_EXPLICIT="false"
+IMPORT_BUNDLE=""
+REPO="${DEFAULT_REPO}"
+REPO_EXPLICIT="false"
+VERSION="latest"
+BIN_URL=""
+UNINSTALL="false"
+
+TMP_DIR=""
+TMP_BIN_STAGE=""
+TMP_CFG_STAGE=""
+TMP_WEB_STAGE=""
+
+cleanup() {
+  if [[ -n "${TMP_BIN_STAGE}" && -e "${TMP_BIN_STAGE}" ]]; then
+    rm -f "${TMP_BIN_STAGE}"
+  fi
+  if [[ -n "${TMP_CFG_STAGE}" && -e "${TMP_CFG_STAGE}" ]]; then
+    rm -f "${TMP_CFG_STAGE}"
+  fi
+  if [[ -n "${TMP_WEB_STAGE}" && -e "${TMP_WEB_STAGE}" ]]; then
+    rm -rf "${TMP_WEB_STAGE}"
+  fi
+  if [[ -n "${TMP_DIR}" && -d "${TMP_DIR}" ]]; then
+    rm -rf "${TMP_DIR}"
+  fi
+}
+trap cleanup EXIT
+
+log() {
+  printf '[uniob-hub-install] %s\n' "$*"
+}
+
+warn() {
+  printf '[uniob-hub-install] WARN: %s\n' "$*" >&2
+}
+
+die() {
+  printf '[uniob-hub-install] ERROR: %s\n' "$*" >&2
+  exit 1
+}
+
+usage() {
+  cat <<EOF
+UniOB Self-Hosted Hub Installer (Linux systemd)
+
+Options:
+  --listen <addr>             Listen address (default: 127.0.0.1:8787)
+  --domain <domain_or_url>    Public domain or origin URL (e.g. hub.example.com)
+  --watchdog-url <url>        Cloudflare Watchdog ping URL (e.g. https://.../api/watchdog/ping)
+  --watchdog-secret <secret>  Cloudflare Watchdog HMAC secret
+  --import-bundle <path|url>  Import exported JSON state bundle before starting hub
+  --bin-url <url>             Explicit download URL for the uniob-hub binary
+  --repo <owner/repo>         GitHub repository for release downloads (default: ${DEFAULT_REPO})
+  --version <tag>             Release tag or 'latest' (default: latest)
+  --uninstall                 Stop, disable, and remove uniob-hub, config, assets, and state
+  -h, --help                  Show this help message
+EOF
+}
+
+require_arg() {
+  local flag="$1"
+  local remaining="$2"
+  if [[ "${remaining}" -lt 2 ]]; then
+    die "Missing value for ${flag}"
+  fi
+}
+
+parse_args() {
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --listen)
+        require_arg "$1" "$#"
+        LISTEN="$2"
+        LISTEN_EXPLICIT="true"
+        shift 2
+        ;;
+      --listen=*)
+        LISTEN="${1#*=}"
+        LISTEN_EXPLICIT="true"
+        shift
+        ;;
+      --domain)
+        require_arg "$1" "$#"
+        DOMAIN="$2"
+        DOMAIN_EXPLICIT="true"
+        shift 2
+        ;;
+      --domain=*)
+        DOMAIN="${1#*=}"
+        DOMAIN_EXPLICIT="true"
+        shift
+        ;;
+      --watchdog-url)
+        require_arg "$1" "$#"
+        WATCHDOG_URL="$2"
+        WATCHDOG_URL_EXPLICIT="true"
+        shift 2
+        ;;
+      --watchdog-url=*)
+        WATCHDOG_URL="${1#*=}"
+        WATCHDOG_URL_EXPLICIT="true"
+        shift
+        ;;
+      --watchdog-secret)
+        require_arg "$1" "$#"
+        WATCHDOG_SECRET="$2"
+        WATCHDOG_SECRET_EXPLICIT="true"
+        shift 2
+        ;;
+      --watchdog-secret=*)
+        WATCHDOG_SECRET="${1#*=}"
+        WATCHDOG_SECRET_EXPLICIT="true"
+        shift
+        ;;
+      --import-bundle)
+        require_arg "$1" "$#"
+        IMPORT_BUNDLE="$2"
+        shift 2
+        ;;
+      --import-bundle=*)
+        IMPORT_BUNDLE="${1#*=}"
+        shift
+        ;;
+      --bin-url)
+        require_arg "$1" "$#"
+        BIN_URL="$2"
+        shift 2
+        ;;
+      --bin-url=*)
+        BIN_URL="${1#*=}"
+        shift
+        ;;
+      --repo)
+        require_arg "$1" "$#"
+        REPO="$2"
+        REPO_EXPLICIT="true"
+        shift 2
+        ;;
+      --repo=*)
+        REPO="${1#*=}"
+        REPO_EXPLICIT="true"
+        shift
+        ;;
+      --version)
+        require_arg "$1" "$#"
+        VERSION="$2"
+        shift 2
+        ;;
+      --version=*)
+        VERSION="${1#*=}"
+        shift
+        ;;
+      --uninstall)
+        UNINSTALL="true"
+        shift
+        ;;
+      -h|--help)
+        usage
+        exit 0
+        ;;
+      *)
+        die "Unknown option: $1 (use --help for usage)"
+        ;;
+    esac
+  done
+}
+
+require_root() {
+  local uid
+  uid="$(id -u)"
+  if [[ "${uid}" -ne 0 ]]; then
+    die "This script must be run as root (try: sudo bash ...)"
+  fi
+}
+
+toml_escape() {
+  local val="$1"
+  if [[ "${val}" == *$'\n'* || "${val}" == *$'\r'* ]]; then
+    die "Configuration values must not contain newline characters"
+  fi
+  val="${val//\\/\\\\}"
+  val="${val//\"/\\\"}"
+  printf '%s' "${val}"
+}
+
+normalize_public_url() {
+  local raw="$1"
+  if [[ -z "${raw}" ]]; then
+    printf ''
+    return
+  fi
+  while [[ "${raw}" == */ ]]; do
+    raw="${raw%/}"
+  done
+  case "${raw}" in
+    https://*|http://*)
+      printf '%s' "${raw}"
+      ;;
+    *)
+      printf 'https://%s' "${raw}"
+      ;;
+  esac
+}
+
+detect_target_triple() {
+  local os arch
+  os="$(uname -s)"
+  if [[ "${os}" != "Linux" ]]; then
+    die "Unsupported OS '${os}': uniob-hub installer supports Linux only"
+  fi
+
+  arch="$(uname -m)"
+  case "${arch}" in
+    x86_64|amd64)
+      printf 'x86_64-unknown-linux-musl\n'
+      ;;
+    aarch64|arm64)
+      printf 'aarch64-unknown-linux-musl\n'
+      ;;
+    *)
+      die "Unsupported CPU architecture '${arch}' (supported: x86_64/amd64, aarch64/arm64)"
+      ;;
+  esac
+}
+
+detect_service_group() {
+  local grp
+  grp="$(id -gn nobody 2>/dev/null || printf 'nogroup')"
+  printf '%s\n' "${grp}"
+}
+
+uninstall_hub() {
+  log "Uninstalling ${SERVICE_NAME}..."
+  if command -v systemctl >/dev/null 2>&1; then
+    if systemctl is-active --quiet "${SERVICE_NAME}" 2>/dev/null; then
+      systemctl stop "${SERVICE_NAME}"
+    fi
+    if systemctl is-enabled --quiet "${SERVICE_NAME}" 2>/dev/null; then
+      systemctl disable "${SERVICE_NAME}"
+    fi
+  fi
+
+  rm -f "${SERVICE_PATH}"
+  rm -f "${BINARY_PATH}"
+  rm -rf "${CONFIG_DIR}"
+  rm -rf "${SHARE_DIR}"
+  rm -rf "${STATE_DIR}"
+
+  if command -v systemctl >/dev/null 2>&1; then
+    systemctl daemon-reload
+    systemctl reset-failed "${SERVICE_NAME}" 2>/dev/null || true
+  fi
+
+  log "Uninstallation complete."
+}
+
+validate_inputs() {
+  if [[ -z "${LISTEN}" || "${LISTEN}" =~ [[:space:]] ]]; then
+    die "Invalid --listen '${LISTEN}': expected host:port (e.g. 127.0.0.1:8787)"
+  fi
+
+  if [[ -n "${WATCHDOG_URL}" && ! "${WATCHDOG_URL}" =~ ^https?:// ]]; then
+    die "Invalid --watchdog-url '${WATCHDOG_URL}': must start with https:// or http://"
+  fi
+
+  if [[ -n "${IMPORT_BUNDLE}" && ! "${IMPORT_BUNDLE}" =~ ^https?:// && ! -f "${IMPORT_BUNDLE}" ]]; then
+    die "Bundle file not found: ${IMPORT_BUNDLE}"
+  fi
+
+  if [[ -z "${BIN_URL}" && ! "${REPO}" =~ ^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$ ]]; then
+    die "Invalid --repo '${REPO}': expected <owner>/<repo>"
+  fi
+}
+
+release_base_url_for_repo() {
+  if [[ "${VERSION}" == "latest" ]]; then
+    printf 'https://github.com/%s/releases/latest/download\n' "${REPO}"
+  else
+    printf 'https://github.com/%s/releases/download/%s\n' "${REPO}" "${VERSION}"
+  fi
+}
+
+fetch_sha256sums() {
+  local base_url="$1"
+  local sums_file="${TMP_DIR}/SHA256SUMS"
+  if [[ -f "${sums_file}" ]]; then
+    printf '%s\n' "${sums_file}"
+    return 0
+  fi
+  if command -v sha256sum >/dev/null 2>&1 && curl -fsSL --retry 2 --connect-timeout 10 -o "${sums_file}" "${base_url}/SHA256SUMS" 2>/dev/null; then
+    printf '%s\n' "${sums_file}"
+    return 0
+  fi
+  return 1
+}
+
+is_valid_elf() {
+  local magic
+  magic="$(LC_ALL=C head -c 4 "$1" 2>/dev/null | tr -d '\000')"
+  [[ "${magic}" == $'\x7fELF' ]]
+}
+
+verify_sha256_if_available() {
+  local file_path="$1"
+  local asset_name="$2"
+  local sums_file="$3"
+  if [[ -z "${sums_file}" || ! -f "${sums_file}" ]] || ! command -v sha256sum >/dev/null 2>&1; then
+    return 0
+  fi
+  local expected_hash actual_hash
+  expected_hash="$(awk -v name="${asset_name}" '$2 == name || $2 == ("*" name) { print $1; exit }' "${sums_file}")"
+  if [[ -n "${expected_hash}" ]]; then
+    actual_hash="$(sha256sum "${file_path}" | awk '{ print $1 }')"
+    if [[ "${expected_hash}" != "${actual_hash}" ]]; then
+      die "SHA256 verification failed for ${asset_name} (expected ${expected_hash}, got ${actual_hash})"
+    fi
+    log "SHA256 verified for ${asset_name}."
+  fi
+}
+
+download_and_install_assets() {
+  local target_triple="$1"
+  local hub_asset="uniob-hub-${target_triple}"
+  local release_base_url=""
+  local gh_hub_url=""
+
+  TMP_DIR="$(mktemp -d)"
+  release_base_url="$(release_base_url_for_repo)"
+  local sums_file=""
+
+  local staged_hub="${TMP_DIR}/${hub_asset}"
+  if [[ -n "${BIN_URL}" ]]; then
+    log "Downloading ${hub_asset} from ${BIN_URL}..."
+    curl -fsSL --retry 3 --connect-timeout 15 -o "${staged_hub}" "${BIN_URL}"
+    if [[ ! -s "${staged_hub}" ]]; then
+      die "Downloaded hub binary is empty: ${BIN_URL}"
+    fi
+  else
+    gh_hub_url="${release_base_url}/${hub_asset}"
+    local hub_downloaded="false"
+    if [[ "${REPO_EXPLICIT}" == "false" && "${VERSION}" == "latest" && -n "${DEFAULT_ORIGIN}" ]]; then
+      local self_hub_url="${DEFAULT_ORIGIN}/releases/${hub_asset}"
+      log "Downloading ${hub_asset} from ${self_hub_url}..."
+      if curl -fsSL --retry 2 --connect-timeout 10 -o "${staged_hub}" "${self_hub_url}" 2>/dev/null && [[ -s "${staged_hub}" ]] && is_valid_elf "${staged_hub}"; then
+        local self_sums
+        self_sums="$(fetch_sha256sums "${DEFAULT_ORIGIN}/releases" || true)"
+        verify_sha256_if_available "${staged_hub}" "${hub_asset}" "${self_sums}"
+        hub_downloaded="true"
+      else
+        log "Self-hosted hub binary unavailable, falling back to GitHub Releases..."
+      fi
+    fi
+
+    if [[ "${hub_downloaded}" != "true" ]]; then
+      sums_file="$(fetch_sha256sums "${release_base_url}" || true)"
+      log "Downloading ${hub_asset} from ${gh_hub_url}..."
+      curl -fsSL --retry 3 --connect-timeout 15 -o "${staged_hub}" "${gh_hub_url}"
+      if [[ ! -s "${staged_hub}" ]]; then
+        die "Downloaded hub binary is empty: ${gh_hub_url}"
+      fi
+      verify_sha256_if_available "${staged_hub}" "${hub_asset}" "${sums_file}"
+    fi
+  fi
+
+  local bin_dir
+  bin_dir="$(dirname "${BINARY_PATH}")"
+  mkdir -p "${bin_dir}"
+  TMP_BIN_STAGE="$(mktemp "${bin_dir}/.uniob-hub.new.XXXXXX")"
+  cp "${staged_hub}" "${TMP_BIN_STAGE}"
+  chmod 0755 "${TMP_BIN_STAGE}"
+  mv -f "${TMP_BIN_STAGE}" "${BINARY_PATH}"
+  TMP_BIN_STAGE=""
+  log "Installed binary to ${BINARY_PATH}"
+
+  # Download and install web UI dist bundle
+  if [[ -z "${sums_file}" && "${REPO}" =~ ^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$ ]]; then
+    rm -f "${TMP_DIR}/SHA256SUMS"
+    sums_file="$(fetch_sha256sums "${release_base_url}" || true)"
+  fi
+
+  mkdir -p "${SHARE_DIR}" "${WEB_DIR}" "${RELEASES_DIR}"
+  chmod 0755 "${SHARE_DIR}" "${WEB_DIR}" "${RELEASES_DIR}"
+
+  local web_archive="${TMP_DIR}/uniob-web-dist.tar.gz"
+  local web_downloaded="false"
+  if [[ "${REPO_EXPLICIT}" == "false" && "${VERSION}" == "latest" && -n "${DEFAULT_ORIGIN}" ]]; then
+    local self_web_url="${DEFAULT_ORIGIN}/releases/uniob-web-dist.tar.gz"
+    if curl -fsSL --retry 2 --connect-timeout 10 -o "${web_archive}" "${self_web_url}" 2>/dev/null && [[ -s "${web_archive}" ]] && tar -tzf "${web_archive}" >/dev/null 2>&1; then
+      rm -f "${TMP_DIR}/SHA256SUMS"
+      local self_web_sums
+      self_web_sums="$(fetch_sha256sums "${DEFAULT_ORIGIN}/releases" || true)"
+      verify_sha256_if_available "${web_archive}" "uniob-web-dist.tar.gz" "${self_web_sums}"
+      web_downloaded="true"
+    fi
+  fi
+
+  local web_url="${release_base_url}/uniob-web-dist.tar.gz"
+  if [[ "${web_downloaded}" != "true" ]]; then
+    log "Downloading web UI bundle from ${web_url}..."
+    if curl -fsSL --retry 3 --connect-timeout 15 -o "${web_archive}" "${web_url}" 2>/dev/null && [[ -s "${web_archive}" ]] && tar -tzf "${web_archive}" >/dev/null 2>&1; then
+      verify_sha256_if_available "${web_archive}" "uniob-web-dist.tar.gz" "${sums_file}"
+      web_downloaded="true"
+    fi
+  fi
+
+  if [[ "${web_downloaded}" == "true" ]]; then
+    TMP_WEB_STAGE="$(mktemp -d "${SHARE_DIR}/.web.new.XXXXXX")"
+    tar -xzf "${web_archive}" -C "${TMP_WEB_STAGE}"
+    chmod -R a+rX "${TMP_WEB_STAGE}"
+    rm -rf "${WEB_DIR}"
+    mv -f "${TMP_WEB_STAGE}" "${WEB_DIR}"
+    TMP_WEB_STAGE=""
+    log "Installed web UI assets to ${WEB_DIR}"
+  else
+    warn "Could not download uniob-web-dist.tar.gz from ${web_url}; existing ${WEB_DIR} kept."
+  fi
+
+  # Best-effort download of agent binaries for local /releases/* serving
+  local agent_arch
+  for agent_arch in x86_64-unknown-linux-musl aarch64-unknown-linux-musl; do
+    local agent_asset="uniob-agent-${agent_arch}"
+    local staged_agent="${TMP_DIR}/${agent_asset}"
+    if curl -fsSL --retry 2 --connect-timeout 10 -o "${staged_agent}" "${release_base_url}/${agent_asset}" 2>/dev/null && [[ -s "${staged_agent}" ]] && is_valid_elf "${staged_agent}"; then
+      verify_sha256_if_available "${staged_agent}" "${agent_asset}" "${sums_file}"
+      chmod 0755 "${staged_agent}"
+      mv -f "${staged_agent}" "${RELEASES_DIR}/${agent_asset}"
+      log "Cached ${agent_asset} in ${RELEASES_DIR}"
+    elif [[ -n "${DEFAULT_ORIGIN}" ]] && curl -fsSL --retry 2 --connect-timeout 10 -o "${staged_agent}" "${DEFAULT_ORIGIN}/releases/${agent_asset}" 2>/dev/null && [[ -s "${staged_agent}" ]] && is_valid_elf "${staged_agent}"; then
+      chmod 0755 "${staged_agent}"
+      mv -f "${staged_agent}" "${RELEASES_DIR}/${agent_asset}"
+      log "Cached ${agent_asset} from ${DEFAULT_ORIGIN} in ${RELEASES_DIR}"
+    else
+      warn "Optional agent release binary ${agent_asset} not cached; /install.sh will fall back to GitHub Releases."
+    fi
+  done
+}
+
+write_config() {
+  local service_group="$1"
+  local esc_listen esc_db esc_web esc_releases esc_public esc_repo esc_wd_url esc_wd_secret
+  local public_url
+  public_url="$(normalize_public_url "${DOMAIN}")"
+
+  esc_listen="$(toml_escape "${LISTEN}")"
+  esc_db="$(toml_escape "${DB_PATH}")"
+  esc_web="$(toml_escape "${WEB_DIR}")"
+  esc_releases="$(toml_escape "${RELEASES_DIR}")"
+  esc_public="$(toml_escape "${public_url}")"
+  esc_repo="$(toml_escape "${REPO}")"
+  esc_wd_url="$(toml_escape "${WATCHDOG_URL}")"
+  esc_wd_secret="$(toml_escape "${WATCHDOG_SECRET}")"
+
+  mkdir -p "${CONFIG_DIR}"
+  chmod 0750 "${CONFIG_DIR}"
+  chown "root:${service_group}" "${CONFIG_DIR}"
+
+  TMP_CFG_STAGE="$(umask 077 && mktemp "${CONFIG_DIR}/.hub.toml.XXXXXX")"
+  cat > "${TMP_CFG_STAGE}" <<EOF
+[server]
+listen = "${esc_listen}"
+db_path = "${esc_db}"
+web_dir = "${esc_web}"
+releases_dir = "${esc_releases}"
+public_url = "${esc_public}"
+github_repo = "${esc_repo}"
+
+[auth]
+mode = "builtin"
+
+[self_probe]
+enabled = true
+
+[watchdog]
+url = "${esc_wd_url}"
+secret = "${esc_wd_secret}"
+interval_sec = 300
+EOF
+
+  chown "root:${service_group}" "${TMP_CFG_STAGE}"
+  chmod 0640 "${TMP_CFG_STAGE}"
+  mv -f "${TMP_CFG_STAGE}" "${CONFIG_PATH}"
+  TMP_CFG_STAGE=""
+  log "Wrote configuration to ${CONFIG_PATH}"
+}
+
+write_service() {
+  local service_group="$1"
+  local tmp_unit
+  tmp_unit="$(mktemp "${TMP_DIR}/uniob-hub.service.XXXXXX")"
+
+  cat > "${tmp_unit}" <<EOF
+[Unit]
+Description=UniOB Self-Hosted Monitoring Hub
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=nobody
+Group=${service_group}
+StateDirectory=uniob-hub
+StateDirectoryMode=0750
+ExecStart=${BINARY_PATH} --config ${CONFIG_PATH}
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=read-only
+PrivateTmp=true
+Restart=always
+RestartSec=3
+
+[Install]
+WantedBy=multi-user.target
+EOF
+
+  chmod 0644 "${tmp_unit}"
+  mv -f "${tmp_unit}" "${SERVICE_PATH}"
+  log "Wrote systemd unit to ${SERVICE_PATH}"
+}
+
+import_state_bundle_if_requested() {
+  local service_group="$1"
+  mkdir -p "${STATE_DIR}"
+  chown "nobody:${service_group}" "${STATE_DIR}"
+  chmod 0750 "${STATE_DIR}"
+
+  if [[ -z "${IMPORT_BUNDLE}" ]]; then
+    return 0
+  fi
+
+  local bundle_file="${IMPORT_BUNDLE}"
+  if [[ "${IMPORT_BUNDLE}" =~ ^https?:// ]]; then
+    bundle_file="${TMP_DIR}/import-bundle.json"
+    log "Downloading state bundle from ${IMPORT_BUNDLE}..."
+    curl -fsSL --retry 3 --connect-timeout 15 -o "${bundle_file}" "${IMPORT_BUNDLE}"
+    if [[ ! -s "${bundle_file}" ]]; then
+      die "Downloaded bundle is empty: ${IMPORT_BUNDLE}"
+    fi
+  elif [[ ! -f "${bundle_file}" ]]; then
+    die "Bundle file not found: ${bundle_file}"
+  fi
+
+  if command -v systemctl >/dev/null 2>&1 && systemctl is-active --quiet "${SERVICE_NAME}" 2>/dev/null; then
+    log "Stopping ${SERVICE_NAME} cleanly before importing bundle..."
+    systemctl stop "${SERVICE_NAME}"
+  fi
+
+  log "Importing state bundle from ${bundle_file}..."
+  "${BINARY_PATH}" --config "${CONFIG_PATH}" --db "${DB_PATH}" --import-bundle "${bundle_file}" --import-only
+  chown -R "nobody:${service_group}" "${STATE_DIR}"
+  chmod 0750 "${STATE_DIR}"
+  log "State bundle imported into ${DB_PATH}."
+}
+
+print_post_install_notes() {
+  local public_url
+  public_url="$(normalize_public_url "${DOMAIN}")"
+  log "${SERVICE_NAME} is installed and running (listen=${LISTEN})."
+  if [[ -n "${public_url}" ]]; then
+    log "Public URL configured: ${public_url}"
+  fi
+  cat <<EOF
+
+Next steps:
+  1. Verify service status:
+       systemctl status ${SERVICE_NAME} --no-pager
+  2. Expose '${LISTEN}' securely via Cloudflare Tunnel (recommended, zero open ports):
+       cloudflared tunnel --url http://${LISTEN}
+     (If using Cloudflare Zero Trust Access, set Bypass policies on /api/agent/ws, /install.sh, /releases/*)
+     Or configure Caddy / Nginx reverse proxy with TLS to http://${LISTEN}.
+EOF
+}
+
+main() {
+  parse_args "$@"
+  require_root
+
+  if [[ "${UNINSTALL}" == "true" ]]; then
+    uninstall_hub
+    exit 0
+  fi
+
+  command -v curl >/dev/null 2>&1 || die "'curl' is required but not installed"
+  command -v tar >/dev/null 2>&1 || die "'tar' is required but not installed"
+  command -v systemctl >/dev/null 2>&1 || die "'systemctl' is required (Linux systemd)"
+
+  validate_inputs
+
+  local target_triple service_group
+  target_triple="$(detect_target_triple)"
+  service_group="$(detect_service_group)"
+
+  download_and_install_assets "${target_triple}"
+
+  if [[ ! -f "${CONFIG_PATH}" || "${LISTEN_EXPLICIT}" == "true" || "${DOMAIN_EXPLICIT}" == "true" || "${WATCHDOG_URL_EXPLICIT}" == "true" || "${WATCHDOG_SECRET_EXPLICIT}" == "true" ]]; then
+    write_config "${service_group}"
+  else
+    log "Existing ${CONFIG_PATH} preserved; upgrading binary, web assets, and unit only."
+  fi
+
+  write_service "${service_group}"
+  import_state_bundle_if_requested "${service_group}"
+
+  systemctl daemon-reload
+  if systemctl is-active --quiet "${SERVICE_NAME}" 2>/dev/null; then
+    systemctl enable "${SERVICE_NAME}"
+    systemctl restart "${SERVICE_NAME}"
+  else
+    systemctl enable --now "${SERVICE_NAME}"
+  fi
+
+  print_post_install_notes
+}
+
+main "$@"

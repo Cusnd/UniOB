@@ -1,0 +1,190 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Optional release tag to publish (leave empty to build artifacts only)"
+        required: false
+        default: ""
+
+permissions:
+  contents: write
+
+jobs:
+  build-web:
+    name: Build Web Assets
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: "npm"
+          cache-dependency-path: web/package-lock.json
+
+      - name: Install web dependencies
+        run: npm --prefix web ci
+
+      - name: Typecheck web
+        run: npm run typecheck:web
+
+      - name: Build web dist
+        run: npm run build:web
+
+      - name: Package uniob-web-dist.tar.gz
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p dist
+          tar -czf dist/uniob-web-dist.tar.gz -C web/dist .
+          ls -lh dist/uniob-web-dist.tar.gz
+
+      - name: Upload web dist artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: uniob-web-dist
+          path: dist/uniob-web-dist.tar.gz
+          if-no-files-found: error
+
+  build:
+    name: Build Rust (${{ matrix.target }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        target:
+          - x86_64-unknown-linux-musl
+          - aarch64-unknown-linux-musl
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - name: Cache Cargo dependencies (agent)
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: "agent -> target"
+          prefix-key: "agent"
+          key: ${{ matrix.target }}
+
+      - name: Cache Cargo dependencies (hub)
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: "hub -> target"
+          prefix-key: "hub"
+          key: ${{ matrix.target }}
+
+      - name: Set up Zig
+        uses: mlugg/setup-zig@v2
+        with:
+          version: "0.13.0"
+
+      - name: Install cargo-zigbuild
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-zigbuild
+
+      - name: Run unit tests (agent & hub)
+        if: matrix.target == 'x86_64-unknown-linux-musl'
+        run: |
+          cargo test --manifest-path agent/Cargo.toml
+          cargo test --manifest-path hub/Cargo.toml
+
+      - name: Build static musl binaries (uniob-agent & uniob-hub)
+        run: |
+          cargo zigbuild --manifest-path agent/Cargo.toml --release --target "${{ matrix.target }}"
+          cargo zigbuild --manifest-path hub/Cargo.toml --release --target "${{ matrix.target }}"
+
+      - name: Package and verify binaries (uniob-agent <= 2.5 MB)
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p dist
+
+          AGENT_BIN="agent/target/${{ matrix.target }}/release/uniob-agent"
+          AGENT_OUT="dist/uniob-agent-${{ matrix.target }}"
+          cp "${AGENT_BIN}" "${AGENT_OUT}"
+          chmod 0755 "${AGENT_OUT}"
+          file "${AGENT_OUT}"
+          AGENT_SIZE="$(stat -c%s "${AGENT_OUT}")"
+          echo "Built ${AGENT_OUT}: ${AGENT_SIZE} bytes (limit: 2621440 bytes)"
+          if [ "${AGENT_SIZE}" -gt 2621440 ]; then
+            echo "::error::${AGENT_OUT} exceeds 2.5 MB size budget (${AGENT_SIZE} > 2621440 bytes)"
+            exit 1
+          fi
+
+          HUB_BIN="hub/target/${{ matrix.target }}/release/uniob-hub"
+          HUB_OUT="dist/uniob-hub-${{ matrix.target }}"
+          cp "${HUB_BIN}" "${HUB_OUT}"
+          chmod 0755 "${HUB_OUT}"
+          file "${HUB_OUT}"
+          HUB_SIZE="$(stat -c%s "${HUB_OUT}")"
+          echo "Built ${HUB_OUT}: ${HUB_SIZE} bytes"
+
+      - name: Upload target binary artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: uniob-binaries-${{ matrix.target }}
+          path: |
+            dist/uniob-agent-${{ matrix.target }}
+            dist/uniob-hub-${{ matrix.target }}
+          if-no-files-found: error
+
+  release:
+    name: Package SHA256SUMS & Publish Release
+    needs: [build, build-web]
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Download built artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: release-artifacts
+          merge-multiple: true
+
+      - name: Generate SHA256SUMS
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd release-artifacts
+          sha256sum \
+            uniob-agent-x86_64-unknown-linux-musl \
+            uniob-agent-aarch64-unknown-linux-musl \
+            uniob-hub-x86_64-unknown-linux-musl \
+            uniob-hub-aarch64-unknown-linux-musl \
+            uniob-web-dist.tar.gz > SHA256SUMS
+          cat SHA256SUMS
+
+      - name: Upload release bundle artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: uniob-release-bundle
+          path: release-artifacts/*
+          if-no-files-found: error
+
+      - name: Publish GitHub Release
+        if: startsWith(github.ref, 'refs/tags/v') || (github.event_name == 'workflow_dispatch' && inputs.tag != '')
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ startsWith(github.ref, 'refs/tags/v') && github.ref_name || inputs.tag }}
+          generate_release_notes: true
+          files: |
+            release-artifacts/uniob-agent-x86_64-unknown-linux-musl
+            release-artifacts/uniob-agent-aarch64-unknown-linux-musl
+            release-artifacts/uniob-hub-x86_64-unknown-linux-musl
+            release-artifacts/uniob-hub-aarch64-unknown-linux-musl
+            release-artifacts/uniob-web-dist.tar.gz
+            release-artifacts/SHA256SUMS

@@ -1,0 +1,53 @@
+name: Bug Report
+description: Report a bug or unexpected behavior in UniOB
+title: "[Bug]: "
+labels: ["bug"]
+body:
+  - type: dropdown
+    id: component
+    attributes:
+      label: Affected Component
+      options:
+        - agent (uniob-agent)
+        - hub (uniob-hub self-hosted)
+        - worker (Cloudflare Workers / D1 / DO)
+        - web (Dashboard UI)
+        - install-scripts (install.sh / install-hub.sh)
+        - docs / CI
+    validations:
+      required: true
+  - type: input
+    id: version
+    attributes:
+      label: UniOB Version / Commit
+      placeholder: e.g. v0.1.0 or commit SHA
+    validations:
+      required: true
+  - type: input
+    id: environment
+    attributes:
+      label: Environment
+      description: OS, architecture, deployment mode, or browser details.
+      placeholder: e.g. Debian 12 x86_64, Self-Hosted Hub + CF Watchdog
+  - type: textarea
+    id: description
+    attributes:
+      label: Description
+      description: A clear and concise description of what went wrong.
+    validations:
+      required: true
+  - type: textarea
+    id: reproduction
+    attributes:
+      label: Steps to Reproduce
+      placeholder: |
+        1. ...
+        2. ...
+    validations:
+      required: true
+  - type: textarea
+    id: logs
+    attributes:
+      label: Relevant Logs / Error Output
+      description: Redact tokens, passwords, account IDs, or bot secrets before pasting.
+      render: text

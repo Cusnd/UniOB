@@ -1,0 +1,25 @@
+{
+  "name": "uniob",
+  "version": "0.1.0",
+  "private": true,
+  "license": "MIT",
+  "description": "UniOB (Unified Observability) - Lightweight Linux monitoring probe & Cloudflare Workers / self-hosted Rust hub",
+  "homepage": "https://github.com/Cusnd/UniOB",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/Cusnd/UniOB.git"
+  },
+  "scripts": {
+    "build:web": "npm --prefix web run build",
+    "typecheck:web": "npm --prefix web run typecheck",
+    "typecheck:worker": "npm --prefix worker run typecheck",
+    "typecheck": "npm run typecheck:web && npm run typecheck:worker",
+    "test:worker": "npm --prefix worker test",
+    "test:agent": "cargo test --manifest-path agent/Cargo.toml",
+    "build:agent": "cargo build --release --manifest-path agent/Cargo.toml",
+    "test:hub": "cargo test --manifest-path hub/Cargo.toml",
+    "build:hub": "cargo build --release --manifest-path hub/Cargo.toml",
+    "build": "npm run build:web",
+    "test": "npm run test:agent && npm run test:hub && npm run test:worker"
+  }
+}
