@@ -24,7 +24,11 @@ import type {
   TrafficCountMode,
   UpdateNodePayload,
 } from "../types";
-import { formatAgentUpdateState, formatVersionTag } from "../utils/autoUpdate";
+import {
+  formatAgentUpdateState,
+  formatVersionTag,
+  hasUpdateCap,
+} from "../utils/autoUpdate";
 import {
   formatBytes,
   formatBytesCompact,
@@ -1300,6 +1304,11 @@ export function NodesOpsView(props: NodesOpsViewProps): React.JSX.Element {
                             {formatVersionTag(liveEditingNode.agent_version)}
                           </span>
                           <Badge tone={upd.tone}>{upd.label}</Badge>
+                          {Array.isArray(liveEditingNode.caps) &&
+                            liveEditingNode.caps.length > 0 &&
+                            !hasUpdateCap(liveEditingNode.caps) && (
+                              <Badge tone="subtle">不支持自动更新</Badge>
+                            )}
                         </div>
                         {upd.detail && (
                           <p
