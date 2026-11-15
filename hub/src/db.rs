@@ -199,7 +199,7 @@ impl RawSlabSample {
     fn read_le_slice(blob: &[u8]) -> Vec<Self> {
         let count = blob.len() / RAW_SAMPLE_BYTES;
         let mut out = Vec::with_capacity(count);
-        for chunk in blob.chunks_exact(RAW_SAMPLE_BYTES) {
+        for chunk in blob.as_chunks::<RAW_SAMPLE_BYTES>().0 {
             out.push(Self {
                 ts: read_i64_le(&chunk[0..8]),
                 cpu: read_f64_le(&chunk[8..16]),
@@ -274,7 +274,7 @@ impl Rollup5mSample {
     fn read_le_slice(blob: &[u8]) -> Vec<Self> {
         let count = blob.len() / ROLLUP_5M_BYTES;
         let mut out = Vec::with_capacity(count);
-        for chunk in blob.chunks_exact(ROLLUP_5M_BYTES) {
+        for chunk in blob.as_chunks::<ROLLUP_5M_BYTES>().0 {
             out.push(Self {
                 ts: read_i64_le(&chunk[0..8]),
                 cpu_avg: read_f64_le(&chunk[8..16]),
@@ -341,7 +341,7 @@ impl Rollup1hSample {
     fn read_le_slice(blob: &[u8]) -> Vec<Self> {
         let count = blob.len() / ROLLUP_1H_BYTES;
         let mut out = Vec::with_capacity(count);
-        for chunk in blob.chunks_exact(ROLLUP_1H_BYTES) {
+        for chunk in blob.as_chunks::<ROLLUP_1H_BYTES>().0 {
             out.push(Self {
                 ts: read_i64_le(&chunk[0..8]),
                 cpu_avg: read_f64_le(&chunk[8..16]),
