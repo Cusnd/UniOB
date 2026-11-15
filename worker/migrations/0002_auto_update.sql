@@ -1,0 +1,1 @@
+ALTER TABLE nodes ADD COLUMN auto_update_override INTEGER DEFAULT NULL;

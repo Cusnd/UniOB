@@ -1,18 +1,27 @@
 import { sha256Hex } from "./crypto";
 
 export const NQ_IDS = ["ct", "cu", "cm"] as const;
-export type NqId = (typeof NQ_IDS)[number];
+export type NqId = string;
+export const NQ_MIN_TARGETS = 1;
+export const NQ_MAX_TARGETS = 8;
+export const NQ_DEFAULT_INTERVAL_SEC = 20;
+export const NQ_MIN_INTERVAL_SEC = 10;
+export const NQ_MAX_INTERVAL_SEC = 300;
+const NQ_TARGET_ID_RE = /^[a-z0-9][a-z0-9_-]{0,23}$/;
+const NQ_BUILTIN_RANK: Record<string, number> = { ct: 0, cu: 1, cm: 2 };
+
 export interface NqTarget {
   id: NqId;
   enabled: boolean;
   label: string;
-  region: string;
+  region?: string;
   host: string;
   port: number;
   address_family: "ipv4";
 }
 export interface NqConfig {
   enabled: boolean;
+  interval_sec?: number;
   targets: NqTarget[];
 }
 export interface NqOverride {
@@ -23,6 +32,7 @@ export interface NqControl {
   schema_version: 1;
   config_id: string;
   enabled: boolean;
+  interval_sec?: number;
   targets: (NqTarget & { target_revision: string })[];
 }
 export type NqResult =
@@ -116,15 +126,38 @@ function keys(value: Record<string, unknown>, allowed: string[]): void {
   if (Object.keys(value).some((k) => !allowed.includes(k)))
     throw new Error("Unknown network quality field");
 }
-function shortText(value: unknown, max = 64): string {
-  if (
-    typeof value !== "string" ||
-    !value.trim() ||
-    [...value.trim()].length > max ||
-    /[\x00-\x1f\x7f-\x9f]/.test(value)
-  )
+function optionalText(value: unknown, max = 64): string | undefined {
+  if (value === undefined || value === null) return undefined;
+  if (typeof value !== "string" || /[\x00-\x1f\x7f-\x9f]/.test(value))
     throw new Error("Invalid network quality text");
-  return value.trim();
+  const trimmed = value.trim();
+  if (!trimmed) return undefined;
+  if ([...trimmed].length > max)
+    throw new Error("Invalid network quality text");
+  return trimmed;
+}
+function shortText(value: unknown, max = 64): string {
+  const text = optionalText(value, max);
+  if (!text) throw new Error("Invalid network quality text");
+  return text;
+}
+export function nqSortTargetIds(ids: Iterable<string>): string[] {
+  return [...new Set(ids)].sort((a, b) => {
+    const ra = NQ_BUILTIN_RANK[a] ?? 3;
+    const rb = NQ_BUILTIN_RANK[b] ?? 3;
+    if (ra !== rb) return ra - rb;
+    return a < b ? -1 : a > b ? 1 : 0;
+  });
+}
+export function nqSortTargets<T extends { id: string }>(
+  targets: readonly T[],
+): T[] {
+  return [...targets].sort((a, b) => {
+    const ra = NQ_BUILTIN_RANK[a.id] ?? 3;
+    const rb = NQ_BUILTIN_RANK[b.id] ?? 3;
+    if (ra !== rb) return ra - rb;
+    return a.id < b.id ? -1 : a.id > b.id ? 1 : 0;
+  });
 }
 export function nqIsPublicV4(value: string): boolean {
   if (!/^(0|[1-9]\d{0,2})(\.(0|[1-9]\d{0,2})){3}$/.test(value)) return false;
@@ -162,7 +195,8 @@ export function nqParseTarget(value: unknown): NqTarget {
     "address_family",
   ]);
   if (
-    !NQ_IDS.includes(t.id as NqId) ||
+    typeof t.id !== "string" ||
+    !NQ_TARGET_ID_RE.test(t.id) ||
     typeof t.enabled !== "boolean" ||
     t.address_family !== "ipv4"
   )
@@ -178,37 +212,51 @@ export function nqParseTarget(value: unknown): NqTarget {
       .every((p) => /^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$/.test(p))
   )
     throw new Error("Invalid target hostname");
+  const port = t.port === undefined ? 80 : t.port;
   if (
-    !Number.isInteger(t.port) ||
-    (t.port as number) < 1 ||
-    (t.port as number) > 65535
+    !Number.isInteger(port) ||
+    (port as number) < 1 ||
+    (port as number) > 65535
   )
     throw new Error("Invalid TCP port");
+  const region = optionalText(t.region, 64);
   return {
-    id: t.id as NqId,
+    id: t.id,
     enabled: t.enabled,
-    label: shortText(t.label),
-    region: shortText(t.region),
+    label: shortText(t.label, 32),
+    ...(region !== undefined ? { region } : {}),
     host,
-    port: t.port as number,
+    port: port as number,
     address_family: "ipv4",
   };
 }
 export function nqParseConfig(value: unknown): NqConfig {
   const c = obj(value);
-  keys(c, ["enabled", "targets"]);
+  keys(c, ["enabled", "interval_sec", "targets"]);
   if (
     typeof c.enabled !== "boolean" ||
     !Array.isArray(c.targets) ||
-    c.targets.length !== 3
+    c.targets.length < NQ_MIN_TARGETS ||
+    c.targets.length > NQ_MAX_TARGETS
   )
-    throw new Error("Expected enabled and three target slots");
+    throw new Error("Expected enabled and 1 to 8 targets");
+  const intervalSec =
+    c.interval_sec === undefined ? NQ_DEFAULT_INTERVAL_SEC : c.interval_sec;
+  if (
+    !Number.isInteger(intervalSec) ||
+    (intervalSec as number) < NQ_MIN_INTERVAL_SEC ||
+    (intervalSec as number) > NQ_MAX_INTERVAL_SEC
+  )
+    throw new Error("Invalid network quality interval_sec");
   const targets = c.targets.map(nqParseTarget);
-  if (new Set(targets.map((t) => t.id)).size !== 3)
-    throw new Error("Duplicate target slot");
+  if (new Set(targets.map((t) => t.id)).size !== targets.length)
+    throw new Error("Duplicate target id");
   return {
     enabled: c.enabled,
-    targets: NQ_IDS.map((id) => targets.find((t) => t.id === id)!),
+    ...(intervalSec !== NQ_DEFAULT_INTERVAL_SEC
+      ? { interval_sec: intervalSec as number }
+      : {}),
+    targets: nqSortTargets(targets),
   };
 }
 export function nqParseOverride(value: unknown): NqOverride {
@@ -226,25 +274,41 @@ export function nqValidateSetting(key: string, value: string): void {
     nqParseOverride(JSON.parse(value));
 }
 export function nqTargetArray(t: NqTarget): unknown[] {
-  return [t.id, t.enabled, t.label, t.region, t.host, t.port, t.address_family];
+  return [
+    t.id,
+    t.enabled,
+    t.label,
+    t.region ?? null,
+    t.host,
+    t.port,
+    t.address_family,
+  ];
 }
 export async function nqMakeControl(c: NqConfig): Promise<NqControl> {
+  const sorted = nqSortTargets(c.targets);
+  const intervalSec = c.interval_sec ?? NQ_DEFAULT_INTERVAL_SEC;
   const targets = await Promise.all(
-    c.targets.map(async (t) => ({
+    sorted.map(async (t) => ({
       ...t,
       target_revision: await sha256Hex(JSON.stringify(nqTargetArray(t))),
     })),
   );
+  const hashInput =
+    intervalSec === NQ_DEFAULT_INTERVAL_SEC
+      ? ["network_quality_v1", c.enabled, sorted.map(nqTargetArray)]
+      : [
+          "network_quality_v1",
+          c.enabled,
+          sorted.map(nqTargetArray),
+          intervalSec,
+        ];
   return {
     schema_version: 1,
-    config_id: await sha256Hex(
-      JSON.stringify([
-        "network_quality_v1",
-        c.enabled,
-        c.targets.map(nqTargetArray),
-      ]),
-    ),
+    config_id: await sha256Hex(JSON.stringify(hashInput)),
     enabled: c.enabled,
+    ...(intervalSec !== NQ_DEFAULT_INTERVAL_SEC
+      ? { interval_sec: intervalSec }
+      : {}),
     targets,
   };
 }
@@ -273,7 +337,7 @@ export async function nqParsePayload(
   try {
     if (
       value === undefined ||
-      new TextEncoder().encode(JSON.stringify(value)).length > 128 * 1024
+      new TextEncoder().encode(JSON.stringify(value)).length > 384 * 1024
     )
       return null;
     const p = obj(value);
@@ -288,9 +352,9 @@ export async function nqParsePayload(
       !Number.isSafeInteger(p.dropped_samples) ||
       (p.dropped_samples as number) < 0 ||
       !Array.isArray(p.points) ||
-      p.points.length > 270 ||
+      p.points.length > 720 ||
       !Array.isArray(p.latest) ||
-      p.latest.length > 3
+      p.latest.length > NQ_MAX_TARGETS
     )
       return null;
     const revisions = new Map<string, string>();

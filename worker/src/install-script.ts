@@ -105,11 +105,18 @@ set -euo pipefail
 DEFAULT_REPO="${safeRepo}"
 DEFAULT_ORIGIN="${safeOrigin}"
 BINARY_PATH="/usr/local/bin/uniob-agent"
+BACKUP_BINARY_PATH="/usr/local/bin/uniob-agent.prev"
+APPLY_HELPER_PATH="/usr/local/sbin/uniob-agent-apply-update"
 CONFIG_DIR="/etc/uniob"
 CONFIG_PATH="\${CONFIG_DIR}/agent.toml"
 STATE_DIR="/var/lib/uniob"
+UPDATE_DIR="\${STATE_DIR}/update"
 SERVICE_NAME="uniob-agent"
 SERVICE_PATH="/etc/systemd/system/\${SERVICE_NAME}.service"
+UPDATE_PATH_NAME="uniob-agent-update.path"
+UPDATE_SERVICE_NAME="uniob-agent-update.service"
+UPDATE_PATH_UNIT="/etc/systemd/system/\${UPDATE_PATH_NAME}"
+UPDATE_SERVICE_UNIT="/etc/systemd/system/\${UPDATE_SERVICE_NAME}"
 
 URL=""
 NODE_ID=""
@@ -243,11 +250,13 @@ command -v systemctl >/dev/null 2>&1 || die "systemctl is required"
 
 if [[ "\${UNINSTALL}" == "true" ]]; then
   log "Uninstalling \${SERVICE_NAME}..."
+  systemctl disable --now "\${UPDATE_PATH_NAME}" >/dev/null 2>&1 || true
+  systemctl stop "\${UPDATE_SERVICE_NAME}" >/dev/null 2>&1 || true
   systemctl disable --now "\${SERVICE_NAME}" >/dev/null 2>&1 || true
-  rm -f "\${SERVICE_PATH}" "\${BINARY_PATH}"
+  rm -f "\${UPDATE_PATH_UNIT}" "\${UPDATE_SERVICE_UNIT}" "\${SERVICE_PATH}" "\${APPLY_HELPER_PATH}" "\${BINARY_PATH}" "\${BACKUP_BINARY_PATH}"
   rm -rf "\${CONFIG_DIR}" "\${STATE_DIR}"
   systemctl daemon-reload
-  systemctl reset-failed "\${SERVICE_NAME}" 2>/dev/null || true
+  systemctl reset-failed "\${SERVICE_NAME}" "\${UPDATE_SERVICE_NAME}" "\${UPDATE_PATH_NAME}" 2>/dev/null || true
   log "uniob-agent removed."
   exit 0
 fi
@@ -458,6 +467,89 @@ EOF
 
 chmod 0644 "\${TMP_UNIT}"
 mv -f "\${TMP_UNIT}" "\${SERVICE_PATH}"
+
+mkdir -p "$(dirname "\${APPLY_HELPER_PATH}")"
+TMP_HELPER="\${TMP_DIR}/uniob-agent-apply-update"
+cat > "\${TMP_HELPER}" <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+
+BINARY_PATH="/usr/local/bin/uniob-agent"
+BACKUP_PATH="/usr/local/bin/uniob-agent.prev"
+CONFIG_PATH="/etc/uniob/agent.toml"
+READY_JSON="/var/lib/uniob/update/ready.json"
+STAGED_BIN="/var/lib/uniob/update/uniob-agent.bin"
+SERVICE_NAME="uniob-agent"
+
+if [[ ! -f "\${READY_JSON}" || ! -f "\${STAGED_BIN}" ]]; then
+  exit 0
+fi
+
+if ! "\${BINARY_PATH}" --config "\${CONFIG_PATH}" --verify-staged-update; then
+  rm -f "\${READY_JSON}" "\${STAGED_BIN}"
+  exit 1
+fi
+
+TMP_NEW="$(mktemp /usr/local/bin/.uniob-agent.new.XXXXXX)"
+cleanup() {
+  rm -f "\${TMP_NEW}"
+}
+trap cleanup EXIT
+
+cp -f "\${STAGED_BIN}" "\${TMP_NEW}"
+chmod 0755 "\${TMP_NEW}"
+
+if [[ -f "\${BINARY_PATH}" ]]; then
+  cp -f "\${BINARY_PATH}" "\${BACKUP_PATH}"
+  chmod 0755 "\${BACKUP_PATH}"
+fi
+
+mv -f "\${TMP_NEW}" "\${BINARY_PATH}"
+trap - EXIT
+rm -f "\${READY_JSON}" "\${STAGED_BIN}"
+
+systemctl restart "\${SERVICE_NAME}"
+sleep 2
+
+if ! systemctl is-active --quiet "\${SERVICE_NAME}"; then
+  if [[ -f "\${BACKUP_PATH}" ]]; then
+    mv -f "\${BACKUP_PATH}" "\${BINARY_PATH}"
+    chmod 0755 "\${BINARY_PATH}"
+    systemctl restart "\${SERVICE_NAME}" || true
+  fi
+  exit 1
+fi
+EOF
+chmod 0755 "\${TMP_HELPER}"
+mv -f "\${TMP_HELPER}" "\${APPLY_HELPER_PATH}"
+
+TMP_UPD_PATH="\${TMP_DIR}/\${UPDATE_PATH_NAME}"
+cat > "\${TMP_UPD_PATH}" <<EOF
+[Unit]
+Description=Watch UniOB agent staged auto-update marker
+
+[Path]
+PathChanged=/var/lib/uniob/update/ready.json
+
+[Install]
+WantedBy=multi-user.target
+EOF
+chmod 0644 "\${TMP_UPD_PATH}"
+mv -f "\${TMP_UPD_PATH}" "\${UPDATE_PATH_UNIT}"
+
+TMP_UPD_SVC="\${TMP_DIR}/\${UPDATE_SERVICE_NAME}"
+cat > "\${TMP_UPD_SVC}" <<EOF
+[Unit]
+Description=Apply UniOB agent staged auto-update
+After=\${SERVICE_NAME}.service
+
+[Service]
+Type=oneshot
+ExecStart=\${APPLY_HELPER_PATH}
+EOF
+chmod 0644 "\${TMP_UPD_SVC}"
+mv -f "\${TMP_UPD_SVC}" "\${UPDATE_SERVICE_UNIT}"
+
 systemctl daemon-reload
 if systemctl is-active --quiet "\${SERVICE_NAME}" 2>/dev/null; then
   systemctl enable "\${SERVICE_NAME}"
@@ -465,6 +557,7 @@ if systemctl is-active --quiet "\${SERVICE_NAME}" 2>/dev/null; then
 else
   systemctl enable --now "\${SERVICE_NAME}"
 fi
+systemctl enable --now "\${UPDATE_PATH_NAME}"
 
 log "uniob-agent installed and started successfully."
 `;

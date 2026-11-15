@@ -86,10 +86,32 @@ export interface NodeMetricsPayload {
   };
 }
 
+export type AgentUpdateState =
+  | "idle"
+  | "downloading"
+  | "staged"
+  | "applying"
+  | "error";
+
+export interface WireAgentUpdateStatus {
+  st: AgentUpdateState;
+  ver?: string;
+  err?: string;
+  ts?: number;
+}
+
+export interface NodeUpdateStatus {
+  state: AgentUpdateState;
+  target_version?: string;
+  error?: string;
+  updated_at?: number;
+}
+
 export interface AgentMetricsFrame extends Omit<NodeMetricsPayload, "network_quality"> {
   network_quality?: unknown;
   t: "m";
   procs?: AgentProcEntry[];
+  upd?: WireAgentUpdateStatus | NodeUpdateStatus;
 }
 
 /**
@@ -126,6 +148,7 @@ export interface AgentMetricsBatchFrame {
   reason: BatchFlushReason;
   pts: CompactMetricTuple[];
   last: Omit<AgentMetricsFrame, "t">;
+  upd?: WireAgentUpdateStatus | NodeUpdateStatus;
 }
 
 export interface CtrlWatermarks {
@@ -143,6 +166,15 @@ export interface CtrlMigrateDirective {
   sig: string;
 }
 
+export interface CtrlUpdateDirective {
+  version: string;
+  sha256: string;
+  url: string;
+  fallback_url?: string;
+  issued_at: number;
+  hmac: string;
+}
+
 export interface AgentCtrlFrame {
   network_quality?: NqControl;
   t: "ctrl";
@@ -154,6 +186,7 @@ export interface AgentCtrlFrame {
   flush_now?: boolean;
   watermarks?: CtrlWatermarks;
   migrate?: CtrlMigrateDirective;
+  update?: CtrlUpdateDirective;
 }
 
 export interface NodeRow {
@@ -177,6 +210,7 @@ export interface NodeRow {
   agent_version: string | null;
   proc_enabled: number;
   mute_until: number | null;
+  auto_update_override: number | null;
   created_at: number;
   updated_at: number;
 }
@@ -212,6 +246,9 @@ export interface NodeSummary extends NodeHardwareInfo {
   tags: string[];
   sort_order: number;
   mute_until: number | null;
+  caps: string[];
+  auto_update_override: boolean | null;
+  update_status: NodeUpdateStatus | null;
   online: boolean;
   last_seen_ts: number | null;
   created_at: number;
@@ -228,6 +265,7 @@ export interface NodeConfigSync {
   trafficResetDay: number;
   trafficCountMode: TrafficCountMode;
   muteUntil: number | null;
+  autoUpdateOverride?: boolean | null;
 }
 
 export interface NodeLeaseUpdate {
@@ -243,6 +281,8 @@ export interface NodeSnapshot {
   traffic: NodeTrafficSummary;
   metrics: NodeMetricsPayload | null;
   hardware: NodeHardwareInfo | null;
+  caps?: string[];
+  update_status?: NodeUpdateStatus | null;
 }
 
 export type MetricRange = "1h" | "24h" | "7d" | "30d" | "1y";
@@ -393,6 +433,38 @@ export interface FleetTickMessage {
   traffic: NodeTrafficSummary;
   metrics: NodeMetricsPayload | null;
   hardware?: NodeHardwareInfo;
+  caps?: string[];
+  auto_update_override?: boolean | null;
+  update_status?: NodeUpdateStatus | null;
+}
+
+export type AgentUpdateChannel = "stable" | "github";
+
+export interface AgentUpdateConfig {
+  auto_update_enabled: boolean;
+  channel: AgentUpdateChannel;
+  check_interval_sec: number;
+  custom_base_url: string;
+}
+
+export type AgentReleaseArch = "amd64" | "arm64";
+
+export interface AgentReleaseAsset {
+  arch: AgentReleaseArch;
+  asset_name: string;
+  url: string;
+  fallback_url?: string;
+  sha256: string;
+}
+
+export interface AgentLatestRelease {
+  version: string;
+  source: "assets" | "github" | "custom";
+  checked_at: number;
+  tag?: string;
+  published_at?: string | null;
+  notes_url?: string;
+  assets: Partial<Record<AgentReleaseArch, AgentReleaseAsset>>;
 }
 
 export interface FleetBatchMessage {

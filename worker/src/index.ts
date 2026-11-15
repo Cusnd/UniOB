@@ -50,6 +50,14 @@ import type {
   NotificationChannelRow,
 } from "./types";
 import {
+  BUNDLED_AGENT_VERSION,
+  checkLatestAgentRelease,
+  decodeAutoUpdateOverride,
+  getAgentUpdateConfig,
+  readCachedAgentRelease,
+  saveAgentUpdateConfig,
+} from "./auto-update";
+import {
   getWatchdogConfig,
   getWatchdogState,
   getWatchdogStatusSummary,
@@ -85,6 +93,9 @@ function formatNodeSummary(row: NodeRow, snapshot?: NodeSnapshot): NodeSummary {
     tags,
     sort_order: row.sort_order,
     mute_until: row.mute_until,
+    caps: snapshot?.caps ?? [],
+    auto_update_override: decodeAutoUpdateOverride(row.auto_update_override),
+    update_status: snapshot?.update_status ?? null,
     hostname: hw?.hostname ?? row.hostname,
     os: hw?.os ?? row.os,
     kernel: hw?.kernel ?? row.kernel,
@@ -518,6 +529,7 @@ app.post("/api/nodes", async (c) => {
     agent_version: null,
     proc_enabled: 1,
     mute_until: null,
+    auto_update_override: null,
     created_at: nowSec,
     updated_at: nowSec,
   };
@@ -609,13 +621,31 @@ app.patch("/api/nodes/:id", async (c) => {
       : typeof body.mute_until === "number" && Number.isFinite(body.mute_until)
         ? Math.floor(body.mute_until)
         : existing.mute_until;
+  if (
+    body.auto_update_override !== undefined &&
+    body.auto_update_override !== null &&
+    typeof body.auto_update_override !== "boolean"
+  ) {
+    return c.json(
+      { error: "auto_update_override must be boolean or null" },
+      400,
+    );
+  }
+  const autoUpdateOverride =
+    body.auto_update_override === undefined
+      ? existing.auto_update_override
+      : body.auto_update_override === null
+        ? null
+        : body.auto_update_override
+          ? 1
+          : 0;
   const nowSec = Math.floor(Date.now() / 1000);
 
   await c.env.DB.prepare(
     `UPDATE nodes SET
       name = ?, group_name = ?, tags_json = ?, sort_order = ?,
       traffic_limit_bytes = ?, traffic_reset_day = ?, traffic_count_mode = ?,
-      mute_until = ?, updated_at = ?
+      mute_until = ?, auto_update_override = ?, updated_at = ?
     WHERE id = ?`,
   )
     .bind(
@@ -627,6 +657,7 @@ app.patch("/api/nodes/:id", async (c) => {
       trafficResetDay,
       trafficCountMode,
       muteUntil,
+      autoUpdateOverride,
       nowSec,
       id,
     )
@@ -1439,6 +1470,123 @@ app.put("/api/watchdog/config", async (c) => {
   ]);
 
   return c.json({ config, state });
+});
+
+app.get("/api/agent-update/config", async (c) => {
+  const [config, cached] = await Promise.all([
+    getAgentUpdateConfig(c.env.DB),
+    readCachedAgentRelease(c.env.DB),
+  ]);
+  return c.json({
+    ok: true,
+    config,
+    latest_release: cached?.release ?? null,
+    bundled_version: BUNDLED_AGENT_VERSION,
+  });
+});
+
+app.put("/api/agent-update/config", async (c) => {
+  const body = await parseJson<Record<string, unknown>>(c);
+  if (!body || Array.isArray(body)) {
+    return c.json({ error: "Invalid JSON body" }, 400);
+  }
+  let config;
+  try {
+    config = await saveAgentUpdateConfig(c.env.DB, body);
+  } catch (err) {
+    return c.json(
+      { error: err instanceof Error ? err.message : "Invalid configuration" },
+      400,
+    );
+  }
+  const origin = new URL(c.req.url).origin;
+  const cached = await readCachedAgentRelease(c.env.DB);
+  await getFleetHub(c.env).syncAgentUpdateState({
+    config,
+    origin,
+    clearReleaseCache: true,
+  });
+  return c.json({
+    ok: true,
+    config,
+    latest_release: cached?.release ?? null,
+    bundled_version: BUNDLED_AGENT_VERSION,
+  });
+});
+
+app.post("/api/agent-update/check", async (c) => {
+  const config = await getAgentUpdateConfig(c.env.DB);
+  const origin = new URL(c.req.url).origin;
+  const checked = await checkLatestAgentRelease(c.env, config, {
+    requestOrigin: origin,
+    force: true,
+  });
+  await getFleetHub(c.env).syncAgentUpdateState({
+    config,
+    origin,
+    release: checked.release,
+  });
+  return c.json({
+    ok: true,
+    latest_release: checked.release,
+    checked_at: checked.checked_at,
+    bundled_version: BUNDLED_AGENT_VERSION,
+    error: checked.error,
+  });
+});
+
+app.post("/api/agent-update/trigger", async (c) => {
+  let body: Record<string, unknown> = {};
+  const rawText = await c.req.text();
+  if (rawText.trim().length > 0) {
+    try {
+      const parsed = JSON.parse(rawText);
+      if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+        return c.json({ error: "Invalid JSON body" }, 400);
+      }
+      body = parsed as Record<string, unknown>;
+    } catch {
+      return c.json({ error: "Invalid JSON body" }, 400);
+    }
+  }
+
+  let nodeIds: string[] | undefined;
+  if (body.node_ids !== undefined) {
+    if (
+      !Array.isArray(body.node_ids) ||
+      !body.node_ids.every(
+        (id): id is string => typeof id === "string" && id.trim().length > 0,
+      )
+    ) {
+      return c.json(
+        { error: "node_ids must be an array of non-empty node IDs" },
+        400,
+      );
+    }
+    nodeIds = [...new Set(body.node_ids.map((id) => id.trim()))];
+  }
+  const force = body.force === true;
+
+  const config = await getAgentUpdateConfig(c.env.DB);
+  const origin = new URL(c.req.url).origin;
+  const checked = await checkLatestAgentRelease(c.env, config, {
+    requestOrigin: origin,
+  });
+  if (!checked.release) {
+    return c.json(
+      { error: checked.error ?? "No verified agent release available" },
+      409,
+    );
+  }
+
+  const result = await getFleetHub(c.env).triggerAgentUpdates({
+    release: checked.release,
+    config,
+    nodeIds,
+    force,
+    origin,
+  });
+  return c.json({ ok: true, ...result });
 });
 
 // Static frontend assets fallback for non-API requests.
