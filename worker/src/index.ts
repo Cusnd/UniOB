@@ -1500,12 +1500,12 @@ app.put("/api/agent-update/config", async (c) => {
     );
   }
   const origin = new URL(c.req.url).origin;
-  const cached = await readCachedAgentRelease(c.env.DB);
   await getFleetHub(c.env).syncAgentUpdateState({
     config,
     origin,
     clearReleaseCache: true,
   });
+  const cached = await readCachedAgentRelease(c.env.DB);
   return c.json({
     ok: true,
     config,

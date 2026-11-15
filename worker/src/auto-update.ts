@@ -93,8 +93,11 @@ export function assetNameForArch(arch: AgentReleaseArch): string {
 }
 
 export function validateCustomBaseUrl(raw: unknown): string {
+  if (raw === null) {
+    return "";
+  }
   if (typeof raw !== "string") {
-    throw new Error("custom_base_url must be a string");
+    throw new Error("custom_base_url must be a string or null");
   }
   if (/[\x00-\x1f\x7f-\x9f]/.test(raw)) {
     throw new Error("custom_base_url contains control characters");
@@ -232,6 +235,13 @@ export async function readCachedAgentRelease(
     return null;
   }
   return cached;
+}
+
+export async function clearCachedAgentRelease(db: D1Database): Promise<void> {
+  await db
+    .prepare("DELETE FROM system_settings WHERE key = ?")
+    .bind(AGENT_UPDATE_CACHE_KEY)
+    .run();
 }
 
 interface ParsedSemver {

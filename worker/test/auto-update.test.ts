@@ -260,6 +260,22 @@ describe("Agent Auto-Update (`auto_update_v1`)", () => {
       await authedFetch("/api/agent-update/config", cookie)
     ).json<AgentUpdateConfigResponse>();
     expect(refetch.config).toEqual(saved.config);
+
+    // Clearing custom_base_url with null (as sent by AgentUpdateModal) normalizes to ""
+    const resetRes = await authedFetch("/api/agent-update/config", cookie, {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        auto_update_enabled: false,
+        channel: "stable",
+        check_interval_sec: 21600,
+        custom_base_url: null,
+      }),
+    });
+    expect(resetRes.status).toBe(200);
+    const resetBody = await resetRes.json<AgentUpdateConfigResponse>();
+    expect(resetBody.config.custom_base_url).toBe("");
+    expect(resetBody.latest_release).toBeNull();
   });
 
   it("resolves releases from env.ASSETS (guarding SPA HTML), GitHub API, and 15-min D1 cache", async () => {
@@ -341,12 +357,23 @@ describe("Agent Auto-Update (`auto_update_v1`)", () => {
     expect(cachedRes.release?.version).toBe("0.3.0");
     expect(assetUrls).toHaveLength(2);
 
-    // Switch channel to GitHub & force check -> fetches repos/Cusnd/UniOB/releases/latest
-    await authedFetch("/api/agent-update/config", cookie, {
+    // Switch channel to GitHub -> clears D1 agent_update_cache BEFORE returning PUT response
+    const switchPut = await authedFetch("/api/agent-update/config", cookie, {
       method: "PUT",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ channel: "github", auto_update_enabled: false }),
     });
+    expect(switchPut.status).toBe(200);
+    const switchBody = await switchPut.json<AgentUpdateConfigResponse>();
+    expect(switchBody.latest_release).toBeNull();
+    const cachedRowAfterPut = await env.DB.prepare(
+      "SELECT value FROM system_settings WHERE key = 'agent_update_cache'",
+    ).first<{ value: string }>();
+    expect(cachedRowAfterPut).toBeNull();
+    const afterSwitchGet = await (
+      await authedFetch("/api/agent-update/config", cookie)
+    ).json<AgentUpdateConfigResponse>();
+    expect(afterSwitchGet.latest_release).toBeNull();
 
     globalFetchSpy.mockImplementation(async (input) => {
       const u = typeof input === "string" ? input : input instanceof URL ? input.toString() : input.url;
@@ -424,7 +451,16 @@ describe("Agent Auto-Update (`auto_update_v1`)", () => {
     const patchedBody = await disablePatch.json<{ node: NodeSummary }>();
     expect(patchedBody.node.auto_update_override).toBe(false);
 
-    // Seed release 0.3.0 in D1 cache and enable global auto-update
+    // Enable global auto-update first, then seed release 0.3.0 into D1 cache
+    await authedFetch("/api/agent-update/config", cookie, {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        auto_update_enabled: true,
+        channel: "stable",
+      }),
+    });
+
     const { fetcher: assetsFetcher } = makeFakeAssets("0.3.0");
     const ctx = createExecutionContext();
     await worker.fetch(
@@ -436,15 +472,6 @@ describe("Agent Auto-Update (`auto_update_v1`)", () => {
       ctx,
     );
     await waitOnExecutionContext(ctx);
-
-    await authedFetch("/api/agent-update/config", cookie, {
-      method: "PUT",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        auto_update_enabled: true,
-        channel: "stable",
-      }),
-    });
 
     // Subscribe browser client to watch fleet_tick updates
     const clientWs = await connectClientWs(cookie);
@@ -517,6 +544,52 @@ describe("Agent Auto-Update (`auto_update_v1`)", () => {
     );
     const ctrlNoCap = await firstNoCap;
     expect(ctrlNoCap.update).toBeUndefined();
+
+    // 4. Node transitioning auto_update_override false -> null while connected & global enabled receives immediate ctrl.update
+    const nTransition = await createTestNode(cookie, { name: "transition-node" });
+    await authedFetch(`/api/nodes/${nTransition.node.id}`, cookie, {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ auto_update_override: false }),
+    });
+    const wsTransition = await connectAgentWs(
+      nTransition.node.id,
+      nTransition.agent_token,
+    );
+    const firstTransition = nextWsMessage<AgentCtrlFrame>(
+      wsTransition,
+      (m) => m.t === "ctrl",
+    );
+    wsTransition.send(
+      JSON.stringify(
+        makeHelloFrame({
+          v: 2,
+          agent_ver: "0.2.0",
+          arch: "arm64",
+          capabilities: ["mb_v2", "auto_update_v1"],
+        }),
+      ),
+    );
+    expect((await firstTransition).update).toBeUndefined();
+
+    const transitionCtrlPromise = nextWsMessage<AgentCtrlFrame>(
+      wsTransition,
+      (m) => m.t === "ctrl" && Boolean(m.update),
+    );
+    const transitionPatch = await authedFetch(
+      `/api/nodes/${nTransition.node.id}`,
+      cookie,
+      {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ auto_update_override: null }),
+      },
+    );
+    expect(transitionPatch.status).toBe(200);
+    const transitionCtrl = await transitionCtrlPromise;
+    expect(transitionCtrl.update?.version).toBe("0.3.0");
+    expect(transitionCtrl.update?.sha256).toBe(ARM64_SHA);
+    wsTransition.close(1000, "done");
 
     // Manual trigger without force skips override=false node and nocap node
     const trigNoForce = await (
