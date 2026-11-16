@@ -7,6 +7,7 @@ import {
   compareTargetIds,
   computeLatencyAxis,
   defaultNetworkConfig,
+  defaultPiecewiseConfig,
   editableNetworkConfig,
   formatQualityValue,
   getTargetColor,
@@ -19,12 +20,14 @@ import {
   networkMeasurementKey,
   networkStatus,
   nextAvailableTargetId,
+  normalizePiecewiseConfig,
   panNetworkTimeWindow,
   parseLatencyScaleMode,
   qualityPlotRuns,
   resolveNetworkFetchRange,
   slicePointsForWindow,
   sortTargetsCanonical,
+  subdivideRunAtThresholds,
   validateNetworkConfig,
   zoomOutNetworkTimeWindow,
 } from "../src/utils/networkQuality.ts";
@@ -438,11 +441,13 @@ test("card metric compact formatters keep pairs concise and clamp fractional rat
   assert.equal(formatRateBpsText(0.4), "0 B/s");
 });
 
-test("computeLatencyAxis clamps rare outlier spikes in auto mode while preserving baseline headroom and linear/log modes", () => {
-  assert.equal(parseLatencyScaleMode(null), "auto");
+test("computeLatencyAxis compresses spikes continuously in auto piecewise mode, supports custom thresholds/scales, and preserves linear/log modes", () => {
+  assert.equal(parseLatencyScaleMode(null), "piecewise");
+  assert.equal(parseLatencyScaleMode("auto"), "piecewise");
+  assert.equal(parseLatencyScaleMode("piecewise"), "piecewise");
   assert.equal(parseLatencyScaleMode("linear"), "linear");
   assert.equal(parseLatencyScaleMode("log"), "log");
-  assert.equal(parseLatencyScaleMode("unexpected"), "auto");
+  assert.equal(parseLatencyScaleMode("unexpected"), "piecewise");
 
   // Screenshot-like scenario: 3 series with steady 100-230ms baselines and 7 spikes around 1280-1330ms.
   const cu = Array.from({ length: 90 }, (_, i) => 100 + (i % 16));
@@ -457,32 +462,39 @@ test("computeLatencyAxis clamps rare outlier spikes in auto mode while preservin
     1330,
   ];
 
-  const autoAxis = computeLatencyAxis([ct, cu, cm], "auto");
-  assert.equal(autoAxis.mode, "auto");
-  assert.ok(autoAxis.max >= 260 && autoAxis.max <= 320, `expected clamped ceiling ~280-300, got ${autoAxis.max}`);
-  assert.equal(autoAxis.clampedCount, 7);
+  const autoAxis = computeLatencyAxis([ct, cu, cm], "piecewise");
+  assert.equal(autoAxis.mode, "piecewise");
+  assert.equal(autoAxis.bands.length, 2);
+  assert.equal(autoAxis.thresholds.length, 1);
+  assert.ok(autoAxis.thresholds[0] >= 250 && autoAxis.thresholds[0] <= 300, `got ${autoAxis.thresholds[0]}`);
+  assert.equal(autoAxis.outlierCount, 7);
   assert.equal(autoAxis.rawPeak, 1330);
-  assert.ok(autoAxis.toRatio(230) > 0.65);
-  assert.equal(autoAxis.toRatio(1330), 1);
+  assert.ok(autoAxis.toRatio(230) > 0.55);
+  assert.ok(autoAxis.toRatio(1280) < autoAxis.toRatio(1330));
+  assert.ok(autoAxis.toRatio(1330) < 1);
 
   const linearAxis = computeLatencyAxis([ct, cu, cm], "linear");
   assert.equal(linearAxis.mode, "linear");
-  assert.equal(linearAxis.clampedCount, 0);
+  assert.equal(linearAxis.outlierCount, 0);
+  assert.equal(linearAxis.bands.length, 1);
   assert.ok(linearAxis.max >= 1460);
-  assert.equal(linearAxis.ticks[0], 0);
-  assert.equal(linearAxis.ticks[2], linearAxis.max);
+  assert.equal(linearAxis.ticks[0].value, 0);
+  assert.equal(linearAxis.ticks[2].value, linearAxis.max);
 
   const logAxis = computeLatencyAxis([ct, cu, cm], "log");
   assert.equal(logAxis.mode, "log");
-  assert.equal(logAxis.clampedCount, 0);
+  assert.equal(logAxis.outlierCount, 0);
   assert.ok(logAxis.min > 0 && logAxis.min <= 80);
   assert.ok(logAxis.toRatio(230) - logAxis.toRatio(100) >= 0.2);
   assert.ok(logAxis.toRatio(1330) <= 1);
-  assert.ok(logAxis.ticks[0] < logAxis.ticks[1] && logAxis.ticks[1] < logAxis.ticks[2]);
+  assert.ok(
+    logAxis.ticks[0].value < logAxis.ticks[1].value &&
+      logAxis.ticks[1].value < logAxis.ticks[2].value,
+  );
 
   const nearZeroLog = computeLatencyAxis([[0.2, 5, 1200]], "log");
   assert.equal(nearZeroLog.min, 0);
-  assert.ok(nearZeroLog.ticks[1] > 0 && nearZeroLog.ticks[1] < nearZeroLog.max);
+  assert.ok(nearZeroLog.ticks[1].value > 0 && nearZeroLog.ticks[1].value < nearZeroLog.max);
 
   // Multi-region scenario: 7 low-latency targets + 1 steady 240-260ms target with 2 spikes at 1400ms.
   const lowTargets = Array.from({ length: 7 }, () =>
@@ -493,18 +505,82 @@ test("computeLatencyAxis clamps rare outlier spikes in auto mode while preservin
     1400,
     1400,
   ];
-  const multiAxis = computeLatencyAxis([...lowTargets, highSteadyWithSpikes], "auto");
-  assert.ok(multiAxis.max >= 280 && multiAxis.max <= 400, `got ${multiAxis.max}`);
-  assert.equal(multiAxis.clampedCount, 2);
+  const multiAxis = computeLatencyAxis([...lowTargets, highSteadyWithSpikes], "piecewise");
+  assert.equal(multiAxis.bands.length, 2);
+  assert.ok(multiAxis.thresholds[0] >= 280, `got threshold ${multiAxis.thresholds[0]}`);
+  assert.equal(multiAxis.outlierCount, 2);
 
-  // Sustained congestion: 40% high values must NOT be falsely clamped as outliers.
+  // Sustained congestion: 40% high values must NOT be falsely compressed as outliers.
   const congested = [
     ...Array.from({ length: 30 }, () => 50),
     ...Array.from({ length: 20 }, () => 800),
   ];
-  const congestedAxis = computeLatencyAxis([congested], "auto");
-  assert.equal(congestedAxis.clampedCount, 0);
+  const congestedAxis = computeLatencyAxis([congested], "piecewise");
+  assert.equal(congestedAxis.bands.length, 1);
+  assert.equal(congestedAxis.outlierCount, 0);
   assert.ok(congestedAxis.max >= 800);
+
+  // Custom thresholds [250, 350] with share weights [70, 15, 15], even when rawPeak < 250.
+  const customShareCfg = {
+    ...defaultPiecewiseConfig(),
+    auto: false,
+    sizingMode: "share",
+    thresholds: [250, 350],
+    shares: [70, 15, 15],
+  };
+  const customLowData = computeLatencyAxis([[120, 180]], "piecewise", customShareCfg);
+  assert.ok(customLowData.max > 350);
+  assert.ok(Math.abs(customLowData.toRatio(250) - 0.7) < 1e-6);
+  assert.ok(Math.abs(customLowData.toRatio(350) - 0.85) < 1e-6);
+  assert.equal(customLowData.toRatio(customLowData.max), 1);
+
+  // Custom thresholds [250, 350] with scale multipliers [1, 0.5, 0.1].
+  const customScaleCfg = {
+    ...defaultPiecewiseConfig(),
+    auto: false,
+    sizingMode: "scale",
+    thresholds: [250, 350],
+    scales: [1, 0.5, 0.1],
+  };
+  const customScaleAxis = computeLatencyAxis([ct, cu, cm], "piecewise", customScaleCfg);
+  assert.equal(customScaleAxis.bands.length, 3);
+  assert.ok(Math.abs(customScaleAxis.bands[1].relativeSlope - 0.5) < 1e-6);
+  assert.ok(Math.abs(customScaleAxis.bands[2].relativeSlope - 0.1) < 1e-6);
+
+  // Config normalization sanitizes unsorted, near-duplicate, and out-of-range inputs.
+  const sanitized = normalizePiecewiseConfig({
+    auto: false,
+    sizingMode: "scale",
+    thresholds: [400, 250, 250.4, -5, 350, 999],
+    shares: [0, 5000],
+    scales: [0, 99],
+  });
+  assert.equal(sanitized.auto, false);
+  assert.equal(sanitized.sizingMode, "scale");
+  assert.deepEqual(sanitized.thresholds, [1, 250, 350]);
+  assert.equal(sanitized.shares.length, 4);
+  assert.equal(sanitized.scales.length, 4);
+  assert.equal(sanitized.scales[0], 0.01);
+  assert.equal(sanitized.scales[1], 20);
+
+  // Polyline threshold crossing subdivision in both rising and falling segments.
+  const subdivided = subdivideRunAtThresholds(
+    [
+      { ts: 100, value: 200 },
+      { ts: 200, value: 400 },
+      { ts: 300, value: 200 },
+    ],
+    [250, 350],
+  );
+  assert.deepEqual(subdivided, [
+    { ts: 100, value: 200 },
+    { ts: 125, value: 250 },
+    { ts: 175, value: 350 },
+    { ts: 200, value: 400 },
+    { ts: 225, value: 350 },
+    { ts: 275, value: 250 },
+    { ts: 300, value: 200 },
+  ]);
 });
 
 test("time-window helpers map fetch ranges, reuse cached supersets, clamp, pan, zoom, and preserve line continuity", () => {

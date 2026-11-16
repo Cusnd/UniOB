@@ -10,14 +10,18 @@ import {
   ChevronLeft,
   ChevronRight,
   Loader2,
+  Plus,
   RotateCcw,
   Settings2,
+  SlidersHorizontal,
+  X,
   ZoomOut,
 } from "lucide-react";
 import { api } from "../api/client";
 import { usePageVisible } from "../hooks/usePageVisible";
 import type { HorizonNode, MetricsRange } from "../types";
 import type {
+  LatencyPiecewiseConfig,
   LatencyScaleMode,
   NetworkDisplaySpan,
   NetworkQualityConfigResponse,
@@ -27,33 +31,71 @@ import type {
   NetworkTarget,
   NetworkTargetId,
   NetworkTimeWindow,
+  PiecewiseSizingMode,
 } from "../types/network-quality";
 import {
   chartModeToNetworkSpan,
   clampNetworkTimeWindow,
   computeLatencyAxis,
+  defaultPiecewiseConfig,
   formatQualityValue,
   getTargetColor,
   type LatencyAxisModel,
   loadNetworkHistory,
   MAX_NETWORK_RETENTION_SEC,
+  MAX_PIECEWISE_THRESHOLDS,
   NETWORK_DISPLAY_SPAN_OPTIONS,
   NETWORK_RESULTS,
   NETWORK_SPAN_SECONDS,
   networkMeasurementKey,
   networkStatus,
   normalizeIntervalSec,
+  normalizePiecewiseConfig,
   panNetworkTimeWindow,
   parseLatencyScaleMode,
   qualityPlotRuns,
   resolveNetworkFetchRange,
   slicePointsForWindow,
+  subdivideRunAtThresholds,
   zoomOutNetworkTimeWindow,
 } from "../utils/networkQuality";
 import { Badge, Button, Card, SegmentedControl } from "./ui/Primitives";
 import { NetworkQualitySettings } from "./NetworkQualitySettings";
 
 const LATENCY_SCALE_STORAGE_KEY = "uniob-nq-latency-scale";
+const PIECEWISE_GLOBAL_STORAGE_KEY = "uniob-nq-piecewise-config";
+const PIECEWISE_NODE_STORAGE_PREFIX = "uniob-nq-piecewise-node:";
+
+function loadPiecewisePref(nodeId: string): {
+  config: LatencyPiecewiseConfig;
+  perNode: boolean;
+} {
+  try {
+    const nodeRaw = localStorage.getItem(
+      `${PIECEWISE_NODE_STORAGE_PREFIX}${nodeId}`,
+    );
+    if (nodeRaw !== null) {
+      return {
+        config: normalizePiecewiseConfig(JSON.parse(nodeRaw)),
+        perNode: true,
+      };
+    }
+  } catch {
+    // ignore invalid node override
+  }
+  try {
+    const globalRaw = localStorage.getItem(PIECEWISE_GLOBAL_STORAGE_KEY);
+    if (globalRaw !== null) {
+      return {
+        config: normalizePiecewiseConfig(JSON.parse(globalRaw)),
+        perNode: false,
+      };
+    }
+  } catch {
+    // ignore invalid global config
+  }
+  return { config: defaultPiecewiseConfig(), perNode: false };
+}
 
 const pad2 = (n: number) => String(n).padStart(2, "0");
 
@@ -128,6 +170,277 @@ function nearestIndex(times: number[], value: number): number {
     : lo;
 }
 
+interface PiecewiseScaleEditorProps {
+  config: LatencyPiecewiseConfig;
+  perNode: boolean;
+  axis: LatencyAxisModel;
+  onChange: (nextConfig: LatencyPiecewiseConfig, nextPerNode: boolean) => void;
+}
+
+function PiecewiseScaleEditor({
+  config,
+  perNode,
+  axis,
+  onChange,
+}: PiecewiseScaleEditorProps): React.JSX.Element {
+  const [thresholdDrafts, setThresholdDrafts] = useState<string[]>(() =>
+    config.thresholds.map(String),
+  );
+  const [weightDrafts, setWeightDrafts] = useState<string[]>(() =>
+    (config.sizingMode === "share" ? config.shares : config.scales).map(String),
+  );
+
+  useEffect(() => {
+    setThresholdDrafts(config.thresholds.map(String));
+  }, [config.thresholds]);
+
+  useEffect(() => {
+    setWeightDrafts(
+      (config.sizingMode === "share" ? config.shares : config.scales).map(
+        String,
+      ),
+    );
+  }, [config.sizingMode, config.shares, config.scales]);
+
+  const parseDraftThresholds = (drafts: readonly string[]): number[] =>
+    drafts.map((s, idx) => {
+      const trimmed = s.trim();
+      if (!trimmed) return config.thresholds[idx] ?? 250;
+      const n = Number(trimmed);
+      return Number.isFinite(n) ? n : (config.thresholds[idx] ?? 250);
+    });
+
+  const commitThresholds = (drafts: readonly string[]) => {
+    const next = normalizePiecewiseConfig({
+      ...config,
+      thresholds: parseDraftThresholds(drafts),
+    });
+    setThresholdDrafts(next.thresholds.map(String));
+    onChange(next, perNode);
+  };
+
+  const commitWeights = (drafts: readonly string[]) => {
+    const currentList =
+      config.sizingMode === "share" ? config.shares : config.scales;
+    const parsed = drafts.map((s, idx) => {
+      const trimmed = s.trim();
+      if (!trimmed) return currentList[idx] ?? 1;
+      const n = Number(trimmed);
+      return Number.isFinite(n) ? n : (currentList[idx] ?? 1);
+    });
+    const next = normalizePiecewiseConfig({
+      ...config,
+      ...(config.sizingMode === "share"
+        ? { shares: parsed }
+        : { scales: parsed }),
+    });
+    setWeightDrafts(
+      (next.sizingMode === "share" ? next.shares : next.scales).map(String),
+    );
+    onChange(next, perNode);
+  };
+
+  const handleAddThreshold = () => {
+    const current = parseDraftThresholds(thresholdDrafts);
+    if (current.length >= MAX_PIECEWISE_THRESHOLDS) return;
+    const lastT = current[current.length - 1] ?? 250;
+    const nextT = Math.min(60000, Math.round(lastT + 100));
+    const next = normalizePiecewiseConfig({
+      ...config,
+      thresholds: [...current, nextT],
+      shares: [...config.shares, 15],
+      scales: [...config.scales, 0.08],
+    });
+    onChange(next, perNode);
+  };
+
+  const handleRemoveThreshold = (idx: number) => {
+    const current = parseDraftThresholds(thresholdDrafts);
+    if (current.length <= 1) return;
+    const next = normalizePiecewiseConfig({
+      ...config,
+      thresholds: current.filter((_, i) => i !== idx),
+      shares: config.shares.filter((_, i) => i !== idx + 1),
+      scales: config.scales.filter((_, i) => i !== idx + 1),
+    });
+    onChange(next, perNode);
+  };
+
+  return (
+    <div className="mb-2 space-y-2.5 rounded-[8px] border border-[var(--border-hairline)] bg-[var(--bg-subtle)] p-2.5 text-[11.5px]">
+      <div className="flex flex-wrap items-center justify-between gap-2">
+        <div className="flex flex-wrap items-center gap-2">
+          <SegmentedControl<"auto" | "custom">
+            size="xs"
+            ariaLabel="分段折点模式"
+            value={config.auto ? "auto" : "custom"}
+            onChange={(mode) =>
+              onChange({ ...config, auto: mode === "auto" }, perNode)
+            }
+            options={[
+              { value: "auto", label: "自动折点" },
+              { value: "custom", label: "自定义折点" },
+            ]}
+          />
+          {!config.auto && (
+            <SegmentedControl<PiecewiseSizingMode>
+              size="xs"
+              ariaLabel="分段缩放方式"
+              value={config.sizingMode}
+              onChange={(sizingMode) =>
+                onChange({ ...config, sizingMode }, perNode)
+              }
+              options={[
+                { value: "share", label: "高度占比 %" },
+                { value: "scale", label: "缩放倍率 ×" },
+              ]}
+            />
+          )}
+        </div>
+
+        <div className="flex items-center gap-2">
+          <label className="inline-flex min-h-6 cursor-pointer items-center gap-1.5 text-[11px] text-[var(--text-secondary)]">
+            <input
+              type="checkbox"
+              checked={perNode}
+              onChange={(event) => onChange(config, event.target.checked)}
+              className="accent-[var(--accent)]"
+            />
+            仅当前节点
+          </label>
+          <Button
+            size="xs"
+            variant="ghost"
+            onClick={() => onChange(defaultPiecewiseConfig(), false)}
+          >
+            重置
+          </Button>
+        </div>
+      </div>
+
+      {config.auto ? (
+        <p className="text-[11px] leading-relaxed text-[var(--text-secondary)]">
+          {axis.bands.length > 1
+            ? `已自动按正常延迟上界 ${axis.thresholds[0]} ms 分段：0–${axis.thresholds[0]} ms 占 76% 高度，>${axis.thresholds[0]} ms 压缩至顶部 24%（最高 ${formatQualityValue(axis.rawPeak, " ms")}）。切换到「自定义折点」可手动指定阈值与各段比例。`
+            : "当前窗口无显著离群尖峰，保持全量等距线性展示；切换到「自定义折点」可强制按指定阈值分段。"}
+        </p>
+      ) : (
+        <div className="space-y-2">
+          <div className="flex flex-wrap items-center gap-1.5">
+            <span className="shrink-0 text-[11px] font-medium text-[var(--text-secondary)]">
+              阈值点
+            </span>
+            {thresholdDrafts.map((draft, idx) => (
+              <span
+                key={idx}
+                className="inline-flex items-center gap-1 rounded-[6px] border border-[var(--border-subtle)] bg-[var(--bg-card)] px-1.5 py-0.5"
+              >
+                <input
+                  type="number"
+                  min={1}
+                  max={60000}
+                  step="any"
+                  aria-label={`阈值 ${idx + 1} (ms)`}
+                  value={draft}
+                  onChange={(event) => {
+                    const next = [...thresholdDrafts];
+                    next[idx] = event.target.value;
+                    setThresholdDrafts(next);
+                  }}
+                  onBlur={() => commitThresholds(thresholdDrafts)}
+                  onKeyDown={(event) => {
+                    if (event.key === "Enter") {
+                      event.preventDefault();
+                      event.currentTarget.blur();
+                    }
+                  }}
+                  className="font-mono-num min-h-6 w-14 bg-transparent text-right text-[11.5px] text-[var(--text-primary)] focus:outline-none"
+                />
+                <span className="text-[10.5px] text-[var(--text-tertiary)]">
+                  ms
+                </span>
+                {thresholdDrafts.length > 1 && (
+                  <button
+                    type="button"
+                    aria-label={`删除阈值 ${draft} ms`}
+                    onClick={() => handleRemoveThreshold(idx)}
+                    className="inline-flex min-h-6 min-w-6 cursor-pointer items-center justify-center rounded text-[var(--text-tertiary)] transition-colors hover:bg-[var(--bg-hover)] hover:text-[var(--text-primary)]"
+                  >
+                    <X aria-hidden="true" className="h-3 w-3" />
+                  </button>
+                )}
+              </span>
+            ))}
+            {thresholdDrafts.length < MAX_PIECEWISE_THRESHOLDS && (
+              <Button
+                size="xs"
+                variant="secondary"
+                onClick={handleAddThreshold}
+                icon={<Plus aria-hidden="true" className="h-3 w-3" />}
+              >
+                添加阈值
+              </Button>
+            )}
+          </div>
+
+          <div className="flex flex-wrap items-center gap-2">
+            <span className="shrink-0 text-[11px] font-medium text-[var(--text-secondary)]">
+              区间缩放
+            </span>
+            {axis.bands.map((band, idx) => {
+              const rangeLabel =
+                idx === axis.bands.length - 1
+                  ? `>${band.fromMs} ms`
+                  : `${band.fromMs}~${band.toMs} ms`;
+              const pct = Math.round((band.endRatio - band.startRatio) * 100);
+              const slopeText =
+                band.relativeSlope < 0.1
+                  ? band.relativeSlope.toFixed(2)
+                  : band.relativeSlope.toFixed(1);
+              return (
+                <label
+                  key={idx}
+                  className="inline-flex flex-wrap items-center gap-1.5 rounded-[6px] border border-[var(--border-hairline)] bg-[var(--bg-card)] px-2 py-1"
+                >
+                  <span className="font-mono-num text-[11px] text-[var(--text-secondary)]">
+                    {rangeLabel}
+                  </span>
+                  <input
+                    type="number"
+                    min={config.sizingMode === "share" ? 5 : 0.01}
+                    max={config.sizingMode === "share" ? 100 : 10}
+                    step={config.sizingMode === "share" ? 5 : 0.05}
+                    value={weightDrafts[idx] ?? ""}
+                    onChange={(event) => {
+                      const next = [...weightDrafts];
+                      next[idx] = event.target.value;
+                      setWeightDrafts(next);
+                    }}
+                    onBlur={() => commitWeights(weightDrafts)}
+                    onKeyDown={(event) => {
+                      if (event.key === "Enter") {
+                        event.preventDefault();
+                        event.currentTarget.blur();
+                      }
+                    }}
+                    className="font-mono-num min-h-6 w-12 rounded border border-[var(--border-hairline)] bg-[var(--bg-subtle)] px-1 text-right text-[11.5px] text-[var(--text-primary)] focus:border-[var(--accent)] focus:outline-none"
+                  />
+                  <span className="text-[10.5px] text-[var(--text-tertiary)]">
+                    {config.sizingMode === "share" ? "%" : "×"}
+                  </span>
+                  <span className="font-mono-num text-[10px] text-[var(--text-tertiary)]">
+                    占 {pct}% · {slopeText}×
+                  </span>
+                </label>
+              );
+            })}
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
 interface QualityChartProps {
   data: NetworkQualityQuery;
   metric: "latency_ms" | "failure_rate_pct";
@@ -137,6 +450,12 @@ interface QualityChartProps {
   nowSec: number;
   latencyScale?: LatencyScaleMode;
   onLatencyScaleChange?: (mode: LatencyScaleMode) => void;
+  piecewiseConfig?: LatencyPiecewiseConfig;
+  piecewisePerNode?: boolean;
+  onPiecewiseChange?: (
+    nextConfig: LatencyPiecewiseConfig,
+    nextPerNode: boolean,
+  ) => void;
   onSelectWindow?: (next: NetworkTimeWindow) => void;
   onResetWindow?: () => void;
   isCustomWindow?: boolean;
@@ -151,6 +470,9 @@ function QualityChart({
   nowSec,
   latencyScale,
   onLatencyScaleChange,
+  piecewiseConfig,
+  piecewisePerNode = false,
+  onPiecewiseChange,
   onSelectWindow,
   onResetWindow,
   isCustomWindow = false,
@@ -160,6 +482,7 @@ function QualityChart({
   const [hover, setHover] = useState<number | null>(null);
   const [pointer, setPointer] = useState<{ x: number; y: number } | null>(null);
   const [brushPx, setBrushPx] = useState<[number, number] | null>(null);
+  const [editorOpen, setEditorOpen] = useState(false);
   const plotRef = useRef<HTMLDivElement>(null);
   const tooltipRef = useRef<HTMLDivElement>(null);
   const dragRef = useRef<{
@@ -169,6 +492,15 @@ function QualityChart({
     active: boolean;
   } | null>(null);
   const [width, setWidth] = useState(650);
+
+  const activePiecewiseConfig = piecewiseConfig ?? defaultPiecewiseConfig();
+  const effectiveLatencyScale = latencyScale ?? "piecewise";
+
+  useEffect(() => {
+    if (effectiveLatencyScale !== "piecewise") {
+      setEditorOpen(false);
+    }
+  }, [effectiveLatencyScale]);
 
   useEffect(() => {
     const element = plotRef.current;
@@ -221,8 +553,23 @@ function QualityChart({
             min: 0,
             max: 100,
             rawPeak: 100,
-            clampedCount: 0,
-            ticks: [0, 50, 100],
+            outlierCount: 0,
+            thresholds: [],
+            bands: [
+              {
+                fromMs: 0,
+                toMs: 100,
+                startRatio: 0,
+                endRatio: 1,
+                compressed: false,
+                relativeSlope: 1,
+              },
+            ],
+            ticks: [
+              { value: 0, isThreshold: false },
+              { value: 50, isThreshold: false },
+              { value: 100, isThreshold: false },
+            ],
             toRatio: (v) => Math.max(0, Math.min(1, v / 100)),
           }
         : computeLatencyAxis(
@@ -233,28 +580,23 @@ function QualityChart({
                   : [],
               ),
             ),
-            latencyScale ?? "auto",
+            effectiveLatencyScale,
+            activePiecewiseConfig,
           );
 
-    const seriesWithClamped = series.map((s) => ({
-      ...s,
-      clampedPoints:
-        metric === "latency_ms" && axis.mode === "auto" && axis.clampedCount > 0
-          ? s.visiblePoints.filter(
-              (p) =>
-                p.latency_ms != null &&
-                Number.isFinite(p.latency_ms) &&
-                p.latency_ms > axis.max,
-            )
-          : [],
-    }));
-
     return {
-      series: seriesWithClamped,
+      series,
       times,
       axis,
     };
-  }, [data, metric, targetMeta, timeWindow, latencyScale]);
+  }, [
+    data,
+    metric,
+    targetMeta,
+    timeWindow,
+    effectiveLatencyScale,
+    activePiecewiseConfig,
+  ]);
 
   useEffect(() => {
     setHover(null);
@@ -364,6 +706,39 @@ function QualityChart({
     setHover(nearestIndex(prepared.times, ts));
   };
 
+  const visibleTickLabels = useMemo(() => {
+    const ticks = prepared.axis.ticks;
+    const priorityOrder = [
+      ...ticks.filter(
+        (t) => t.value === prepared.axis.min || t.value === prepared.axis.max,
+      ),
+      ...ticks.filter(
+        (t) =>
+          t.isThreshold &&
+          t.value !== prepared.axis.min &&
+          t.value !== prepared.axis.max,
+      ),
+      ...ticks.filter(
+        (t) =>
+          !t.isThreshold &&
+          t.value !== prepared.axis.min &&
+          t.value !== prepared.axis.max,
+      ),
+    ];
+    const acceptedYs: number[] = [];
+    const shown = new Set<number>();
+    for (const tick of priorityOrder) {
+      const py =
+        top +
+        (1 - prepared.axis.toRatio(tick.value)) * (height - top - bottom);
+      if (acceptedYs.every((existing) => Math.abs(existing - py) >= 11)) {
+        acceptedYs.push(py);
+        shown.add(tick.value);
+      }
+    }
+    return shown;
+  }, [prepared.axis, height, top, bottom]);
+
   const accessibleValue =
     selectedTime === null
       ? "使用左右方向键查看测量"
@@ -382,22 +757,51 @@ function QualityChart({
             {title}{" "}
             <span className="font-normal text-[var(--text-tertiary)]">{unit}</span>
           </h4>
-          {metric === "latency_ms" && prepared.axis.clampedCount > 0 && (
-            <button
-              type="button"
-              onClick={() => onLatencyScaleChange?.("linear")}
-              title="点击切换全量纵轴查看完整尖峰"
-              style={{
-                backgroundColor: "var(--status-warn-bg)",
-                color: "var(--status-warn-ink)",
-                border: "1px solid var(--status-warn-border)",
-              }}
-              className="inline-flex min-h-6 cursor-pointer items-center rounded-[5px] px-1.5 text-[10.5px] font-medium transition-opacity hover:opacity-85"
-            >
-              ▲ {prepared.axis.clampedCount} 处尖峰已限幅 (最高{" "}
-              {formatQualityValue(prepared.axis.rawPeak, " ms")})
-            </button>
-          )}
+          {metric === "latency_ms" &&
+            effectiveLatencyScale === "piecewise" &&
+            onPiecewiseChange && (
+              <button
+                type="button"
+                aria-expanded={editorOpen}
+                onClick={() => setEditorOpen((open) => !open)}
+                title="点击配置分段折点与各段缩放比例"
+                style={
+                  !activePiecewiseConfig.auto
+                    ? {
+                        backgroundColor: "var(--accent-soft)",
+                        color: "var(--accent-ink)",
+                        border: "1px solid var(--accent-border)",
+                      }
+                    : prepared.axis.bands.length > 1
+                      ? {
+                          backgroundColor: "var(--status-warn-bg)",
+                          color: "var(--status-warn-ink)",
+                          border: "1px solid var(--status-warn-border)",
+                        }
+                      : {
+                          backgroundColor: "var(--bg-subtle)",
+                          color: "var(--text-secondary)",
+                          border: "1px solid var(--border-subtle)",
+                        }
+                }
+                className="inline-flex min-h-6 cursor-pointer items-center gap-1 rounded-[5px] px-1.5 text-[10.5px] font-medium transition-opacity hover:opacity-85"
+              >
+                <SlidersHorizontal aria-hidden="true" className="h-3 w-3 shrink-0" />
+                {!activePiecewiseConfig.auto ? (
+                  <span>
+                    折点 {prepared.axis.thresholds.join(" / ")} ms
+                  </span>
+                ) : prepared.axis.bands.length > 1 ? (
+                  <span>
+                    折点 &gt;{prepared.axis.thresholds[0]}ms 已压缩 (
+                    {prepared.axis.outlierCount} 尖峰 · 最高{" "}
+                    {formatQualityValue(prepared.axis.rawPeak, " ms")})
+                  </span>
+                ) : (
+                  <span>折点设置</span>
+                )}
+              </button>
+            )}
         </div>
         <div className="flex flex-wrap items-center gap-3 text-[11px]">
           <div className="flex flex-wrap gap-3">
@@ -420,10 +824,10 @@ function QualityChart({
             <SegmentedControl<LatencyScaleMode>
               size="xs"
               ariaLabel="TCP 延迟纵轴刻度"
-              value={latencyScale ?? "auto"}
+              value={effectiveLatencyScale}
               onChange={onLatencyScaleChange}
               options={[
-                { value: "auto", label: "智能" },
+                { value: "piecewise", label: "分段" },
                 { value: "linear", label: "全量" },
                 { value: "log", label: "对数" },
               ]}
@@ -431,6 +835,18 @@ function QualityChart({
           )}
         </div>
       </div>
+
+      {metric === "latency_ms" &&
+        effectiveLatencyScale === "piecewise" &&
+        editorOpen &&
+        onPiecewiseChange && (
+          <PiecewiseScaleEditor
+            config={activePiecewiseConfig}
+            perNode={piecewisePerNode}
+            axis={prepared.axis}
+            onChange={onPiecewiseChange}
+          />
+        )}
 
       <div
         ref={plotRef}
@@ -585,38 +1001,75 @@ function QualityChart({
               />
             </clipPath>
           </defs>
+          <g clipPath={`url(#${safeClipId})`}>
+            {prepared.axis.bands.map((band, idx) => {
+              if (!band.compressed) return null;
+              const yTop = y(band.toMs);
+              const yBottom = y(band.fromMs);
+              const bandH = Math.max(0, yBottom - yTop);
+              const slopeLabel =
+                band.relativeSlope < 0.1
+                  ? band.relativeSlope.toFixed(2)
+                  : band.relativeSlope.toFixed(1);
+              return (
+                <g key={`compressed-band-${idx}`}>
+                  <rect
+                    x={left}
+                    y={yTop}
+                    width={Math.max(0, width - left - right)}
+                    height={bandH}
+                    fill="var(--status-warn-bg)"
+                    opacity="0.45"
+                  />
+                  {bandH >= 16 && (
+                    <text
+                      x={width - right - 4}
+                      y={yTop + 11}
+                      textAnchor="end"
+                      fill="var(--text-tertiary)"
+                      fontSize="9.5"
+                    >
+                      压缩 {slopeLabel}×
+                    </text>
+                  )}
+                </g>
+              );
+            })}
+          </g>
           {prepared.axis.ticks.map((tick, idx) => {
-            const isClampedCeiling =
-              prepared.axis.clampedCount > 0 &&
-              idx === prepared.axis.ticks.length - 1;
-            const py = y(tick);
+            const py = y(tick.value);
+            const showLabel = visibleTickLabels.has(tick.value);
             return (
-              <g key={`${idx}-${tick}`}>
+              <g key={`${idx}-${tick.value}`}>
                 <line
                   x1={left}
                   x2={width - right}
                   y1={py}
                   y2={py}
                   stroke={
-                    isClampedCeiling
+                    tick.isThreshold
                       ? "var(--status-warn-border)"
                       : "var(--border-hairline)"
                   }
-                  strokeDasharray="3 4"
+                  strokeWidth={tick.isThreshold ? 1 : undefined}
+                  strokeDasharray={tick.isThreshold ? "4 3" : "3 4"}
                 />
-                <text
-                  x={left - 7}
-                  y={py + 3}
-                  textAnchor="end"
-                  fill={
-                    isClampedCeiling
-                      ? "var(--status-warn-ink)"
-                      : "var(--text-tertiary)"
-                  }
-                  fontSize="10"
-                >
-                  {Math.round(tick)}
-                </text>
+                {showLabel && (
+                  <text
+                    x={left - 7}
+                    y={py + 3}
+                    textAnchor="end"
+                    fill={
+                      tick.isThreshold
+                        ? "var(--status-warn-ink)"
+                        : "var(--text-tertiary)"
+                    }
+                    fontWeight={tick.isThreshold ? 600 : undefined}
+                    fontSize="10"
+                  >
+                    {Math.round(tick.value)}
+                  </text>
+                )}
               </g>
             );
           })}
@@ -630,51 +1083,37 @@ function QualityChart({
                 strokeLinecap="round"
                 strokeLinejoin="round"
               >
-                {s.runs.map((run, i) =>
-                  run.length === 1 ? (
-                    <circle
-                      key={i}
-                      cx={x(run[0]!.ts)}
-                      cy={y(run[0]!.value)}
-                      r="2"
-                      fill={s.color}
-                      stroke="none"
-                    />
-                  ) : (
+                {s.runs.map((run, i) => {
+                  if (run.length === 1) {
+                    return (
+                      <circle
+                        key={i}
+                        cx={x(run[0]!.ts)}
+                        cy={y(run[0]!.value)}
+                        r="2"
+                        fill={s.color}
+                        stroke="none"
+                      />
+                    );
+                  }
+                  const pathPoints =
+                    prepared.axis.thresholds.length > 0
+                      ? subdivideRunAtThresholds(run, prepared.axis.thresholds)
+                      : run;
+                  return (
                     <path
                       key={i}
-                      d={run
+                      d={pathPoints
                         .map(
                           (p, j) =>
                             `${j ? "L" : "M"}${x(p.ts).toFixed(2)},${y(p.value).toFixed(2)}`,
                         )
                         .join(" ")}
                     />
-                  ),
-                )}
+                  );
+                })}
               </g>
             ))}
-            {prepared.axis.clampedCount > 0 &&
-              prepared.series.map((s) => {
-                const markerXs: number[] = [];
-                let lastMarkerX = -Infinity;
-                for (const p of s.clampedPoints) {
-                  const cx = x(p.ts);
-                  if (cx - lastMarkerX >= 4) {
-                    markerXs.push(cx);
-                    lastMarkerX = cx;
-                  }
-                }
-                return markerXs.map((cx, i) => (
-                  <polygon
-                    key={`${s.target_id}-spike-${i}`}
-                    points={`${cx.toFixed(1)},${(top - 3.5).toFixed(1)} ${(cx - 3.2).toFixed(1)},${(top + 2.5).toFixed(1)} ${(cx + 3.2).toFixed(1)},${(top + 2.5).toFixed(1)}`}
-                    fill={s.color}
-                    stroke="var(--bg-card)"
-                    strokeWidth="0.8"
-                  />
-                ));
-              })}
             {brushPx && (
               <rect
                 x={brushPx[0]}
@@ -801,9 +1240,14 @@ export function NetworkQualityPanel({
         localStorage.getItem(LATENCY_SCALE_STORAGE_KEY),
       );
     } catch {
-      return "auto";
+      return "piecewise";
     }
   });
+  const [piecewisePref, setPiecewisePref] = useState<{
+    nodeId: string;
+    config: LatencyPiecewiseConfig;
+    perNode: boolean;
+  }>(() => ({ nodeId: node.id, ...loadPiecewisePref(node.id) }));
   const [cacheEntry, setCacheEntry] = useState<{
     nodeId: string;
     byRange: Partial<
@@ -900,6 +1344,43 @@ export function NetworkQualityPanel({
       // ignore storage errors
     }
   };
+
+  const activePiecewise =
+    piecewisePref.nodeId === node.id
+      ? piecewisePref
+      : { nodeId: node.id, ...loadPiecewisePref(node.id) };
+
+  const handlePiecewiseChange = (
+    nextConfig: LatencyPiecewiseConfig,
+    nextPerNode: boolean,
+  ) => {
+    const normalized = normalizePiecewiseConfig(nextConfig);
+    setPiecewisePref({
+      nodeId: node.id,
+      config: normalized,
+      perNode: nextPerNode,
+    });
+    try {
+      if (nextPerNode) {
+        localStorage.setItem(
+          `${PIECEWISE_NODE_STORAGE_PREFIX}${node.id}`,
+          JSON.stringify(normalized),
+        );
+      } else {
+        localStorage.removeItem(`${PIECEWISE_NODE_STORAGE_PREFIX}${node.id}`);
+        localStorage.setItem(
+          PIECEWISE_GLOBAL_STORAGE_KEY,
+          JSON.stringify(normalized),
+        );
+      }
+    } catch {
+      // ignore storage errors
+    }
+  };
+
+  useEffect(() => {
+    setPiecewisePref({ nodeId: node.id, ...loadPiecewisePref(node.id) });
+  }, [node.id]);
 
   useEffect(() => {
     setSettingsOpen(false);
@@ -1440,6 +1921,9 @@ export function NetworkQualityPanel({
                     nowSec={current.server_time}
                     latencyScale={latencyScale}
                     onLatencyScaleChange={handleLatencyScaleChange}
+                    piecewiseConfig={activePiecewise.config}
+                    piecewisePerNode={activePiecewise.perNode}
+                    onPiecewiseChange={handlePiecewiseChange}
                     onSelectWindow={(next) => setCustomWindow(next)}
                     onResetWindow={() => setCustomWindow(null)}
                     isCustomWindow={isCustomWindow}

@@ -1,7 +1,15 @@
 export type NetworkTargetId = string;
 export type NetworkQualityRange = "1h" | "24h" | "7d" | "30d";
 export type NetworkDisplaySpan = "15m" | "30m" | "1h" | "6h" | "24h" | "7d" | "30d";
-export type LatencyScaleMode = "auto" | "linear" | "log";
+export type LatencyScaleMode = "piecewise" | "linear" | "log";
+export type PiecewiseSizingMode = "share" | "scale";
+export interface LatencyPiecewiseConfig {
+  auto: boolean;
+  sizingMode: PiecewiseSizingMode;
+  thresholds: number[];
+  shares: number[];
+  scales: number[];
+}
 export interface NetworkTimeWindow {
   start: number;
   end: number;

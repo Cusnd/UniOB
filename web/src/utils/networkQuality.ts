@@ -1,4 +1,5 @@
 import type {
+  LatencyPiecewiseConfig,
   LatencyScaleMode,
   NetworkDisplaySpan,
   NetworkQualityConfig,
@@ -10,6 +11,7 @@ import type {
   NetworkTarget,
   NetworkTargetId,
   NetworkTimeWindow,
+  PiecewiseSizingMode,
 } from "../types/network-quality.ts";
 import type { MetricsRange, NodeMetricsSnapshot } from "../types.ts";
 
@@ -801,10 +803,89 @@ export function slicePointsForWindow(
   };
 }
 
+export const MAX_PIECEWISE_THRESHOLDS = 3;
+
+export function defaultPiecewiseConfig(): LatencyPiecewiseConfig {
+  return {
+    auto: true,
+    sizingMode: "share",
+    thresholds: [250, 350],
+    shares: [70, 15, 15],
+    scales: [1, 0.4, 0.08],
+  };
+}
+
 export function parseLatencyScaleMode(
   val: string | null | undefined,
 ): LatencyScaleMode {
-  return val === "linear" || val === "log" || val === "auto" ? val : "auto";
+  if (val === "linear" || val === "log" || val === "piecewise") return val;
+  return "piecewise";
+}
+
+function defaultBandShares(bandCount: number): number[] {
+  if (bandCount === 2) return [75, 25];
+  if (bandCount === 3) return [70, 15, 15];
+  return [64, 14, 12, 10];
+}
+
+function defaultBandScales(bandCount: number): number[] {
+  if (bandCount === 2) return [1, 0.12];
+  if (bandCount === 3) return [1, 0.4, 0.08];
+  return [1, 0.5, 0.2, 0.06];
+}
+
+export function normalizePiecewiseConfig(raw: unknown): LatencyPiecewiseConfig {
+  const defaults = defaultPiecewiseConfig();
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) {
+    return defaults;
+  }
+  const obj = raw as Record<string, unknown>;
+  const auto = typeof obj.auto === "boolean" ? obj.auto : true;
+  const sizingMode: PiecewiseSizingMode =
+    obj.sizingMode === "scale" ? "scale" : "share";
+
+  const rawThresholds = Array.isArray(obj.thresholds)
+    ? obj.thresholds
+        .filter((v): v is number => typeof v === "number" && Number.isFinite(v))
+        .map((v) => Math.round(Math.min(60000, Math.max(1, v)) * 10) / 10)
+        .sort((a, b) => a - b)
+    : [];
+
+  const thresholds: number[] = [];
+  for (const v of rawThresholds) {
+    if (
+      thresholds.length === 0 ||
+      v - thresholds[thresholds.length - 1]! >= 1
+    ) {
+      thresholds.push(v);
+      if (thresholds.length >= MAX_PIECEWISE_THRESHOLDS) break;
+    }
+  }
+  if (thresholds.length === 0) {
+    thresholds.push(...defaults.thresholds);
+  }
+
+  const bandCount = thresholds.length + 1;
+  const fallbackShares = defaultBandShares(bandCount);
+  const fallbackScales = defaultBandScales(bandCount);
+
+  const shares = Array.from({ length: bandCount }, (_, i) => {
+    const v = Array.isArray(obj.shares) ? obj.shares[i] : undefined;
+    if (typeof v === "number" && Number.isFinite(v)) {
+      return Math.round(Math.min(1000, Math.max(1, v)) * 10) / 10;
+    }
+    return fallbackShares[i] ?? 10;
+  });
+
+  const scales = Array.from({ length: bandCount }, (_, i) => {
+    const v = Array.isArray(obj.scales) ? obj.scales[i] : undefined;
+    if (typeof v === "number" && Number.isFinite(v)) {
+      return Math.round(Math.min(20, Math.max(0.01, v)) * 100) / 100;
+    }
+    return fallbackScales[i] ?? 0.1;
+  });
+
+  return { auto, sizingMode, thresholds, shares, scales };
 }
 
 function niceEvenCeiling(raw: number): number {
@@ -820,6 +901,19 @@ function niceEvenCeiling(raw: number): number {
   return Math.ceil(target / 2) * 2;
 }
 
+function niceThresholdStep(raw: number): number {
+  if (!Number.isFinite(raw) || raw <= 2) return 2;
+  if (raw <= 10) return Math.ceil(raw);
+  const k = Math.max(0, Math.floor(Math.log10(raw)) - 1);
+  const scale = Math.pow(10, k);
+  const target = Math.ceil(raw);
+  for (const m of [10, 12, 15, 20, 25, 30, 35, 40, 50, 60, 75, 80, 100]) {
+    const candidate = m * scale;
+    if (candidate >= target) return candidate;
+  }
+  return Math.ceil(target);
+}
+
 function quantileSorted(sorted: readonly number[], q: number): number {
   if (!sorted.length) return 0;
   if (sorted.length === 1) return sorted[0]!;
@@ -829,14 +923,201 @@ function quantileSorted(sorted: readonly number[], q: number): number {
   return sorted[lo]! + (sorted[hi]! - sorted[lo]!) * (pos - lo);
 }
 
+export interface LatencyAxisBand {
+  fromMs: number;
+  toMs: number;
+  startRatio: number;
+  endRatio: number;
+  compressed: boolean;
+  relativeSlope: number;
+}
+
+export interface LatencyAxisTick {
+  value: number;
+  isThreshold: boolean;
+}
+
 export interface LatencyAxisModel {
   mode: LatencyScaleMode;
   min: number;
   max: number;
   rawPeak: number;
-  clampedCount: number;
-  ticks: [number, number, number];
+  outlierCount: number;
+  thresholds: number[];
+  bands: LatencyAxisBand[];
+  ticks: LatencyAxisTick[];
   toRatio: (value: number) => number;
+}
+
+function normalizeBandRatios(
+  rawHeights: readonly number[],
+  minShare: number,
+): number[] {
+  const n = rawHeights.length;
+  const fixed = new Array<boolean>(n).fill(false);
+  const shares = new Array<number>(n).fill(0);
+  let remainingBudget = 1;
+
+  while (true) {
+    let flexSum = 0;
+    for (let i = 0; i < n; i++) {
+      if (!fixed[i]) flexSum += Math.max(1e-9, rawHeights[i]!);
+    }
+    let newlyFixed = false;
+    for (let i = 0; i < n; i++) {
+      if (fixed[i]) continue;
+      const ratio =
+        (Math.max(1e-9, rawHeights[i]!) / Math.max(1e-9, flexSum)) *
+        remainingBudget;
+      if (ratio < minShare) {
+        fixed[i] = true;
+        shares[i] = minShare;
+        remainingBudget -= minShare;
+        newlyFixed = true;
+      } else {
+        shares[i] = ratio;
+      }
+    }
+    if (!newlyFixed) break;
+  }
+
+  const total = shares.reduce((a, b) => a + b, 0);
+  return total > 0 ? shares.map((s) => s / total) : shares.map(() => 1 / n);
+}
+
+function buildPiecewiseAxis(
+  thresholds: readonly number[],
+  topMax: number,
+  sizingMode: PiecewiseSizingMode,
+  weights: readonly number[],
+  rawPeak: number,
+  allValues: readonly number[],
+): LatencyAxisModel {
+  const highestThreshold = thresholds[thresholds.length - 1]!;
+  const effectiveMax = Math.max(
+    topMax,
+    niceEvenCeiling(highestThreshold * 1.2),
+  );
+  const bounds = [0, ...thresholds, effectiveMax];
+  const m = bounds.length - 1;
+  const rawHeights = Array.from({ length: m }, (_, i) => {
+    const delta = Math.max(1e-6, bounds[i + 1]! - bounds[i]!);
+    if (sizingMode === "share") {
+      return Math.max(1, weights[i] ?? 10);
+    }
+    return delta * Math.max(0.01, weights[i] ?? 1);
+  });
+  const bandRatios = normalizeBandRatios(
+    rawHeights,
+    sizingMode === "share" ? 0.08 : 0.06,
+  );
+
+  let acc = 0;
+  const rawBands = Array.from({ length: m }, (_, i) => {
+    const fromMs = bounds[i]!;
+    const toMs = bounds[i + 1]!;
+    const startRatio = acc;
+    acc = i === m - 1 ? 1 : acc + bandRatios[i]!;
+    const endRatio = acc;
+    const slope = (endRatio - startRatio) / Math.max(1e-6, toMs - fromMs);
+    return { fromMs, toMs, startRatio, endRatio, slope };
+  });
+
+  const baseSlope = Math.max(1e-9, rawBands[0]!.slope);
+  const bands: LatencyAxisBand[] = rawBands.map((b, i) => {
+    const relativeSlope = b.slope / baseSlope;
+    return {
+      fromMs: b.fromMs,
+      toMs: b.toMs,
+      startRatio: b.startRatio,
+      endRatio: b.endRatio,
+      compressed: i > 0 && relativeSlope < 0.75,
+      relativeSlope,
+    };
+  });
+
+  const ticks: LatencyAxisTick[] = [{ value: 0, isThreshold: false }];
+  if (bands[0]!.endRatio >= 0.45 && thresholds[0]! >= 4) {
+    ticks.push({ value: Math.round(thresholds[0]! / 2), isThreshold: false });
+  }
+  for (const t of thresholds) {
+    ticks.push({ value: t, isThreshold: true });
+  }
+  ticks.push({ value: effectiveMax, isThreshold: false });
+
+  const firstCompressedFrom =
+    bands.find((b) => b.compressed)?.fromMs ?? Infinity;
+  const outlierCount = Number.isFinite(firstCompressedFrom)
+    ? allValues.filter((v) => v > firstCompressedFrom).length
+    : 0;
+
+  return {
+    mode: "piecewise",
+    min: 0,
+    max: effectiveMax,
+    rawPeak,
+    outlierCount,
+    thresholds: [...thresholds],
+    bands,
+    ticks,
+    toRatio: (value: number) => {
+      if (!Number.isFinite(value) || value <= 0) return 0;
+      if (value >= effectiveMax) return 1;
+      for (const band of bands) {
+        if (value <= band.toMs) {
+          const span = Math.max(1e-6, band.toMs - band.fromMs);
+          return (
+            band.startRatio +
+            ((value - band.fromMs) / span) * (band.endRatio - band.startRatio)
+          );
+        }
+      }
+      return 1;
+    },
+  };
+}
+
+export function subdivideRunAtThresholds(
+  run: readonly { ts: number; value: number }[],
+  thresholds: readonly number[],
+): { ts: number; value: number }[] {
+  if (run.length <= 1 || thresholds.length === 0) {
+    return run.map((p) => ({ ts: p.ts, value: p.value }));
+  }
+  const sortedAsc = [...thresholds].sort((a, b) => a - b);
+  const sortedDesc = [...sortedAsc].reverse();
+  const out: { ts: number; value: number }[] = [
+    { ts: run[0]!.ts, value: run[0]!.value },
+  ];
+  for (let i = 1; i < run.length; i++) {
+    const p0 = run[i - 1]!;
+    const p1 = run[i]!;
+    if (p1.value > p0.value) {
+      for (const t of sortedAsc) {
+        if (p0.value < t && t < p1.value) {
+          out.push({
+            ts:
+              p0.ts +
+              ((t - p0.value) / (p1.value - p0.value)) * (p1.ts - p0.ts),
+            value: t,
+          });
+        }
+      }
+    } else if (p1.value < p0.value) {
+      for (const t of sortedDesc) {
+        if (p1.value < t && t < p0.value) {
+          out.push({
+            ts:
+              p0.ts +
+              ((p0.value - t) / (p0.value - p1.value)) * (p1.ts - p0.ts),
+            value: t,
+          });
+        }
+      }
+    }
+    out.push({ ts: p1.ts, value: p1.value });
+  }
+  return out;
 }
 
 const LOG_FLOOR_CANDIDATES = [500, 200, 100, 50, 20, 10, 5] as const;
@@ -848,6 +1129,7 @@ const LOG_NICE_TICKS = [
 export function computeLatencyAxis(
   seriesValues: readonly (readonly number[])[],
   mode: LatencyScaleMode,
+  piecewiseConfig?: LatencyPiecewiseConfig,
 ): LatencyAxisModel {
   const nonEmpty: number[][] = [];
   for (const series of seriesValues) {
@@ -863,8 +1145,23 @@ export function computeLatencyAxis(
       min: 0,
       max: 100,
       rawPeak: 0,
-      clampedCount: 0,
-      ticks: [0, 50, 100],
+      outlierCount: 0,
+      thresholds: [],
+      bands: [
+        {
+          fromMs: 0,
+          toMs: 100,
+          startRatio: 0,
+          endRatio: 1,
+          compressed: false,
+          relativeSlope: 1,
+        },
+      ],
+      ticks: [
+        { value: 0, isThreshold: false },
+        { value: 50, isThreshold: false },
+        { value: 100, isThreshold: false },
+      ],
       toRatio: (v) => Math.max(0, Math.min(1, v / 100)),
     };
   }
@@ -878,13 +1175,40 @@ export function computeLatencyAxis(
       min: 0,
       max: fullMax,
       rawPeak,
-      clampedCount: 0,
-      ticks: [0, fullMax / 2, fullMax],
+      outlierCount: 0,
+      thresholds: [],
+      bands: [
+        {
+          fromMs: 0,
+          toMs: fullMax,
+          startRatio: 0,
+          endRatio: 1,
+          compressed: false,
+          relativeSlope: 1,
+        },
+      ],
+      ticks: [
+        { value: 0, isThreshold: false },
+        { value: fullMax / 2, isThreshold: false },
+        { value: fullMax, isThreshold: false },
+      ],
       toRatio: (v) => Math.max(0, Math.min(1, v / fullMax)),
     };
   }
 
-  if (mode === "auto") {
+  if (mode === "piecewise") {
+    const cfg = normalizePiecewiseConfig(piecewiseConfig);
+    if (!cfg.auto) {
+      return buildPiecewiseAxis(
+        cfg.thresholds,
+        fullMax,
+        cfg.sizingMode,
+        cfg.sizingMode === "share" ? cfg.shares : cfg.scales,
+        rawPeak,
+        all,
+      );
+    }
+
     const perSeriesNormals = nonEmpty.map((vals) => {
       if (vals.length < 6) return vals[vals.length - 1]!;
       const q1 = quantileSorted(vals, 0.25);
@@ -903,29 +1227,34 @@ export function computeLatencyAxis(
     });
     const normalPeak = Math.max(1, ...perSeriesNormals);
     if (rawPeak > normalPeak * 1.45) {
-      const candidateMax = niceEvenCeiling(Math.max(2, normalPeak * 1.18));
-      if (candidateMax < fullMax * 0.85) {
-        const clampedCount = all.filter((v) => v > candidateMax).length;
-        if (clampedCount > 0) {
-          return {
-            mode: "auto",
-            min: 0,
-            max: candidateMax,
-            rawPeak,
-            clampedCount,
-            ticks: [0, candidateMax / 2, candidateMax],
-            toRatio: (v) => Math.max(0, Math.min(1, v / candidateMax)),
-          };
-        }
+      const autoT = niceThresholdStep(Math.max(4, normalPeak * 1.12));
+      if (autoT < fullMax * 0.82 && all.some((v) => v > autoT)) {
+        return buildPiecewiseAxis([autoT], fullMax, "share", [76, 24], rawPeak, all);
       }
     }
+
     return {
-      mode: "auto",
+      mode: "piecewise",
       min: 0,
       max: fullMax,
       rawPeak,
-      clampedCount: 0,
-      ticks: [0, fullMax / 2, fullMax],
+      outlierCount: 0,
+      thresholds: [],
+      bands: [
+        {
+          fromMs: 0,
+          toMs: fullMax,
+          startRatio: 0,
+          endRatio: 1,
+          compressed: false,
+          relativeSlope: 1,
+        },
+      ],
+      ticks: [
+        { value: 0, isThreshold: false },
+        { value: fullMax / 2, isThreshold: false },
+        { value: fullMax, isThreshold: false },
+      ],
       toRatio: (v) => Math.max(0, Math.min(1, v / fullMax)),
     };
   }
@@ -956,8 +1285,23 @@ export function computeLatencyAxis(
       min: floor,
       max: fullMax,
       rawPeak,
-      clampedCount: 0,
-      ticks: [floor, midTick, fullMax],
+      outlierCount: 0,
+      thresholds: [],
+      bands: [
+        {
+          fromMs: floor,
+          toMs: fullMax,
+          startRatio: 0,
+          endRatio: 1,
+          compressed: false,
+          relativeSlope: 1,
+        },
+      ],
+      ticks: [
+        { value: floor, isThreshold: false },
+        { value: midTick, isThreshold: false },
+        { value: fullMax, isThreshold: false },
+      ],
       toRatio: (v) =>
         Math.max(0, Math.min(1, Math.log10(Math.max(floor, v) / floor) / denom)),
     };
@@ -980,8 +1324,23 @@ export function computeLatencyAxis(
     min: 0,
     max: fullMax,
     rawPeak,
-    clampedCount: 0,
-    ticks: [0, midTick, fullMax],
+    outlierCount: 0,
+    thresholds: [],
+    bands: [
+      {
+        fromMs: 0,
+        toMs: fullMax,
+        startRatio: 0,
+        endRatio: 1,
+        compressed: false,
+        relativeSlope: 1,
+      },
+    ],
+    ticks: [
+      { value: 0, isThreshold: false },
+      { value: midTick, isThreshold: false },
+      { value: fullMax, isThreshold: false },
+    ],
     toRatio: (v) =>
       Math.max(0, Math.min(1, Math.log10(1 + Math.max(0, v)) / fMax)),
   };
