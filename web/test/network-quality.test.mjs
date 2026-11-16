@@ -1,23 +1,32 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import {
+  chartModeToNetworkSpan,
+  clampNetworkTimeWindow,
   clonePresetTargets,
   compareTargetIds,
+  computeLatencyAxis,
   defaultNetworkConfig,
   editableNetworkConfig,
   formatQualityValue,
   getTargetColor,
   isPublicIpv4,
   loadNetworkHistory,
+  MAX_NETWORK_RETENTION_SEC,
   mergeMetricsNetworkState,
   mergeNetworkPages,
   NETWORK_PRESETS,
   networkMeasurementKey,
   networkStatus,
   nextAvailableTargetId,
+  panNetworkTimeWindow,
+  parseLatencyScaleMode,
   qualityPlotRuns,
+  resolveNetworkFetchRange,
+  slicePointsForWindow,
   sortTargetsCanonical,
   validateNetworkConfig,
+  zoomOutNetworkTimeWindow,
 } from "../src/utils/networkQuality.ts";
 import {
   formatBytesPairCompact,
@@ -427,4 +436,161 @@ test("card metric compact formatters keep pairs concise and clamp fractional rat
   assert.equal(formatCompactRate(520), "520B");
   assert.equal(formatCompactRate(2.8 * mib), "2.8M");
   assert.equal(formatRateBpsText(0.4), "0 B/s");
+});
+
+test("computeLatencyAxis clamps rare outlier spikes in auto mode while preserving baseline headroom and linear/log modes", () => {
+  assert.equal(parseLatencyScaleMode(null), "auto");
+  assert.equal(parseLatencyScaleMode("linear"), "linear");
+  assert.equal(parseLatencyScaleMode("log"), "log");
+  assert.equal(parseLatencyScaleMode("unexpected"), "auto");
+
+  // Screenshot-like scenario: 3 series with steady 100-230ms baselines and 7 spikes around 1280-1330ms.
+  const cu = Array.from({ length: 90 }, (_, i) => 100 + (i % 16));
+  const cm = [...Array.from({ length: 89 }, (_, i) => 115 + (i % 26)), 1280];
+  const ct = [
+    ...Array.from({ length: 84 }, (_, i) => 110 + ((i * 7) % 121)),
+    1330,
+    1330,
+    1330,
+    1330,
+    1330,
+    1330,
+  ];
+
+  const autoAxis = computeLatencyAxis([ct, cu, cm], "auto");
+  assert.equal(autoAxis.mode, "auto");
+  assert.ok(autoAxis.max >= 260 && autoAxis.max <= 320, `expected clamped ceiling ~280-300, got ${autoAxis.max}`);
+  assert.equal(autoAxis.clampedCount, 7);
+  assert.equal(autoAxis.rawPeak, 1330);
+  assert.ok(autoAxis.toRatio(230) > 0.65);
+  assert.equal(autoAxis.toRatio(1330), 1);
+
+  const linearAxis = computeLatencyAxis([ct, cu, cm], "linear");
+  assert.equal(linearAxis.mode, "linear");
+  assert.equal(linearAxis.clampedCount, 0);
+  assert.ok(linearAxis.max >= 1460);
+  assert.equal(linearAxis.ticks[0], 0);
+  assert.equal(linearAxis.ticks[2], linearAxis.max);
+
+  const logAxis = computeLatencyAxis([ct, cu, cm], "log");
+  assert.equal(logAxis.mode, "log");
+  assert.equal(logAxis.clampedCount, 0);
+  assert.ok(logAxis.min > 0 && logAxis.min <= 80);
+  assert.ok(logAxis.toRatio(230) - logAxis.toRatio(100) >= 0.2);
+  assert.ok(logAxis.toRatio(1330) <= 1);
+  assert.ok(logAxis.ticks[0] < logAxis.ticks[1] && logAxis.ticks[1] < logAxis.ticks[2]);
+
+  const nearZeroLog = computeLatencyAxis([[0.2, 5, 1200]], "log");
+  assert.equal(nearZeroLog.min, 0);
+  assert.ok(nearZeroLog.ticks[1] > 0 && nearZeroLog.ticks[1] < nearZeroLog.max);
+
+  // Multi-region scenario: 7 low-latency targets + 1 steady 240-260ms target with 2 spikes at 1400ms.
+  const lowTargets = Array.from({ length: 7 }, () =>
+    Array.from({ length: 30 }, (_, i) => 20 + (i % 21)),
+  );
+  const highSteadyWithSpikes = [
+    ...Array.from({ length: 30 }, (_, i) => 240 + (i % 21)),
+    1400,
+    1400,
+  ];
+  const multiAxis = computeLatencyAxis([...lowTargets, highSteadyWithSpikes], "auto");
+  assert.ok(multiAxis.max >= 280 && multiAxis.max <= 400, `got ${multiAxis.max}`);
+  assert.equal(multiAxis.clampedCount, 2);
+
+  // Sustained congestion: 40% high values must NOT be falsely clamped as outliers.
+  const congested = [
+    ...Array.from({ length: 30 }, () => 50),
+    ...Array.from({ length: 20 }, () => 800),
+  ];
+  const congestedAxis = computeLatencyAxis([congested], "auto");
+  assert.equal(congestedAxis.clampedCount, 0);
+  assert.ok(congestedAxis.max >= 800);
+});
+
+test("time-window helpers map fetch ranges, reuse cached supersets, clamp, pan, zoom, and preserve line continuity", () => {
+  assert.equal(chartModeToNetworkSpan("live"), "1h");
+  assert.equal(chartModeToNetworkSpan("24h"), "24h");
+  assert.equal(chartModeToNetworkSpan("1y"), "1y");
+
+  const now = 10_000_000;
+  assert.equal(resolveNetworkFetchRange("15m", null, now), "1h");
+  assert.equal(resolveNetworkFetchRange("30m", null, now), "1h");
+  assert.equal(resolveNetworkFetchRange("1h", null, now), "1h");
+  assert.equal(resolveNetworkFetchRange("6h", null, now), "24h");
+  assert.equal(resolveNetworkFetchRange("24h", null, now), "24h");
+  assert.equal(resolveNetworkFetchRange("7d", null, now), "7d");
+  assert.equal(resolveNetworkFetchRange("30d", null, now), "30d");
+
+  assert.equal(
+    resolveNetworkFetchRange("1h", { start: now - 10800, end: now - 7200 }, now),
+    "24h",
+  );
+  assert.equal(
+    resolveNetworkFetchRange("1h", { start: now - 3 * 86400, end: now - 2 * 86400 }, now),
+    "7d",
+  );
+  assert.equal(
+    resolveNetworkFetchRange("1h", { start: now - 10 * 86400, end: now - 9 * 86400 }, now),
+    "30d",
+  );
+
+  // Cache superset reuse
+  assert.equal(
+    resolveNetworkFetchRange("1h", { start: now - 900, end: now }, now, new Set(["24h"])),
+    "24h",
+  );
+  assert.equal(
+    resolveNetworkFetchRange("7d", { start: now - 3 * 86400, end: now }, now, new Set(["30d"])),
+    "30d",
+  );
+
+  // Minimum zoom span & retention clamping
+  const tooNarrow = clampNetworkTimeWindow({ start: now - 20, end: now }, now, 20);
+  assert.equal(tooNarrow.end - tooNarrow.start, 120);
+  assert.equal(tooNarrow.end, now);
+
+  const tooEarly = clampNetworkTimeWindow(
+    { start: now - MAX_NETWORK_RETENTION_SEC - 5000, end: now - MAX_NETWORK_RETENTION_SEC - 1400 },
+    now,
+    20,
+  );
+  assert.equal(tooEarly.start, now - MAX_NETWORK_RETENTION_SEC);
+  assert.equal(tooEarly.end - tooEarly.start, 3600);
+
+  // Panning back and forth
+  const pannedBack = panNetworkTimeWindow({ start: now - 3600, end: now }, -1, now, 20, 3600);
+  assert.deepEqual(pannedBack, { start: now - 5400, end: now - 1800 });
+
+  // Snapping back to live-follow when duration matches active preset
+  const snappedLive = panNetworkTimeWindow(pannedBack, 1, now, 20, 3600);
+  assert.equal(snappedLive, null);
+
+  // Custom zoomed window stays custom when panned to latest edge
+  const customZoomed = { start: now - 1500, end: now - 900 };
+  const pannedForward = panNetworkTimeWindow(customZoomed, 1, now, 20, 3600);
+  assert.deepEqual(pannedForward, { start: now - 1200, end: now - 600 });
+  const pannedToLatestEdge = panNetworkTimeWindow({ start: now - 700, end: now - 100 }, 1, now, 20, 3600);
+  assert.deepEqual(pannedToLatestEdge, { start: now - 600, end: now });
+
+  // Zoom out doubles duration around midpoint
+  const zoomedOut = zoomOutNetworkTimeWindow({ start: now - 1600, end: now - 1000 }, now, 20);
+  assert.equal(zoomedOut.end - zoomedOut.start, 1200);
+  assert.equal(zoomedOut.start, now - 1900);
+  assert.equal(zoomedOut.end, now - 700);
+
+  // Slicing preserves boundary neighbor points so runs stay unbroken
+  const pts = [
+    point(1000, 1),
+    point(1020, 2),
+    point(1040, 3),
+    point(1060, 4),
+    point(1080, 5),
+    point(1100, 6),
+  ];
+  const sliced = slicePointsForWindow(pts, { start: 1040, end: 1060 });
+  assert.deepEqual(sliced.visiblePoints.map((p) => p.ts), [1040, 1060]);
+  assert.deepEqual(sliced.contextPoints.map((p) => p.ts), [1000, 1020, 1040, 1060, 1080, 1100]);
+  const runs = qualityPlotRuns(sliced.contextPoints, "latency_ms", 20);
+  assert.equal(runs.length, 1);
+  assert.equal(runs[0].length, 6);
 });

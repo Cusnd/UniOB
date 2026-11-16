@@ -1,5 +1,11 @@
 export type NetworkTargetId = string;
 export type NetworkQualityRange = "1h" | "24h" | "7d" | "30d";
+export type NetworkDisplaySpan = "15m" | "30m" | "1h" | "6h" | "24h" | "7d" | "30d";
+export type LatencyScaleMode = "auto" | "linear" | "log";
+export interface NetworkTimeWindow {
+  start: number;
+  end: number;
+}
 export type NetworkProbeResult = "ok" | "connect_timeout" | "connection_refused" | "dns_error" | "dns_timeout" | "network_error";
 
 export interface NetworkTarget {

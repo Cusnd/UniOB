@@ -45,16 +45,47 @@ window.fetch = async (input, init) => {
   }
   const range = url.searchParams.get("range") as NetworkQualityQuery["range"];
   const resolution = range === "7d" || range === "30d" ? 300 : 20;
+  const perPage =
+    range === "30d" ? 4320 : range === "7d" ? 1008 : range === "24h" ? 2160 : 90;
+  const totalPoints = perPage * 2;
   const page = url.searchParams.has("cursor") ? 1 : 0;
-  const series = globalConfig.targets.map((target, i) => ({ target_id: target.id, points: Array.from({ length: 45 }, (_, index) => {
-    const n = index + page * 45;
-    const failed = n >= 30 && n < 40 && i === 1;
-    const gap = n >= 55 && i === 0 ? 5 : 0;
-    return { ts: now - (95 - n) * resolution, segment_id: n < 65 ? `fixture:${target.id}` : `fixture:${target.id}:new`, target_revision: target.id,
-      target, remote_ip: `1.1.1.${i + 1}`, round_seq: resolution === 20 ? n + gap : null, result: resolution === 20 ? failed ? "connect_timeout" as const : "ok" as const : null,
-      latency_ms: failed ? null : 60 + i * 35 + Math.sin(n * 0.8) * 10, latency_max_ms: failed ? null : 90 + i * 35,
-      attempts: 6, failures: failed ? 6 : 0, success_count: failed ? 0 : 6, latency_sum_ms: failed ? 0 : 420, failure_rate_pct: failed ? 100 : 0 };
-  }) }));
+  const series = globalConfig.targets.map((target, i) => ({
+    target_id: target.id,
+    points: Array.from({ length: perPage }, (_, index) => {
+      const n = index + page * perPage;
+      const failed = n >= 30 && n < 40 && i === 1;
+      const gap = n >= 55 && i === 0 ? 5 : 0;
+      const spike =
+        !failed &&
+        ((i === 0 && (n === totalPoints - 18 || n === totalPoints - 52)) ||
+          (i === 2 && n === totalPoints - 8));
+      const baseLatency = 60 + i * 35 + Math.sin(n * 0.8) * 10;
+      return {
+        ts: now - (totalPoints + 5 - n) * resolution,
+        segment_id:
+          n < totalPoints - 30
+            ? `fixture:${target.id}`
+            : `fixture:${target.id}:new`,
+        target_revision: target.id,
+        target,
+        remote_ip: `1.1.1.${i + 1}`,
+        round_seq: resolution === 20 ? n + gap : null,
+        result:
+          resolution === 20
+            ? failed
+              ? ("connect_timeout" as const)
+              : ("ok" as const)
+            : null,
+        latency_ms: failed ? null : spike ? 1320 : baseLatency,
+        latency_max_ms: failed ? null : spike ? 1350 : 90 + i * 35,
+        attempts: 6,
+        failures: failed ? 6 : 0,
+        success_count: failed ? 0 : 6,
+        latency_sum_ms: failed ? 0 : 420,
+        failure_rate_pct: failed ? 100 : 0,
+      };
+    }),
+  }));
   return Response.json({ node_id: node.id, range, resolution_sec: resolution, server_time: now, state, series, next_cursor: page ? null : "page2" });
 };
 

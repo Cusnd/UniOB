@@ -1,13 +1,17 @@
 import type {
+  LatencyScaleMode,
+  NetworkDisplaySpan,
   NetworkQualityConfig,
   NetworkQualityConfigResponse,
   NetworkQualityPoint,
   NetworkQualityQuery,
+  NetworkQualityRange,
   NetworkQualityState,
   NetworkTarget,
   NetworkTargetId,
+  NetworkTimeWindow,
 } from "../types/network-quality.ts";
-import type { NodeMetricsSnapshot } from "../types.ts";
+import type { MetricsRange, NodeMetricsSnapshot } from "../types.ts";
 
 export const NETWORK_TARGET_IDS = ["ct", "cu", "cm"] as const;
 export const DEFAULT_INTERVAL_SEC = 20;
@@ -605,4 +609,380 @@ export function formatQualityValue(
   return value == null || !Number.isFinite(value)
     ? "—"
     : `${value.toFixed(1)}${suffix}`;
+}
+
+export const MAX_NETWORK_RETENTION_SEC = 2592000;
+
+export const NETWORK_SPAN_SECONDS: Record<NetworkDisplaySpan, number> = {
+  "15m": 900,
+  "30m": 1800,
+  "1h": 3600,
+  "6h": 21600,
+  "24h": 86400,
+  "7d": 604800,
+  "30d": 2592000,
+};
+
+export const NETWORK_DISPLAY_SPAN_OPTIONS: readonly {
+  value: NetworkDisplaySpan;
+  label: string;
+}[] = [
+  { value: "15m", label: "15m" },
+  { value: "30m", label: "30m" },
+  { value: "1h", label: "1h" },
+  { value: "6h", label: "6h" },
+  { value: "24h", label: "24h" },
+  { value: "7d", label: "7d" },
+  { value: "30d", label: "30d" },
+];
+
+export function chartModeToNetworkSpan(
+  chartMode: "live" | MetricsRange,
+): NetworkDisplaySpan | "1y" {
+  return chartMode === "live" ? "1h" : chartMode;
+}
+
+export function minNetworkZoomSpanSec(resolutionSec: number): number {
+  return Math.max(120, Math.round(resolutionSec) * 4);
+}
+
+export function resolveNetworkFetchRange(
+  span: NetworkDisplaySpan,
+  customWindow: NetworkTimeWindow | null,
+  anchorNowSec: number,
+  cachedRanges?: ReadonlySet<NetworkQualityRange>,
+): NetworkQualityRange {
+  if (customWindow === null) {
+    if (span === "15m" || span === "30m" || span === "1h") return "1h";
+    if (span === "6h" || span === "24h") return "24h";
+    return span;
+  }
+  const lookbackSec = Math.max(0, anchorNowSec - customWindow.start);
+  if (lookbackSec <= 3540) {
+    return cachedRanges?.has("24h") && !cachedRanges.has("1h") ? "24h" : "1h";
+  }
+  if (lookbackSec <= 86340) return "24h";
+  if (lookbackSec <= 604740) {
+    return cachedRanges?.has("30d") && !cachedRanges.has("7d") ? "30d" : "7d";
+  }
+  return "30d";
+}
+
+export function clampNetworkTimeWindow(
+  window: NetworkTimeWindow,
+  anchorNowSec: number,
+  resolutionSec = 20,
+): NetworkTimeWindow {
+  const earliest = anchorNowSec - MAX_NETWORK_RETENTION_SEC;
+  const latest = anchorNowSec;
+  const rawStart = Math.min(window.start, window.end);
+  const rawEnd = Math.max(window.start, window.end);
+  const minSpan = minNetworkZoomSpanSec(resolutionSec);
+  const duration = Math.min(
+    MAX_NETWORK_RETENTION_SEC,
+    Math.max(minSpan, Math.round(rawEnd - rawStart)),
+  );
+  const mid = (rawStart + rawEnd) / 2;
+  let start = Math.round(mid - duration / 2);
+  let end = start + duration;
+  if (start < earliest) {
+    start = earliest;
+    end = earliest + duration;
+  }
+  if (end > latest) {
+    end = latest;
+    start = Math.max(earliest, latest - duration);
+  }
+  return { start, end };
+}
+
+export function panNetworkTimeWindow(
+  currentWindow: NetworkTimeWindow,
+  direction: -1 | 1,
+  anchorNowSec: number,
+  resolutionSec = 20,
+  activePresetSpanSec?: number,
+): NetworkTimeWindow | null {
+  const duration = Math.max(
+    minNetworkZoomSpanSec(resolutionSec),
+    Math.round(currentWindow.end - currentWindow.start),
+  );
+  const step = Math.max(60, Math.round(duration * 0.5));
+  if (direction === 1) {
+    const nextEnd = currentWindow.end + step;
+    if (nextEnd >= anchorNowSec - 5) {
+      if (
+        activePresetSpanSec !== undefined &&
+        Math.abs(duration - activePresetSpanSec) <= 5
+      ) {
+        return null;
+      }
+      return clampNetworkTimeWindow(
+        { start: anchorNowSec - duration, end: anchorNowSec },
+        anchorNowSec,
+        resolutionSec,
+      );
+    }
+    return clampNetworkTimeWindow(
+      { start: currentWindow.start + step, end: nextEnd },
+      anchorNowSec,
+      resolutionSec,
+    );
+  }
+  return clampNetworkTimeWindow(
+    { start: currentWindow.start - step, end: currentWindow.end - step },
+    anchorNowSec,
+    resolutionSec,
+  );
+}
+
+export function zoomOutNetworkTimeWindow(
+  currentWindow: NetworkTimeWindow,
+  anchorNowSec: number,
+  resolutionSec = 20,
+): NetworkTimeWindow {
+  const duration =
+    Math.max(
+      minNetworkZoomSpanSec(resolutionSec),
+      currentWindow.end - currentWindow.start,
+    ) * 2;
+  const mid = (currentWindow.start + currentWindow.end) / 2;
+  return clampNetworkTimeWindow(
+    { start: mid - duration / 2, end: mid + duration / 2 },
+    anchorNowSec,
+    resolutionSec,
+  );
+}
+
+function lowerBoundTs(
+  points: readonly NetworkQualityPoint[],
+  ts: number,
+): number {
+  let lo = 0;
+  let hi = points.length;
+  while (lo < hi) {
+    const mid = (lo + hi) >> 1;
+    if (points[mid]!.ts < ts) lo = mid + 1;
+    else hi = mid;
+  }
+  return lo;
+}
+
+function upperBoundTs(
+  points: readonly NetworkQualityPoint[],
+  ts: number,
+): number {
+  let lo = 0;
+  let hi = points.length;
+  while (lo < hi) {
+    const mid = (lo + hi) >> 1;
+    if (points[mid]!.ts <= ts) lo = mid + 1;
+    else hi = mid;
+  }
+  return lo;
+}
+
+export function slicePointsForWindow(
+  points: readonly NetworkQualityPoint[],
+  window: NetworkTimeWindow,
+): {
+  contextPoints: NetworkQualityPoint[];
+  visiblePoints: NetworkQualityPoint[];
+} {
+  if (!points.length) return { contextPoints: [], visiblePoints: [] };
+  const firstVisible = lowerBoundTs(points, window.start);
+  const afterVisible = upperBoundTs(points, window.end);
+  const visiblePoints = points.slice(firstVisible, afterVisible);
+  const contextStart = Math.max(0, firstVisible - 2);
+  const contextEnd = Math.min(points.length, afterVisible + 2);
+  return {
+    contextPoints: points.slice(contextStart, contextEnd),
+    visiblePoints,
+  };
+}
+
+export function parseLatencyScaleMode(
+  val: string | null | undefined,
+): LatencyScaleMode {
+  return val === "linear" || val === "log" || val === "auto" ? val : "auto";
+}
+
+function niceEvenCeiling(raw: number): number {
+  if (!Number.isFinite(raw) || raw <= 2) return 2;
+  if (raw <= 10) return Math.ceil(raw / 2) * 2;
+  const k = Math.max(0, Math.floor(Math.log10(raw)) - 1);
+  const scale = Math.pow(10, k);
+  const target = Math.ceil(raw);
+  for (const m of [10, 12, 16, 20, 24, 30, 40, 50, 60, 80, 100]) {
+    const candidate = m * scale;
+    if (candidate >= target) return candidate;
+  }
+  return Math.ceil(target / 2) * 2;
+}
+
+function quantileSorted(sorted: readonly number[], q: number): number {
+  if (!sorted.length) return 0;
+  if (sorted.length === 1) return sorted[0]!;
+  const pos = (sorted.length - 1) * q;
+  const lo = Math.floor(pos);
+  const hi = Math.ceil(pos);
+  return sorted[lo]! + (sorted[hi]! - sorted[lo]!) * (pos - lo);
+}
+
+export interface LatencyAxisModel {
+  mode: LatencyScaleMode;
+  min: number;
+  max: number;
+  rawPeak: number;
+  clampedCount: number;
+  ticks: [number, number, number];
+  toRatio: (value: number) => number;
+}
+
+const LOG_FLOOR_CANDIDATES = [500, 200, 100, 50, 20, 10, 5] as const;
+const LOG_NICE_TICKS = [
+  1, 2, 3, 5, 10, 15, 20, 25, 30, 40, 50, 60, 80, 100, 120, 150, 200, 250, 300,
+  400, 500, 600, 800, 1000, 1200, 1500, 2000, 3000, 5000,
+] as const;
+
+export function computeLatencyAxis(
+  seriesValues: readonly (readonly number[])[],
+  mode: LatencyScaleMode,
+): LatencyAxisModel {
+  const nonEmpty: number[][] = [];
+  for (const series of seriesValues) {
+    const clean = series
+      .filter((v) => typeof v === "number" && Number.isFinite(v) && v >= 0)
+      .sort((a, b) => a - b);
+    if (clean.length) nonEmpty.push(clean);
+  }
+  const all = nonEmpty.flat().sort((a, b) => a - b);
+  if (!all.length) {
+    return {
+      mode,
+      min: 0,
+      max: 100,
+      rawPeak: 0,
+      clampedCount: 0,
+      ticks: [0, 50, 100],
+      toRatio: (v) => Math.max(0, Math.min(1, v / 100)),
+    };
+  }
+
+  const rawPeak = all[all.length - 1]!;
+  const fullMax = niceEvenCeiling(Math.max(2, rawPeak * 1.1));
+
+  if (mode === "linear") {
+    return {
+      mode: "linear",
+      min: 0,
+      max: fullMax,
+      rawPeak,
+      clampedCount: 0,
+      ticks: [0, fullMax / 2, fullMax],
+      toRatio: (v) => Math.max(0, Math.min(1, v / fullMax)),
+    };
+  }
+
+  if (mode === "auto") {
+    const perSeriesNormals = nonEmpty.map((vals) => {
+      if (vals.length < 6) return vals[vals.length - 1]!;
+      const q1 = quantileSorted(vals, 0.25);
+      const median = quantileSorted(vals, 0.5);
+      const q3 = quantileSorted(vals, 0.75);
+      const spread = Math.max(q3 - q1, median * 0.25, 15);
+      const fence = q3 + 2.5 * spread;
+      let maxInFence = q3;
+      for (let i = vals.length - 1; i >= 0; i--) {
+        if (vals[i]! <= fence) {
+          maxInFence = Math.max(q3, vals[i]!);
+          break;
+        }
+      }
+      return maxInFence;
+    });
+    const normalPeak = Math.max(1, ...perSeriesNormals);
+    if (rawPeak > normalPeak * 1.45) {
+      const candidateMax = niceEvenCeiling(Math.max(2, normalPeak * 1.18));
+      if (candidateMax < fullMax * 0.85) {
+        const clampedCount = all.filter((v) => v > candidateMax).length;
+        if (clampedCount > 0) {
+          return {
+            mode: "auto",
+            min: 0,
+            max: candidateMax,
+            rawPeak,
+            clampedCount,
+            ticks: [0, candidateMax / 2, candidateMax],
+            toRatio: (v) => Math.max(0, Math.min(1, v / candidateMax)),
+          };
+        }
+      }
+    }
+    return {
+      mode: "auto",
+      min: 0,
+      max: fullMax,
+      rawPeak,
+      clampedCount: 0,
+      ticks: [0, fullMax / 2, fullMax],
+      toRatio: (v) => Math.max(0, Math.min(1, v / fullMax)),
+    };
+  }
+
+  // Log mode
+  const rawMin = all[0]!;
+  const floor = LOG_FLOOR_CANDIDATES.find(
+    (c) => c <= rawMin * 0.8 && c <= fullMax / 8,
+  );
+  if (floor !== undefined) {
+    const denom = Math.log10(fullMax / floor);
+    const geoMid = Math.sqrt(floor * fullMax);
+    const validMids = LOG_NICE_TICKS.filter((t) => t > floor && t < fullMax);
+    let midTick = Math.max(
+      floor + 1,
+      Math.min(fullMax - 1, Math.round(geoMid)),
+    );
+    if (validMids.length) {
+      midTick = validMids.reduce((best, cand) =>
+        Math.abs(Math.log10(cand) - Math.log10(geoMid)) <
+        Math.abs(Math.log10(best) - Math.log10(geoMid))
+          ? cand
+          : best,
+      );
+    }
+    return {
+      mode: "log",
+      min: floor,
+      max: fullMax,
+      rawPeak,
+      clampedCount: 0,
+      ticks: [floor, midTick, fullMax],
+      toRatio: (v) =>
+        Math.max(0, Math.min(1, Math.log10(Math.max(floor, v) / floor) / denom)),
+    };
+  }
+
+  const fMax = Math.log10(1 + fullMax);
+  const rawMid = Math.pow(10, fMax * 0.5) - 1;
+  const validMids = LOG_NICE_TICKS.filter((t) => t > 0 && t < fullMax);
+  let midTick = Math.max(1, Math.min(fullMax - 1, Math.round(rawMid)));
+  if (validMids.length) {
+    midTick = validMids.reduce((best, cand) =>
+      Math.abs(Math.log10(1 + cand) - fMax * 0.5) <
+      Math.abs(Math.log10(1 + best) - fMax * 0.5)
+        ? cand
+        : best,
+    );
+  }
+  return {
+    mode: "log",
+    min: 0,
+    max: fullMax,
+    rawPeak,
+    clampedCount: 0,
+    ticks: [0, midTick, fullMax],
+    toRatio: (v) =>
+      Math.max(0, Math.min(1, Math.log10(1 + Math.max(0, v)) / fMax)),
+  };
 }
